@@ -1,0 +1,40 @@
+infer_results/
+pretrained_models/
+__pycache__/
+mini-qwen/results
+ref_repos/
+.DS_Store
+.venv/
+venv/
+
+MELD.Raw
+checkpoints/
+
+*.csv
+*.wav
+*.zip
+*.mp3
+*.json
+*.png
+*.mp4
+*.pt
+*.out
+
+# Ignore everything in index2origin
+index2origin/*
+
+# Re-include these directories so files inside can be re-included
+!index2origin/indextts/
+!index2origin/
+
+# Now include specific files
+!index2origin/indextts/infer_v2.py
+!index2origin/test.py
+
+# But still ignore all other files inside indextts
+index2origin/indextts/*
+!index2origin/indextts/infer_v2.py
+!index2origin/batchgen_speech.py
+
+# data
+ESD/
