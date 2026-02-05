@@ -38,3 +38,6 @@ index2origin/indextts/*
 
 # data
 ESD/
+
+# convert mel spectrograms
+mel_convert/test/

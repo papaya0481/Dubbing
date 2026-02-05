@@ -36,16 +36,15 @@ if __name__ == "__main__":
     )
     
     texts = [
-        'Oh-oh, you’re-you’re fellow scholars.', 
-        'What exactly were you looking for, hmm? Perhaps, perhaps Dr. Chester Stock’s musings on the Smiledon Californicus?'
+        "Oh-oh, you're-you're fellow scholars.", "What exactly were you looking for, hmm? Perhaps, perhaps Dr. Chester Stock's musings on the Smiledon Californicus?"
     ]
     
     emotions = [
-        "Angry",
-        "Happy",
+        "surprise",
+        "neutral",
     ]
     
-    emotion_prompt_path = "/data2/ruixin/datasets/MELD_clips/audios/vocals/dev_sample_2_vocals.wav"
+    emotion_prompt_path = "/data2/ruixin/datasets/MELD_clips/audios/ost/dev_sample_2.wav"
     
     text = "|".join(texts)
     emo_text = "|".join(emotions)
@@ -60,7 +59,7 @@ if __name__ == "__main__":
     output = tts.infer(
         spk_audio_prompt=emotion_prompt_path,
         text=text,
-        output_path="ctest2.wav",
+        output_path="test_long1_2.wav",
         style_prompt=None,
         emo_audio_prompt=None,
         emo_alpha=0,
@@ -82,7 +81,7 @@ if __name__ == "__main__":
         top_k=30,
         temperature=0.8,
         length_penalty=0,
-        num_beams=3,
+        num_beams=2,
         repetition_penalty=10.0,
         max_mel_tokens=2000
     )
