@@ -294,7 +294,7 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None, style_prompt=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_sentence=120, **generation_kwargs):
+              verbose=False, max_text_tokens_per_sentence=120, save_attention_maps=False, **generation_kwargs):
         print(">> start inference...")
         self._set_gr_progress(0, "start inference...")
         if verbose:
@@ -507,6 +507,8 @@ class IndexTTS2:
 
         if output_path is not None and "output_path" not in generation_kwargs:
             generation_kwargs["output_path"] = output_path
+        
+        generation_kwargs["save_attention_maps"] = save_attention_maps
 
         wavs = []
         gpt_gen_time = 0

@@ -638,7 +638,10 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
             
             if self.hmm is None:
                 self.hmm = StreamingHMMAligner(num_beams=B, num_text_tokens=Sk, device=all_layer_attn.device)
-            hmm_center, hmm_idx = self.hmm.step(all_layer_attn, attn_map_processor=self.attn_map_processor, **model_kwargs)
+            
+            # 只有在需要保存attention maps时才传递processor
+            processor = self.attn_map_processor if model_kwargs.get("save_attention_maps", False) else None
+            hmm_center, hmm_idx = self.hmm.step(all_layer_attn, attn_map_processor=processor, **model_kwargs)
             suspect_twist_pos = (hmm_center >= text_last_pos_per_beam + 0.5)  # bool tensor
             if suspect_twist_pos.any():
                 indices = torch.where(suspect_twist_pos)[0]
@@ -815,14 +818,15 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
             text_last_pos_per_beam = text_last_position_array[attention_phase]  # [B, ]
             
             # TODO: 输出情感转换内容。
-            self.attn_map_processor.process_emotion_twist_detect(
-                attn_wo_head=attn_wo_head,
-                method=method,
-                token_idx=token_idx,
-                attention_phase=attention_phase,
-                output_path=model_kwargs.get("output_path", None),
-                text_last_token_position=model_kwargs.get('text_last_token_position', None),
-            )
+            if model_kwargs.get("save_attention_maps", False):
+                self.attn_map_processor.process_emotion_twist_detect(
+                    attn_wo_head=attn_wo_head,
+                    method=method,
+                    token_idx=token_idx,
+                    attention_phase=attention_phase,
+                    output_path=model_kwargs.get("output_path", None),
+                    text_last_token_position=model_kwargs.get('text_last_token_position', None),
+                )
             
             # 1. 先获取上一时刻的位置 (Handle step 0 or empty history)
             if self.past_attn_pos is not None and len(self.past_attn_pos) > 0:
@@ -912,14 +916,15 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
             mas_mu = self._update_mas_mu_w2(attn_wo_head)
             
             # TODO: 输出情感转换内容。
-            self.attn_map_processor.process_emotion_twist_detect(
-                attn_wo_head=attn_wo_head,
-                method=method,
-                token_idx=mas_mu,
-                attention_phase=attention_phase,
-                output_path=model_kwargs.get("output_path", None),
-                text_last_token_position=model_kwargs.get('text_last_token_position', None),
-            )
+            if model_kwargs.get("save_attention_maps", False):
+                self.attn_map_processor.process_emotion_twist_detect(
+                    attn_wo_head=attn_wo_head,
+                    method=method,
+                    token_idx=mas_mu,
+                    attention_phase=attention_phase,
+                    output_path=model_kwargs.get("output_path", None),
+                    text_last_token_position=model_kwargs.get('text_last_token_position', None),
+                )
             suspect_twist_pos = (mas_mu >= text_last_pos_per_beam + 1)  # bool tensor
             if suspect_twist_pos.any():
                 indices = torch.where(suspect_twist_pos)[0]
@@ -1956,6 +1961,9 @@ class UnifiedVoice(nn.Module):
             print(f"   Target per segment: {target_duration_tokens}")
             print(f"   Total target: {sum(target_duration_tokens)} semantic tokens")
 
+        # 从generate kwargs中提取save_attention_maps参数（不传给generate）
+        save_attention_maps = hf_generate_kwargs.pop("save_attention_maps", False)
+        
         max_length = (trunc_index + self.max_mel_tokens - 1) if max_generate_length is None else trunc_index + max_generate_length
         output = self.inference_model.generate(inputs, 
                                             bos_token_id=self.start_mel_token, pad_token_id=self.stop_mel_token,
@@ -1966,9 +1974,12 @@ class UnifiedVoice(nn.Module):
                                             input_full_attention_mask=input_full_attention_mask,
                                             input_attention_masks=input_attention_masks,
                                             dynamic_cond_mask_idx=dynamic_cond_mask_idx,
+                                            save_attention_maps=save_attention_maps,
                                             **hf_generate_kwargs)
         
-        self.inference_model.attn_map_processor.save_attention_maps(input_embeds_len=inputs_embeds.shape[1],)
+        # 只有在需要时才保存attention maps
+        if save_attention_maps:
+            self.inference_model.attn_map_processor.save_attention_maps(input_embeds_len=inputs_embeds.shape[1],)
         # self.inference_model.hmm = None   # 清除hmm实例
         
         output.sequences = output.sequences[:, trunc_index:]  # remove the input part

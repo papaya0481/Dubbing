@@ -27,16 +27,17 @@ def seconds_to_mel_tokens(seconds, mel_to_sec_ratio=0.02):
 
 if __name__ == "__main__":
     
+    checkpoint_path = "/data2/ruixin/index-tts2/checkpoints"
+    
     tts = IndexTTS2(
-        model_dir="checkpoints",
-        cfg_path="checkpoints/config.yaml",
+        model_dir=checkpoint_path,
+        cfg_path=f"{checkpoint_path}/config.yaml",
         is_fp16=False
     )
     
     texts = [
-        "小狗摇着尾巴跑来，",
-        "忽然一声巨响，",
-        "黑暗中我屏住了呼吸。",
+        'Oh-oh, you’re-you’re fellow scholars.', 
+        'What exactly were you looking for, hmm? Perhaps, perhaps Dr. Chester Stock’s musings on the Smiledon Californicus?'
     ]
     
     emotions = [
@@ -44,11 +45,7 @@ if __name__ == "__main__":
         "Happy",
     ]
     
-    emotion_prompt_path = [
-        "ESD/ESD/0009/Happy/0009_000861.wav",
-        "ESD/ESD/0009/Surprise/0009_001740.wav",
-        "ESD/ESD/0009/Sad/0009_001114.wav",
-    ]
+    emotion_prompt_path = "/data2/ruixin/datasets/MELD_clips/audios/vocals/dev_sample_2_vocals.wav"
     
     text = "|".join(texts)
     emo_text = "|".join(emotions)
@@ -63,12 +60,12 @@ if __name__ == "__main__":
     output = tts.infer(
         spk_audio_prompt=emotion_prompt_path,
         text=text,
-        output_path="chinese_0208.wav",
+        output_path="ctest2.wav",
         style_prompt=None,
         emo_audio_prompt=None,
         emo_alpha=0,
-        use_emo_text=False,
-        emo_text=None,
+        use_emo_text=True,
+        emo_text=emo_text,
         use_random=False,
         verbose=True,
         emo_vector=None,
@@ -76,6 +73,7 @@ if __name__ == "__main__":
         # duration_targets=cumulative_targets,
         target_duration_tokens=target_duration_tokens,
         method="hmm",                          # 使用HMM段切换
+        save_attention_maps=False,
         
         # 生成参数
         max_text_tokens_per_sentence=200,

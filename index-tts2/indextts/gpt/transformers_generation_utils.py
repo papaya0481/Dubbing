@@ -1402,6 +1402,8 @@ class GenerationMixin:
             model_args |= {"method"}
         if "target_duration_tokens" in model_kwargs:
             model_args |= {"target_duration_tokens"}
+        if "save_attention_maps" in model_kwargs:
+            model_args |= {"save_attention_maps"}
 
         for key, value in model_kwargs.items():
             if value is not None and key not in model_args:
