@@ -10,7 +10,7 @@ import os
 wav_dir = 'mel_convert/test'
 tg_dir = 'mel_convert/test/aligned'
 # 输出的图片也存放在一个文件夹里
-LEVEL_NAME = 'phones'  # 选择对齐的层级名称，通常是 'words' 或 'phones'
+LEVEL_NAME = 'words'  # 选择对齐的层级名称，通常是 'words' 或 'phones'
 output_dir = f'mel_convert/test/images_{LEVEL_NAME}'
 
 
