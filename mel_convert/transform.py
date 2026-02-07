@@ -1,539 +1,391 @@
-"""
-音频变换器：根据目标TextGrid的时间轴，将源音频进行变速和间隙调整
-支持两种后端：
-1. Praat (PSOLA/Resample) - 使用 parselmouth
-2. Librosa (Phase Vocoder) - 使用 librosa + numpy
-"""
-
 import tgt
+import torch
+import torchaudio
+import torch.nn.functional as F
+import numpy as np
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List
 from abc import ABC, abstractmethod
 
+# 尝试导入 bigvgan，如果没有则提示
+try:
+    import bigvgan
+except ImportError:
+    raise ImportError("请安装 BigVGAN: pip install bigvgan einops")
 
+# ==========================================
+# 1. 基类定义 (保持不变)
+# ==========================================
 class BaseAudioTransformer(ABC):
-    """音频变换器基类"""
+    """
+    音频变换器抽象基类
+    """
     
     def __init__(self, 
                  min_gap_threshold: float = 0.001, 
                  max_stretch: float = 8.0,
                  verbose: bool = True):
-        """
-        Args:
-            min_gap_threshold: 最小间隙阈值（秒）
-            max_stretch: 最大拉伸倍率
-            verbose: 是否输出详细信息
-        """
         self.min_gap_threshold = min_gap_threshold
         self.max_stretch = max_stretch
         self.verbose = verbose
     
     @abstractmethod
-    def load_audio(self, path: str):
-        """加载音频文件"""
-        pass
+    def load_audio(self, path: str): pass
     
     @abstractmethod
-    def get_duration(self, audio) -> float:
-        """获取音频时长"""
-        pass
+    def get_duration(self, audio) -> float: pass
     
     @abstractmethod
-    def get_sample_rate(self, audio) -> int:
-        """获取采样率"""
-        pass
+    def get_sample_rate(self, audio) -> int: pass
     
     @abstractmethod
-    def extract_segment(self, audio, start: float, end: float):
-        """提取音频片段"""
-        pass
+    def extract_segment(self, audio, start: float, end: float): pass
     
     @abstractmethod
-    def create_silence(self, duration: float, sample_rate: int):
-        """创建静音片段"""
-        pass
+    def create_silence(self, duration: float, sample_rate: int): pass
     
     @abstractmethod
-    def time_stretch(self, audio_segment, stretch_factor: float, is_noise: bool = False):
-        """时间拉伸"""
-        pass
+    def time_stretch(self, audio_segment, stretch_factor: float, is_noise: bool = False): pass
     
     @abstractmethod
-    def concatenate_segments(self, segments: List, sample_rate: int):
-        """拼接音频片段"""
-        pass
+    def concatenate_segments(self, segments: List, sample_rate: int): pass
     
     @abstractmethod
-    def save_audio(self, audio, output_path: str):
-        """保存音频"""
-        pass
+    def save_audio(self, audio, output_path: str, sample_rate: int = None): pass
     
     def get_real_words(self, tier: tgt.IntervalTier) -> List[tgt.Interval]:
-        """提取实词列表（过滤掉空白和静音）"""
         return [i for i in tier if i.text not in ['', 'sp', 'sil', '<eps>']]
+
+    def transform(self, *args, **kwargs):
+        raise NotImplementedError("Subclasses must implement the transform method.")
+
+
+# ==========================================
+# 2. NVIDIA BigVGAN Transformer 实现
+# ==========================================
+class BigVGANTransformer(BaseAudioTransformer):
+    """
+    基于 NVIDIA BigVGAN V2 的变换器
+    流程: Wav -> Log-Mel -> Interpolate (Resize) -> BigVGAN -> Wav
+    特点: 
+    1. 在 Mel 频谱上进行线性插值，完美保持音调。
+    2. BigVGAN V2 具有极强的鲁棒性，能修复插值带来的频谱模糊。
+    3. 能够处理未见过的说话人 (Zero-shot)。
+    """
     
-    def transform(self, 
-                  source_audio_path: str,
-                  source_textgrid_path: str,
-                  target_textgrid_path: str,
-                  target_audio_path: str,
-                  output_path: str,
-                  tier_name: str = "words") -> bool:
-        """
-        执行音频变换
+    def __init__(self,
+                 model_id: str = "nvidia/bigvgan_v2_22khz_80band_256x",
+                 min_gap_threshold: float = 0.001,
+                 device: str = "cuda", 
+                 verbose: bool = True):
+        super().__init__(min_gap_threshold, 8.0, verbose)
+        self.device = device
         
-        Args:
-            source_audio_path: 源音频文件路径
-            source_textgrid_path: 源TextGrid文件路径
-            target_textgrid_path: 目标TextGrid文件路径
-            target_audio_path: 目标音频文件路径（用于获取目标时长）
-            output_path: 输出音频文件路径
-            tier_name: TextGrid中的层级名称
+        if verbose: print(f"正在加载 BigVGAN 模型: {model_id} ...")
+        
+        # 1. 加载 BigVGAN 模型
+        # use_cuda_kernel=False 兼容性更好，如果报错可以尝试 True
+        self.model = bigvgan.BigVGAN.from_pretrained(model_id, use_cuda_kernel=False).to(self.device)
+        self.model.remove_weight_norm()
+        self.model.eval()
+        
+        # 2. 从模型配置中获取 Mel 参数
+        # BigVGAN 对输入 Mel 的参数极度敏感，必须完全匹配
+        self.sample_rate = self.model.h.sampling_rate # 通常是 22050
+        self.n_fft = self.model.h.n_fft               # 1024
+        self.hop_length = self.model.h.hop_size       # 256
+        self.win_length = self.model.h.win_size       # 1024
+        self.n_mels = self.model.h.num_mels           # 80
+        self.fmin = self.model.h.fmin
+        # fmax 为 None 时自动设为采样率的一半 (librosa/torchaudio 的默认行为)
+        self.fmax = self.model.h.fmax if self.model.h.fmax is not None else self.sample_rate / 2.0
+        
+        if verbose:
+            print(f"✅ BigVGAN 加载成功")
+            print(f"   Sample Rate: {self.sample_rate} Hz")
+            print(f"   Mel Bands: {self.n_mels}")
+            print(f"   fmin: {self.fmin} Hz, fmax: {self.fmax} Hz")
+            print(f"   n_fft: {self.n_fft}, win_length: {self.win_length}")
+            print(f"   Hop Length: {self.hop_length}")
+
+        # 3. 初始化配套的 Mel 提取器
+        self.mel_transform = torchaudio.transforms.MelSpectrogram(
+            sample_rate=self.sample_rate,
+            n_fft=self.n_fft,
+            win_length=self.win_length,
+            hop_length=self.hop_length,
+            n_mels=self.n_mels,
+            f_min=self.fmin,
+            f_max=self.fmax,
+            power=2.0,
+            normalized=False,
+            center=True # BigVGAN 官方实现使用 center padding
+        ).to(self.device)
+
+    def load_audio(self, path: str):
+        """加载音频 -> 重采样 -> 返回 (wav_tensor, sr)"""
+        wav, sr = torchaudio.load(path)
+        wav = wav.to(self.device)
+        
+        # 必须重采样到 BigVGAN 的采样率 (24kHz)
+        if sr != self.sample_rate:
+            if self.verbose: 
+                # print(f"Resampling {sr} -> {self.sample_rate}")
+                pass
+            resampler = torchaudio.transforms.Resample(sr, self.sample_rate).to(self.device)
+            wav = resampler(wav)
             
-        Returns:
-            是否成功
+        # 确保是 (Batch, Time)
+        if wav.dim() == 1:
+            wav = wav.unsqueeze(0)
+            
+        return wav, self.sample_rate
+
+    def get_duration(self, audio) -> float:
+        # audio: (wav, sr)
+        return audio[0].shape[-1] / audio[1]
+
+    def get_sample_rate(self, audio) -> int:
+        return audio[1]
+
+    def wav_to_mel(self, wav: torch.Tensor) -> torch.Tensor:
         """
+        波形转 Log-Mel 频谱 (符合 BigVGAN 输入要求)
+        官方流程: STFT -> Magnitude (power=2) -> Sqrt -> Mel Filterbank -> Log
+        """
+        # 1. Extract Mel (power=2.0 已在 mel_transform 中设置)
+        # center=True 时,PyTorch 会自动处理 padding
+        mel = self.mel_transform(wav)  # 输出: magnitude^2
+        
+        # 2. 取平方根获得线性幅度谱
+        mel = torch.sqrt(mel + 1e-9)
+        
+        # 3. Logarithm (BigVGAN 使用 dynamic_range_compression)
+        # 与官方 spectral_normalize_torch 等价
+        log_mel = torch.log(torch.clamp(mel, min=1e-5))
+        
+        return log_mel
+
+    def extract_segment(self, audio, start: float, end: float):
+        """
+        提取波形片段并直接转换为 Log-Mel
+        Returns: Log-Mel Tensor (1, n_mels, time)
+        """
+        wav, sr = audio
+        if end <= start: return None
+        
+        start_idx = int(round(start * sr))
+        end_idx = int(round(end * sr))
+        
+        start_idx = max(0, start_idx)
+        end_idx = min(wav.shape[-1], end_idx)
+        
+        if start_idx >= end_idx: return None
+        
+        wav_seg = wav[:, start_idx:end_idx]
+        
+        # 立即转为 Mel
+        with torch.no_grad():
+            mel_seg = self.wav_to_mel(wav_seg)
+            
+        return mel_seg
+
+    def create_silence(self, duration: float, sample_rate: int):
+        """生成静音的 Mel 频谱"""
+        if duration <= self.min_gap_threshold: return None
+        
+        # 为了获得准确的静音数值（Log Mel 下不是0，而是负数），我们生成静音波形跑一遍流程
+        num_samples = int(duration * sample_rate)
+        silent_wav = torch.zeros((1, num_samples), device=self.device)
+        
+        with torch.no_grad():
+            silent_mel = self.wav_to_mel(silent_wav)
+            
+        return silent_mel
+
+    def time_stretch(self, audio_segment, stretch_factor: float, is_noise: bool = False):
+        """
+        在 Mel 频谱上进行线性插值 (Linear Interpolation)
+        """
+        if audio_segment is None: return None
+        
+        current_frames = audio_segment.shape[-1]
+        target_frames = int(current_frames * stretch_factor)
+        
+        return self.time_stretch_exact(audio_segment, target_frames)
+        
+    def time_stretch_exact(self, mel_segment, target_frames: int):
+        """精确拉伸到指定帧数"""
+        if mel_segment is None or target_frames <= 0:
+            return torch.zeros((1, self.n_mels, 0), device=self.device)
+            
+        # 线性插值 (Image Resize)
+        # Input: (Batch, Channels, Length)
+        mel_out = F.interpolate(
+            mel_segment,
+            size=target_frames,
+            mode='linear',
+            align_corners=False
+        )
+        return mel_out
+
+    def concatenate_segments(self, segments: List, sample_rate: int):
+        # 这里的 segments 都是 Mel
+        valid = [s for s in segments if s is not None and s.shape[-1] > 0]
+        if not valid: return None
+        return torch.cat(valid, dim=2)
+
+    def save_audio(self, audio_mel, output_path: str, sample_rate: int = None):
+        """
+        Vocoding: Log-Mel -> BigVGAN -> Waveform -> File
+        """
+        if self.verbose: print(f"Generating waveform using BigVGAN...")
+        
+        with torch.no_grad():
+            # BigVGAN 推理
+            wav_gen = self.model(audio_mel)
+            
+        wav_cpu = wav_gen.cpu().squeeze(0) # (Channels, Time)
+        
+        # 归一化防止爆音
+        max_val = wav_cpu.abs().max()
+        if max_val > 0.99:
+            wav_cpu = wav_cpu / max_val * 0.99
+            
+        torchaudio.save(output_path, wav_cpu, self.sample_rate)
+
+    def transform(self, source_audio_path, source_textgrid_path, target_textgrid_path, target_audio_path, output_path, tier_name="words"):
         try:
+            if self.verbose: print(f"Starting Processing (BigVGAN Paradigm)...")
+            
+            # 1. 加载源音频
+            wav_src_tuple = self.load_audio(source_audio_path) # (wav, 24000)
+            
+            # 2. 获取目标参考时长
+            wav_tgt_raw, sr_tgt_raw = torchaudio.load(target_audio_path)
+            target_duration_sec = wav_tgt_raw.shape[-1] / sr_tgt_raw
+            
+            # 计算总帧数 (Canvas Width)
+            # Frame = Sec * SR / Hop
+            total_target_frames = int(target_duration_sec * self.sample_rate / self.hop_length)
+            
             if self.verbose:
-                print(f"Loading resources with {self.__class__.__name__}...")
+                print(f"Target Duration: {target_duration_sec:.3f}s")
+                print(f"Target Frames: {total_target_frames} (hop={self.hop_length})")
+
+            # 3. 加载 TextGrid
+            tg_src = tgt.io.read_textgrid(source_textgrid_path)
+            tg_tgt = tgt.io.read_textgrid(target_textgrid_path)
+            words_src = self.get_real_words(tg_src.get_tier_by_name(tier_name))
+            words_tgt = self.get_real_words(tg_tgt.get_tier_by_name(tier_name))
             
-            # 1. 加载资源
-            audio_source = self.load_audio(source_audio_path)
-            audio_target_ref = self.load_audio(target_audio_path)
-            
-            target_total_duration = self.get_duration(audio_target_ref)
-            sample_rate = self.get_sample_rate(audio_source)
-            
-            tg_source = tgt.io.read_textgrid(source_textgrid_path)
-            tg_target = tgt.io.read_textgrid(target_textgrid_path)
-            
-            if self.verbose:
-                print(f"Source duration: {self.get_duration(audio_source):.3f}s")
-                print(f"Target duration: {target_total_duration:.3f}s")
-            
-            # 2. 提取实词列表
-            tier_source = tg_source.get_tier_by_name(tier_name)
-            tier_target = tg_target.get_tier_by_name(tier_name)
-            
-            words_source = self.get_real_words(tier_source)
-            words_target = self.get_real_words(tier_target)
-            
-            if len(words_source) != len(words_target):
-                print(f"Error: 单词数量不匹配! Source:{len(words_source)} vs Target:{len(words_target)}")
+            if len(words_src) != len(words_tgt):
+                print(f"Error: Word mismatch! {len(words_src)} vs {len(words_tgt)}")
                 return False
+
+            # 4. 创建 Mel 画布 (Canvas)
+            # 获取静音的 Log-Mel 值作为背景底色
+            silence_ref = self.create_silence(0.05, self.sample_rate)
+            # 取静音片段的平均值或最小值作为填充值
+            silence_val = silence_ref.mean() 
             
-            if self.verbose:
-                print(f"Processing {len(words_target)} words...")
+            # Shape: (1, 100, Total_Frames)
+            final_mel = torch.ones((1, self.n_mels, total_target_frames), device=self.device) * silence_val
             
-            final_segments = []
-            last_end_source = 0.0
-            last_end_target = 0.0
+            last_end_tgt = 0.0
+            last_end_src = 0.0
             
-            # 3. 处理每个单词
-            for i in range(len(words_target)):
-                word_source = words_source[i]
-                word_target = words_target[i]
+            # 辅助函数：秒 -> 帧
+            def sec2frame(sec): return int(sec * self.sample_rate / self.hop_length)
+            
+            # 5. 逐词拼贴
+            for i in range(len(words_tgt)):
+                w_src = words_src[i]
+                w_tgt = words_tgt[i]
                 
-                # A. 处理词前间隙
-                gap_duration_target = word_target.start_time - last_end_target
-                gap_duration_source = word_source.start_time - last_end_source
+                # === A. 填补间隙 (Gap) ===
+                gap_start = sec2frame(last_end_tgt)
+                gap_end = sec2frame(w_tgt.start_time)
+                gap_len = gap_end - gap_start
                 
-                if gap_duration_target > self.min_gap_threshold:
-                    segment_to_append = None
-                    
-                    if gap_duration_source > self.min_gap_threshold:
-                        # 使用源音频的间隙（保留底噪/呼吸）
-                        raw_gap = self.extract_segment(audio_source, last_end_source, word_source.start_time)
-                        if raw_gap is not None:
-                            stretch_ratio = gap_duration_target / gap_duration_source
-                            segment_to_append = self.time_stretch(raw_gap, stretch_ratio, is_noise=True)
-                    else:
-                        # 源音频无间隙，生成静音
-                        segment_to_append = self.create_silence(gap_duration_target, sample_rate)
-                    
-                    if segment_to_append is not None:
-                        final_segments.append(segment_to_append)
+                if gap_len > 0:
+                    gap_src_dur = w_src.start_time - last_end_src
+                    # 只有当源音频也有足够长的间隙时，才提取底噪
+                    if gap_src_dur > self.min_gap_threshold:
+                        mel_seg = self.extract_segment(wav_src_tuple, last_end_src, w_src.start_time)
+                        if mel_seg is not None:
+                            processed = self.time_stretch_exact(mel_seg, gap_len)
+                            # 贴到画布 (注意边界检查)
+                            valid = min(gap_len, final_mel.shape[-1] - gap_start)
+                            if valid > 0:
+                                final_mel[..., gap_start : gap_start + valid] = processed[..., :valid]
+                                
+                # === B. 填补单词 (Word) ===
+                word_start = sec2frame(w_tgt.start_time)
+                word_end = sec2frame(w_tgt.end_time)
+                word_len = word_end - word_start
                 
-                # B. 处理单词本身
-                duration_target = word_target.end_time - word_target.start_time
-                duration_source = word_source.end_time - word_source.start_time
-                
-                raw_word = self.extract_segment(audio_source, word_source.start_time, word_source.end_time)
-                
-                if duration_target > self.min_gap_threshold and raw_word is not None:
-                    stretch_ratio = duration_target / duration_source
-                    processed_word = self.time_stretch(raw_word, stretch_ratio, is_noise=False)
-                    if processed_word is not None:
-                        final_segments.append(processed_word)
-                
-                # 更新指针
-                last_end_source = word_source.end_time
-                last_end_target = word_target.end_time
+                if word_len > 0:
+                    mel_seg = self.extract_segment(wav_src_tuple, w_src.start_time, w_src.end_time)
+                    if mel_seg is not None:
+                        # 核心：在 Mel 上做线性拉伸，保持音调不变
+                        processed = self.time_stretch_exact(mel_seg, word_len)
+                        valid = min(word_len, final_mel.shape[-1] - word_start)
+                        if valid > 0:
+                            final_mel[..., word_start : word_start + valid] = processed[..., :valid]
+                            
+                last_end_tgt = w_tgt.end_time
+                last_end_src = w_src.end_time
             
-            # 4. 处理尾部间隙
-            tail_gap_target = target_total_duration - last_end_target
-            tail_gap_source = self.get_duration(audio_source) - last_end_source
+            # 6. 尾部处理
+            tail_start = sec2frame(last_end_tgt)
+            tail_len = total_target_frames - tail_start
             
-            if tail_gap_target > self.min_gap_threshold:
-                if tail_gap_source > self.min_gap_threshold:
-                    raw_tail = self.extract_segment(audio_source, last_end_source, self.get_duration(audio_source))
-                    if raw_tail is not None:
-                        stretch_ratio = tail_gap_target / tail_gap_source
-                        processed_tail = self.time_stretch(raw_tail, stretch_ratio, is_noise=True)
-                        if processed_tail is not None:
-                            final_segments.append(processed_tail)
-                else:
-                    tail_silence = self.create_silence(tail_gap_target, sample_rate)
-                    if tail_silence is not None:
-                        final_segments.append(tail_silence)
+            if tail_len > 0:
+                src_total_dur = self.get_duration(wav_src_tuple)
+                tail_src_dur = src_total_dur - last_end_src
+                if tail_src_dur > self.min_gap_threshold:
+                    mel_seg = self.extract_segment(wav_src_tuple, last_end_src, src_total_dur)
+                    if mel_seg is not None:
+                        processed = self.time_stretch_exact(mel_seg, tail_len)
+                        valid = min(tail_len, final_mel.shape[-1] - tail_start)
+                        if valid > 0:
+                            final_mel[..., tail_start : tail_start + valid] = processed[..., :valid]
+
+            # 7. 生成并保存
+            self.save_audio(final_mel, output_path)
             
-            # 5. 拼接与保存
-            if not final_segments:
-                print("Error: 未生成音频片段")
-                return False
-            
-            if self.verbose:
-                print(f"Concatenating {len(final_segments)} segments...")
-            
-            full_audio = self.concatenate_segments(final_segments, sample_rate)
-            self.save_audio(full_audio, output_path)
-            
-            if self.verbose:
-                print(f"✅ 处理完成！已保存到: {output_path}")
-            
+            if self.verbose: print(f"✅ 完成！文件已保存: {output_path}")
             return True
-            
+
         except Exception as e:
-            print(f"Error during transformation: {e}")
+            print(f"Error: {e}")
             import traceback
             traceback.print_exc()
             return False
 
 
-class PraatTransformer(BaseAudioTransformer):
-    """基于 Parselmouth/Praat 的变换器"""
-    
-    def __init__(self,
-                 min_gap_threshold: float = 0.001,
-                 max_stretch: float = 8.0,
-                 min_stretch: float = 0.1,
-                 short_audio_threshold: float = 0.05,
-                 pitch_range: Tuple[int, int] = (75, 600),
-                 stretch_method: str = "psola",
-                 verbose: bool = True):
-        """
-        Args:
-            stretch_method: "psola" 或 "resample"
-            pitch_range: (min_pitch, max_pitch) for PSOLA
-            short_audio_threshold: 短音频阈值，低于此值自动使用resample
-        """
-        super().__init__(min_gap_threshold, max_stretch, verbose)
-        self.min_stretch = min_stretch
-        self.short_audio_threshold = short_audio_threshold
-        self.pitch_range = pitch_range
-        self.stretch_method = stretch_method.lower()
-        
-        if self.stretch_method not in ["psola", "resample"]:
-            raise ValueError(f"stretch_method must be 'psola' or 'resample', got '{stretch_method}'")
-        
-        # 延迟导入
-        import parselmouth
-        from parselmouth.praat import call
-        self.parselmouth = parselmouth
-        self.call = call
-    
-    def load_audio(self, path: str):
-        return self.parselmouth.Sound(path)
-    
-    def get_duration(self, audio) -> float:
-        return audio.duration
-    
-    def get_sample_rate(self, audio) -> int:
-        return audio.sampling_frequency
-    
-    def extract_segment(self, audio, start: float, end: float):
-        if end <= start:
-            return None
-        return audio.extract_part(from_time=start, to_time=end, preserve_times=False)
-    
-    def create_silence(self, duration: float, sample_rate: int):
-        if duration <= self.min_gap_threshold:
-            return None
-        return self.call("Create Sound from formula", "silence", 1, 0, duration, sample_rate, "0")
-    
-    def time_stretch(self, audio_segment, stretch_factor: float, is_noise: bool = False):
-        if audio_segment is None:
-            return None
-        
-        stretch_factor = max(self.min_stretch, min(stretch_factor, self.max_stretch))
-        original_sr = audio_segment.sampling_frequency
-        
-        # 使用 Resample 方法
-        if self.stretch_method == "resample" or is_noise:
-            target_sr = original_sr / stretch_factor
-            temp_sound = audio_segment.copy()
-            temp_sound.override_sampling_frequency(target_sr)
-            return temp_sound.resample(new_frequency=original_sr)
-        
-        # 使用 PSOLA 方法
-        if audio_segment.duration < self.short_audio_threshold:
-            if self.verbose:
-                print(f"Warning: Audio too short ({audio_segment.duration:.3f}s), using resample")
-            target_sr = original_sr / stretch_factor
-            temp_sound = audio_segment.copy()
-            temp_sound.override_sampling_frequency(target_sr)
-            return temp_sound.resample(new_frequency=original_sr)
-        
-        try:
-            manipulated = self.call(audio_segment, "To Manipulation", 0.01, 
-                                   self.pitch_range[0], self.pitch_range[1])
-            duration_tier = self.call(manipulated, "Extract duration tier")
-            
-            end_time = self.call(duration_tier, "Get end time")
-            self.call(duration_tier, "Remove points between", 0.0, end_time)
-            self.call(duration_tier, "Add point", 0.0, stretch_factor)
-            
-            self.call([manipulated, duration_tier], "Replace duration tier")
-            stretched = self.call(manipulated, "Get resynthesis (overlap-add)")
-            return stretched
-            
-        except Exception as e:
-            if self.verbose:
-                print(f"PSOLA failed ({e}), falling back to resample")
-            target_sr = original_sr / stretch_factor
-            temp_sound = audio_segment.copy()
-            temp_sound.override_sampling_frequency(target_sr)
-            return temp_sound.resample(new_frequency=original_sr)
-    
-    def concatenate_segments(self, segments: List, sample_rate: int):
-        segments = [s for s in segments if s is not None]
-        if not segments:
-            return None
-        return self.call(segments, "Concatenate")
-    
-    def save_audio(self, audio, output_path: str):
-        # 防止削波
-        self.call(audio, "Scale peak", 0.99)
-        audio.save(output_path, "WAV")
-
-
-class LibrosaTransformer(BaseAudioTransformer):
-    """基于 Librosa + NumPy 的变换器"""
-    
-    def __init__(self,
-                 min_gap_threshold: float = 0.001,
-                 max_stretch: float = 8.0,
-                 crossfade_ms: float = 5.0,
-                 verbose: bool = True):
-        """
-        Args:
-            crossfade_ms: 拼接处的淡入淡出时长(毫秒)
-        """
-        super().__init__(min_gap_threshold, max_stretch, verbose)
-        self.crossfade_duration = crossfade_ms / 1000.0
-        
-        # 延迟导入
-        import librosa
-        import numpy as np
-        import soundfile as sf
-        from scipy.signal import resample
-        
-        self.librosa = librosa
-        self.np = np
-        self.sf = sf
-        self.resample = resample
-    
-    def load_audio(self, path: str):
-        """返回 (y, sr) 元组"""
-        y, sr = self.librosa.load(path, sr=None, mono=True)
-        return (y, sr)
-    
-    def get_duration(self, audio) -> float:
-        y, sr = audio
-        return len(y) / sr
-    
-    def get_sample_rate(self, audio) -> int:
-        y, sr = audio
-        return sr
-    
-    def extract_segment(self, audio, start: float, end: float):
-        y, sr = audio
-        if end <= start:
-            return None
-        
-        start_idx = int(self.np.round(start * sr))
-        end_idx = int(self.np.round(end * sr))
-        
-        start_idx = max(0, start_idx)
-        end_idx = min(len(y), end_idx)
-        
-        if start_idx >= end_idx:
-            return None
-        
-        return y[start_idx:end_idx]
-    
-    def create_silence(self, duration: float, sample_rate: int):
-        if duration <= self.min_gap_threshold:
-            return None
-        num_samples = int(duration * sample_rate)
-        return self.np.zeros(num_samples, dtype=self.np.float32)
-    
-    def time_stretch(self, audio_segment, stretch_factor: float, is_noise: bool = False):
-        if audio_segment is None or len(audio_segment) == 0:
-            return None
-        
-        stretch_factor = max(0.1, min(stretch_factor, self.max_stretch))
-        target_len = int(len(audio_segment) * stretch_factor)
-        
-        if target_len < 1:
-            return audio_segment
-        
-        # 对于底噪或极短片段，使用线性重采样
-        if is_noise or len(audio_segment) < 2048:
-            return self.resample(audio_segment, target_len)
-        
-        # 对于正常语音，使用 Phase Vocoder
-        try:
-            rate = 1.0 / stretch_factor
-            y_stretched = self.librosa.effects.time_stretch(audio_segment, rate=rate)
-            
-            # 强制对齐长度
-            if len(y_stretched) != target_len:
-                y_stretched = self.resample(y_stretched, target_len)
-            
-            return y_stretched
-            
-        except Exception as e:
-            if self.verbose:
-                print(f"Phase Vocoder failed: {e}, falling back to resample")
-            return self.resample(audio_segment, target_len)
-    
-    def concatenate_segments(self, segments: List, sample_rate: int):
-        """带交叉淡入淡出的拼接"""
-        segments = [s for s in segments if s is not None and len(s) > 0]
-        if not segments:
-            return None
-        
-        if len(segments) == 1:
-            return segments[0]
-        
-        fade_samples = int(self.crossfade_duration * sample_rate)
-        
-        if fade_samples == 0:
-            return self.np.concatenate(segments)
-        
-        result = segments[0]
-        
-        for i in range(1, len(segments)):
-            next_seg = segments[i]
-            
-            if len(result) < fade_samples or len(next_seg) < fade_samples:
-                result = self.np.concatenate((result, next_seg))
-                continue
-            
-            # Crossfade
-            overlap_a = result[-fade_samples:]
-            pre_a = result[:-fade_samples]
-            
-            overlap_b = next_seg[:fade_samples]
-            post_b = next_seg[fade_samples:]
-            
-            fade_in = self.np.linspace(0, 1, fade_samples)
-            fade_out = 1.0 - fade_in
-            
-            merged_overlap = (overlap_a * fade_out) + (overlap_b * fade_in)
-            result = self.np.concatenate((pre_a, merged_overlap, post_b))
-        
-        return result
-    
-    def save_audio(self, audio, output_path: str):
-        # 峰值归一化
-        max_val = self.np.max(self.np.abs(audio))
-        if max_val > 0.99:
-            audio = audio * (0.99 / max_val)
-        
-        # 从缓存的 audio 中获取采样率
-        # 注意：此时 audio 已经是 numpy array，需要从原始音频获取 sr
-        # 这里我们需要存储 sr，所以修改 concatenate_segments 返回
-        # 简单起见，我们在 transform 中传递 sr
-        # 但为了保持接口一致，我们需要改进设计
-        
-        # 临时方案：假设我们有 self.current_sr
-        if hasattr(self, '_current_sr'):
-            sr = self._current_sr
-        else:
-            sr = 22050  # 默认值
-        
-        self.sf.write(output_path, audio, sr)
-    
-    def transform(self, *args, **kwargs):
-        """重写 transform 以保存采样率"""
-        # 提取源音频以获取采样率
-        source_audio_path = args[0] if args else kwargs.get('source_audio_path')
-        if source_audio_path:
-            temp_audio = self.load_audio(source_audio_path)
-            self._current_sr = self.get_sample_rate(temp_audio)
-        
-        return super().transform(*args, **kwargs)
-
-
-def create_transformer(method: str = "librosa", **kwargs) -> BaseAudioTransformer:
-    """
-    工厂函数：创建音频变换器
-    
-    Args:
-        method: "praat" 或 "librosa"
-        **kwargs: 传递给具体变换器的参数
-        
-    Returns:
-        BaseAudioTransformer 实例
-    """
-    method = method.lower()
-    
-    if method == "praat":
-        return PraatTransformer(**kwargs)
-    elif method == "librosa":
-        return LibrosaTransformer(**kwargs)
-    else:
-        raise ValueError(f"Unknown method: {method}. Use 'praat' or 'librosa'")
-
-
+# ==========================================
+# 3. 运行示例
+# ==========================================
 if __name__ == "__main__":
-    # 示例 1: 使用 Praat + PSOLA
-    print("=" * 60)
-    print("示例 1: Praat + PSOLA")
-    print("=" * 60)
-    transformer1 = create_transformer(
-        method="praat",
-        stretch_method="psola",
+    # 检查 GPU
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
+    
+    # 实例化 BigVGAN 变换器
+    # 首次运行会自动下载模型 (约 200-300MB)
+    transformer = BigVGANTransformer(
+        device=device,
         verbose=True
     )
     
-    transformer1.transform(
+    # 执行变换
+    transformer.transform(
         source_audio_path="mel_convert/test/test_short1_1.wav",
         source_textgrid_path="mel_convert/test/aligned/test_short1_1.TextGrid",
         target_textgrid_path="mel_convert/test/aligned/test_short1_2.TextGrid",
         target_audio_path="mel_convert/test/test_short1_2.wav",
-        output_path="output_praat_psola.wav",
-        tier_name="words"
-    )
-    
-    print("\n" + "=" * 60)
-    print("示例 2: Librosa + Phase Vocoder")
-    print("=" * 60)
-    
-    # 示例 2: 使用 Librosa + Phase Vocoder
-    transformer2 = create_transformer(
-        method="librosa",
-        crossfade_ms=5.0,
-        verbose=True
-    )
-    
-    transformer2.transform(
-        source_audio_path="mel_convert/test/test_short1_1.wav",
-        source_textgrid_path="mel_convert/test/aligned/test_short1_1.TextGrid",
-        target_textgrid_path="mel_convert/test/aligned/test_short1_2.TextGrid",
-        target_audio_path="mel_convert/test/test_short1_2.wav",
-        output_path="output_librosa.wav",
-        tier_name="words"
+        output_path="output_bigvgan.wav",
+        tier_name="phones" # 建议使用 phones 层级，控制更细腻
     )
