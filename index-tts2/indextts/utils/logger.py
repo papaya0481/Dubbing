@@ -1,0 +1,226 @@
+"""
+Colorful Logger Module for IndexTTS2
+Uses rich library for beautiful console output with colors and progress bars
+"""
+
+import sys
+from typing import Optional, Dict, Any
+from datetime import datetime
+from rich.console import Console
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    BarColumn,
+    TextColumn,
+    TimeRemainingColumn,
+    TimeElapsedColumn,
+)
+from rich.panel import Panel
+from rich.tree import Tree
+from rich.table import Table
+from rich import print as rprint
+from rich.style import Style
+
+
+class ColorfulLogger:
+    """Beautiful colorful logger with hierarchical display"""
+    
+    def __init__(self, name: str = "IndexTTS2", enable_timestamp: bool = True):
+        self.name = name
+        self.console = Console()
+        self.enable_timestamp = enable_timestamp
+        
+        # Define color styles
+        self.styles = {
+            'info': Style(color="cyan", bold=False),
+            'success': Style(color="green", bold=True),
+            'warning': Style(color="yellow", bold=True),
+            'error': Style(color="red", bold=True),
+            'debug': Style(color="magenta", dim=True),
+            'stage': Style(color="blue", bold=True),
+            'model': Style(color="green"),
+            'time': Style(color="yellow"),
+            'value': Style(color="cyan", bold=True),
+            'key': Style(color="white", dim=True),
+        }
+    
+    def _get_timestamp(self) -> str:
+        """Get formatted timestamp"""
+        if self.enable_timestamp:
+            return f"[dim]{datetime.now().strftime('%H:%M:%S')}[/dim] "
+        return ""
+    
+    def info(self, message: str, prefix: str = ">>"):
+        """Print info message"""
+        self.console.print(f"{self._get_timestamp()}{prefix} {message}", style=self.styles['info'])
+    
+    def success(self, message: str, prefix: str = "✓"):
+        """Print success message"""
+        self.console.print(f"{self._get_timestamp()}{prefix} {message}", style=self.styles['success'])
+    
+    def warning(self, message: str, prefix: str = "⚠"):
+        """Print warning message"""
+        self.console.print(f"{self._get_timestamp()}{prefix} {message}", style=self.styles['warning'])
+    
+    def error(self, message: str, prefix: str = "✗"):
+        """Print error message"""
+        self.console.print(f"{self._get_timestamp()}{prefix} {message}", style=self.styles['error'])
+    
+    def debug(self, message: str, prefix: str = "•"):
+        """Print debug message"""
+        self.console.print(f"{self._get_timestamp()}{prefix} {message}", style=self.styles['debug'])
+    
+    def stage(self, message: str):
+        """Print stage header"""
+        self.console.print()
+        self.console.print(f"{'='*60}", style="blue")
+        self.console.print(f"  {message}", style=self.styles['stage'])
+        self.console.print(f"{'='*60}", style="blue")
+    
+    def model_loaded(self, model_name: str, checkpoint_path: str):
+        """Print model loading success"""
+        self.console.print(
+            f"{self._get_timestamp()}[green]✓[/green] {model_name:20s} loaded from: [dim]{checkpoint_path}[/dim]"
+        )
+    
+    def device_info(self, device: str, is_fp16: bool, use_cuda_kernel: bool):
+        """Print device configuration info"""
+        tree = Tree(f"[bold cyan]Device Configuration[/bold cyan]")
+        tree.add(f"[green]Device:[/green] {device}")
+        tree.add(f"[green]FP16:[/green] {is_fp16}")
+        tree.add(f"[green]CUDA Kernel:[/green] {use_cuda_kernel}")
+        self.console.print(tree)
+    
+    def print_dict(self, title: str, data: Dict[str, Any], level: int = 0):
+        """Print dictionary with hierarchical structure"""
+        indent = "  " * level
+        if level == 0:
+            self.console.print(f"\n{self._get_timestamp()}[bold]{title}[/bold]")
+        
+        for key, value in data.items():
+            if isinstance(value, dict):
+                self.console.print(f"{indent}  [cyan]{key}:[/cyan]")
+                self.print_dict("", value, level + 1)
+            elif isinstance(value, (list, tuple)):
+                self.console.print(f"{indent}  [cyan]{key}:[/cyan] [yellow]{value}[/yellow]")
+            elif isinstance(value, (int, float)):
+                self.console.print(f"{indent}  [cyan]{key}:[/cyan] [yellow]{value:.4f}[/yellow]" if isinstance(value, float) else f"{indent}  [cyan]{key}:[/cyan] [yellow]{value}[/yellow]")
+            else:
+                self.console.print(f"{indent}  [cyan]{key}:[/cyan] [white]{value}[/white]")
+    
+    def print_time_stats(self, stats: Dict[str, float], total_time: float, audio_length: float):
+        """Print time statistics in a beautiful table"""
+        table = Table(title="⏱ Performance Statistics", show_header=True, header_style="bold magenta")
+        table.add_column("Stage", style="cyan", width=25)
+        table.add_column("Time (s)", justify="right", style="yellow", width=15)
+        table.add_column("Percentage", justify="right", style="green", width=15)
+        
+        for stage, time_val in stats.items():
+            percentage = (time_val / total_time * 100) if total_time > 0 else 0
+            table.add_row(stage, f"{time_val:.2f}", f"{percentage:.1f}%")
+        
+        table.add_row("", "", "", style="dim")
+        table.add_row("[bold]Total Time[/bold]", f"[bold]{total_time:.2f}[/bold]", "[bold]100.0%[/bold]")
+        table.add_row("[bold]Audio Length[/bold]", f"[bold]{audio_length:.2f}[/bold]", "")
+        
+        rtf = total_time / audio_length if audio_length > 0 else 0
+        rtf_style = "green" if rtf < 1.0 else "yellow" if rtf < 2.0 else "red"
+        table.add_row(f"[bold]RTF[/bold]", f"[bold {rtf_style}]{rtf:.4f}[/bold {rtf_style}]", "")
+        
+        self.console.print()
+        self.console.print(table)
+    
+    def print_emotion_vector(self, emotion_dict: Dict[str, float]):
+        """Print emotion vector in a beautiful format"""
+        tree = Tree("[bold yellow]🎭 Emotion Vector[/bold yellow]")
+        
+        for emotion, value in emotion_dict.items():
+            # Color based on value
+            if value > 0.7:
+                color = "red"
+            elif value > 0.4:
+                color = "yellow"
+            elif value > 0.1:
+                color = "cyan"
+            else:
+                color = "dim"
+            
+            # Create bar visualization
+            bar_length = int(value * 20)
+            bar = "█" * bar_length + "░" * (20 - bar_length)
+            
+            tree.add(f"[{color}]{emotion:12s}[/{color}] [{color}]{bar}[/{color}] [{color}]{value:.3f}[/{color}]")
+        
+        self.console.print(tree)
+    
+    def panel(self, message: str, title: str = "", style: str = "cyan"):
+        """Print message in a panel"""
+        self.console.print(Panel(message, title=title, border_style=style))
+    
+    def rule(self, title: str = "", style: str = "cyan"):
+        """Print a horizontal rule"""
+        from rich.rule import Rule
+        self.console.print(Rule(title, style=style))
+    
+    def print_raw(self, *args, **kwargs):
+        """Print raw message (for compatibility)"""
+        self.console.print(*args, **kwargs)
+
+
+class ColorfulProgress:
+    """Colorful progress bar wrapper"""
+    
+    def __init__(self, console: Optional[Console] = None):
+        self.console = console or Console()
+        self.progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(complete_style="green", finished_style="bold green"),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            console=self.console,
+        )
+        self.task_id = None
+    
+    def __enter__(self):
+        self.progress.__enter__()
+        return self
+    
+    def __exit__(self, *args):
+        self.progress.__exit__(*args)
+    
+    def add_task(self, description: str, total: float = 100.0):
+        """Add a new task"""
+        self.task_id = self.progress.add_task(description, total=total)
+        return self.task_id
+    
+    def update(self, advance: float = 0, description: str = None, completed: float = None):
+        """Update progress"""
+        kwargs = {}
+        if advance:
+            kwargs['advance'] = advance
+        if description:
+            kwargs['description'] = description
+        if completed is not None:
+            kwargs['completed'] = completed
+        
+        if self.task_id is not None:
+            self.progress.update(self.task_id, **kwargs)
+
+
+# Global logger instance
+_logger_instance = None
+
+
+def get_logger(name: str = "IndexTTS2") -> ColorfulLogger:
+    """Get or create global logger instance"""
+    global _logger_instance
+    if _logger_instance is None:
+        _logger_instance = ColorfulLogger(name)
+    return _logger_instance
+
+
+def create_progress(console: Optional[Console] = None) -> ColorfulProgress:
+    """Create a new progress bar"""
+    return ColorfulProgress(console)

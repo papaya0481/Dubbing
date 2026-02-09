@@ -331,6 +331,6 @@ if __name__ == "__main__":
         source_textgrid_path="mel_convert/test/aligned/test_long1_1.TextGrid",
         target_textgrid_path="mel_convert/test/aligned/test_long1_2.TextGrid",
         target_audio_path="mel_convert/test/test_long1_2.wav",
-        output_path="output_bigvgan_long.wav",
-        tier_name="words" # 建议使用 phones 层级，控制更细腻
+        output_path="output_bigvgan_long_phone.wav",
+        tier_name="phones" # 建议使用 phones 层级，控制更细腻
     )
