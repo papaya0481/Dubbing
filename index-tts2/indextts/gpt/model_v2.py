@@ -576,7 +576,7 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
             is_emotion_twist (`bool`): 
                 是否发生情感转折.
         """
-        method = model_kwargs.get("method", "eos")
+        method = model_kwargs.get("method", "")
         if method == "eos":
             indice_array = next_indices.detach().cpu().numpy()[0]
             token_array = next_tokens.detach().cpu().numpy()[0]
@@ -588,7 +588,7 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
             is_emotion_twist = len(emotion_twist_indices) > 0
             for i in emotion_twist_indices:
                 model_kwargs["attention_phase"][i] += 1
-                _logger.debug(f"Beam {i} enters phase {model_kwargs['attention_phase'][i]}")
+                _logger.debug(f"[eos] Beam {i} enters phase {model_kwargs['attention_phase'][i]}")
             return is_emotion_twist
         elif method == "hmm":
             all_attn = torch.stack(output_attentions, dim=0)  # [num_layers, beamsize, num_heads, seq_len, seq_len]
@@ -668,7 +668,7 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
                             self.segment_positions[i].append(current_sem_len)
                     
                     model_kwargs["attention_phase"][i] += 1
-                    _logger.debug(f"Beam {i} enters phase {model_kwargs['attention_phase'][i]} at sem {all_attn.shape[-1]} ")
+                    _logger.debug(f"[hmm] Beam {i} enters phase {model_kwargs['attention_phase'][i]} at sem {all_attn.shape[-1]} ")
                    
                 # ===== 新增：通知 duration_processor 段切换信息 =====
                 if self.duration_processor is not None:
@@ -2022,47 +2022,39 @@ class UnifiedVoice(nn.Module):
         _logger.debug(f"causal_mask shape: {causal_mask.shape}")
 
         # ========== 调试：统计每段的 semantic token 数量 ==========
-        _logger.debug("="*70)
-        _logger.info("Multi-segment Semantic Token:")
-        
         total_semantic_tokens = output.sequences.shape[1] - 1
         selected_beam = output.beam_indices[0][0]
+        # Convert tensor to int for dict key access
+        if isinstance(selected_beam, torch.Tensor):
+            selected_beam = selected_beam.item()
         seg_lens = []
-        _logger.info(f"Total semantic tokens: {total_semantic_tokens}")
         
         # 从 HMM 的段切换记录中获取位置
         if hasattr(self.inference_model, 'segment_positions') and self.inference_model.segment_positions is not None:
-            # 使用之前记录的段切换位置
-            for beam_id, positions in self.inference_model.segment_positions.items():
-                _logger.info(f"\nBeam {beam_id}:")
-                if beam_id == selected_beam:
-                    _logger.info("* selected beam *")
-                all_positions = [0] + positions + [total_semantic_tokens]
-                
-                for seg_idx in range(len(all_positions) - 1):
-                    start_pos = all_positions[seg_idx]
-                    end_pos = all_positions[seg_idx + 1]
-                    seg_len = end_pos - start_pos
-                    percentage = (seg_len / total_semantic_tokens * 100) if total_semantic_tokens > 0 else 0
-                    
-                    _logger.info(f"  Segment {seg_idx + 1}: {seg_len} tokens ({percentage:.1f}%) - location [{start_pos}, {end_pos})")
-                    
-                    if beam_id == selected_beam:
-                        seg_lens.append(seg_len)
-                
-                _logger.info(f"  Total: {total_semantic_tokens} tokens")
+            # 使用美化的logger输出segment统计信息
+            _logger.print_segment_stats(
+                segment_positions=self.inference_model.segment_positions,
+                total_tokens=total_semantic_tokens,
+                selected_beam=selected_beam
+            )
+            
+            # 收集选中beam的segment长度信息
+            positions = self.inference_model.segment_positions[selected_beam]
+            all_positions = [0] + positions + [total_semantic_tokens]
+            for seg_idx in range(len(all_positions) - 1):
+                start_pos = all_positions[seg_idx]
+                end_pos = all_positions[seg_idx + 1]
+                seg_lens.append(end_pos - start_pos)
             
             # 清空记录
             if self.inference_model.duration_processor is not None:
                 self.inference_model.duration_processor = None
             self.inference_model.segment_positions = None
         else:
-            _logger.info("No switching record")
+            _logger.warning("No segment switching record found")
             _logger.debug(f"  hasattr check: {hasattr(self.inference_model, 'segment_positions')}")
             if hasattr(self.inference_model, 'segment_positions'):
                 _logger.debug(f"  segment_positions value: {self.inference_model.segment_positions}")
-        
-        _logger.info("="*70)
         # ========== 调试输出结束 ==========
         
         # if isinstance(output, torch.Tensor):

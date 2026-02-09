@@ -68,7 +68,14 @@ class ColorfulLogger:
     
     def debug(self, message: str, prefix: str = "•"):
         """Print debug message"""
-        self.console.print(f"{self._get_timestamp()}[bold]{prefix} [/bold] {message}", style=self.styles['debug'])
+        from rich.text import Text
+        # Create text with bold prefix and plain message (no markup parsing in message)
+        text = Text()
+        if self.enable_timestamp:
+            text.append(f"{datetime.now().strftime('%H:%M:%S')} ", style="dim")
+        text.append(f"{prefix} ", style="bold")
+        text.append(message)  # Plain text, no markup interpretation
+        self.console.print(text, style=self.styles['debug'], highlight=False)
     
     def stage(self, message: str):
         """Print stage header"""
@@ -194,6 +201,76 @@ class ColorfulLogger:
     def print_raw(self, *args, **kwargs):
         """Print raw message (for compatibility)"""
         self.console.print(*args, **kwargs)
+    
+    def print_segment_stats(self, segment_positions: Dict[int, list], total_tokens: int, selected_beam: int):
+        """Print multi-segment semantic token statistics in a compact format
+        
+        Args:
+            segment_positions: Dict of {beam_id: [switch_positions]}
+            total_tokens: Total number of semantic tokens
+            selected_beam: ID of the selected beam (can be int or tensor)
+        """
+        from rich.panel import Panel
+        from rich.columns import Columns
+        import torch
+        
+        # Convert tensor to int if necessary
+        if isinstance(selected_beam, torch.Tensor):
+            selected_beam = selected_beam.item()
+        
+        # Create panels for each beam
+        beam_panels = []
+        for beam_id in sorted(segment_positions.keys()):
+            is_selected = beam_id == selected_beam
+            positions = segment_positions[beam_id]
+            all_positions = [0] + positions + [total_tokens]
+            num_segments = len(all_positions) - 1
+            
+            # Build compact display for this beam
+            if is_selected:
+                header = f"[green]⭐ Beam {beam_id}[/green]  [cyan]Total:[/cyan] [yellow]{total_tokens}[/yellow]  [cyan]Seg:[/cyan] [yellow]{num_segments}[/yellow]"
+            else:
+                header = f"[dim]Beam {beam_id}[/dim]  [cyan]Total:[/cyan] [yellow]{total_tokens}[/yellow]  [cyan]Seg:[/cyan] [yellow]{num_segments}[/yellow]"
+            
+            content = header + "\n\n"
+            
+            for seg_idx in range(len(all_positions) - 1):
+                start_pos = all_positions[seg_idx]
+                end_pos = all_positions[seg_idx + 1]
+                seg_len = end_pos - start_pos
+                percentage = (seg_len / total_tokens * 100) if total_tokens > 0 else 0
+                
+                # Compact bar (12 chars for narrow panels)
+                bar_length = int(percentage / 100 * 12)
+                bar = "█" * bar_length + "░" * (12 - bar_length)
+                
+                # Color based on percentage
+                if percentage > 40:
+                    bar_color = "red"
+                elif percentage > 25:
+                    bar_color = "yellow"
+                else:
+                    bar_color = "green"
+                
+                # Compact single line per segment
+                if is_selected:
+                    content += f"[cyan]§{seg_idx + 1}[/cyan] [{bar_color}]{bar}[/{bar_color}] [yellow]{seg_len:3d}[/yellow] [{bar_color}]{percentage:4.1f}%[/{bar_color}]\n"
+                else:
+                    content += f"[dim][cyan]§{seg_idx + 1}[/cyan] [{bar_color}]{bar}[/{bar_color}] [yellow]{seg_len:3d}[/yellow] [{bar_color}]{percentage:4.1f}%[/{bar_color}][/dim]\n"
+            
+            # Create panel with different style for selected beam
+            border_style = "green" if is_selected else "dim"
+            panel = Panel(
+                content.rstrip(), 
+                border_style=border_style,
+                expand=False,
+                padding=(0, 1)
+            )
+            beam_panels.append(panel)
+        
+        self.console.print()
+        self.console.print(Columns(beam_panels, equal=False, expand=False))
+        self.console.print()
 
 
 class ColorfulProgress:
