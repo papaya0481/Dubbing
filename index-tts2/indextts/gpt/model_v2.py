@@ -20,10 +20,14 @@ from indextts.gpt.conformer_encoder import ConformerEncoder
 from indextts.gpt.perceiver import PerceiverResampler
 from indextts.utils.arch_util import AttentionBlock
 from indextts.utils.typical_sampling import TypicalLogitsWarper
+from indextts.utils.logger import get_logger
 
 from .attn_map import AttentionMapProcessor
 from .hmm import StreamingHMMAligner
 from .transformers_generation_utils import construct_attn_mask
+
+# Initialize logger
+_logger = get_logger("GPT")
 
 def null_position_embeddings(range, dim):
     return torch.zeros((range.shape[0], range.shape[1], dim), device=range.device)
@@ -66,13 +70,13 @@ class MinimalDurationLogitsProcessor(LogitsProcessor):
         self.initial_offset = None  # 新增：记录前置token偏移量
         
         if self.verbose:
-            print(f"[MinimalDuration] Initialized:")
-            print(f"   Target: {self.target_length}")
-            print(f"   Region A (suppress): < {self.min_length}")
-            print(f"   Region B (ramp down): {self.min_length} → {self.neutral_start_length}")
-            print(f"   Region C (neutral): {self.neutral_start_length} → {self.neutral_end_length}")
-            print(f"   Region D (ramp up): {self.neutral_end_length} → {self.max_length}")
-            print(f"   Region E (encourage): > {self.max_length}")
+            _logger.info("[MinimalDuration] Initialized:")
+            _logger.debug(f"   Target: {self.target_length}")
+            _logger.debug(f"   Region A (suppress): < {self.min_length}")
+            _logger.debug(f"   Region B (ramp down): {self.min_length} → {self.neutral_start_length}")
+            _logger.debug(f"   Region C (neutral): {self.neutral_start_length} → {self.neutral_end_length}")
+            _logger.debug(f"   Region D (ramp up): {self.neutral_end_length} → {self.max_length}")
+            _logger.debug(f"   Region E (encourage): > {self.max_length}")
     
     def _update_thresholds(self):
         """Precompute length thresholds based on target and ratios."""
@@ -124,7 +128,7 @@ class MinimalDurationLogitsProcessor(LogitsProcessor):
         if self.initial_offset is None:
             self.initial_offset = input_ids.shape[1]
             if self.verbose:
-                print(f">> [MinimalDuration] Detected offset: {self.initial_offset} tokens (condition + text)")
+                _logger.debug(f"[MinimalDuration] Detected offset: {self.initial_offset} tokens (condition + text)")
         
         # 计算实际生成的semantic token数量（减去前置偏移）
         total_length = input_ids.shape[1]
@@ -139,7 +143,7 @@ class MinimalDurationLogitsProcessor(LogitsProcessor):
         # Optional: Print progress (every N tokens to reduce spam)
         if self.verbose and self.current_length % 50 == 0:
             ratio = self.current_length / self.target_length
-            print(f">> [MinimalDuration] Progress: {self.current_length}/{self.target_length} "
+            _logger.debug(f"[MinimalDuration] Progress: {self.current_length}/{self.target_length} "
                   f"({ratio:.1%}) | Bias: {bias:+.2f} | Total len: {total_length}")
         
         return scores
@@ -198,14 +202,12 @@ class RemainingBudgetEOSProcessor(LogitsProcessor):
         self.segment_positions = None
         
         if self.verbose:
-            print(f"\n{'='*70}")
-            print(f"[RemainingBudgetEOS] Initialized")
-            print(f"  Num segments: {self.num_segments}")
-            print(f"  Target per segment: {self.target_tokens_per_segment}")
-            print(f"  Total target: {sum(self.target_tokens_per_segment)}")
-            print(f"  Control ratios: min={min_ratio}, neutral={neutral_ratio}, max={max_ratio}")
-            print(f"  Bias range: [{max_negative_bias}, {max_positive_bias}]")
-            print(f"{'='*70}\n")
+            _logger.info("[RemainingBudgetEOS] Initialized")
+            _logger.debug(f"  Num segments: {self.num_segments}")
+            _logger.debug(f"  Target per segment: {self.target_tokens_per_segment}")
+            _logger.debug(f"  Total target: {sum(self.target_tokens_per_segment)}")
+            _logger.debug(f"  Control ratios: min={min_ratio}, neutral={neutral_ratio}, max={max_ratio}")
+            _logger.debug(f"  Bias range: [{max_negative_bias}, {max_positive_bias}]")
     
     def _initialize_state(self, batch_size: int):
         self.current_segment_idx = [0] * batch_size
@@ -272,7 +274,7 @@ class RemainingBudgetEOSProcessor(LogitsProcessor):
             actual_len = self.actual_generated_per_segment[beam_idx][old_seg]
             target_len = self.target_tokens_per_segment[old_seg]
             ratio = actual_len / target_len if target_len > 0 else 0
-            print(
+            _logger.debug(
                 f"[RemainingBudgetEOS] Beam {beam_idx}: "
                 f"Segment {old_seg} -> {self.current_segment_idx[beam_idx]} | "
                 f"Actual: {actual_len} / Target: {target_len} ({ratio:.2f}x)"
@@ -359,7 +361,7 @@ class RemainingBudgetEOSProcessor(LogitsProcessor):
             self._initialize_state(batch_size)
             
             if self.verbose:
-                print(f"[RemainingBudgetEOS] Detected offset: {self.initial_offset} tokens")
+                _logger.debug(f"[RemainingBudgetEOS] Detected offset: {self.initial_offset} tokens")
         
         total_length = input_ids.shape[1]
         
@@ -394,7 +396,7 @@ class RemainingBudgetEOSProcessor(LogitsProcessor):
             
             if self.verbose and current_length % 50 == 0:
                 seg_status = "LAST" if is_last_segment else f"{current_seg}"
-                print(
+                _logger.debug(
                     f"[RemainingBudgetEOS] Beam {beam_idx} | "
                     f"Seg {seg_status}/{self.num_segments} | "
                     f"Generated: {generated_in_current} / Target: {current_seg_target} | "
@@ -586,7 +588,7 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
             is_emotion_twist = len(emotion_twist_indices) > 0
             for i in emotion_twist_indices:
                 model_kwargs["attention_phase"][i] += 1
-                print(f"Beam {i} enters phase {model_kwargs['attention_phase'][i]}")
+                _logger.debug(f"Beam {i} enters phase {model_kwargs['attention_phase'][i]}")
             return is_emotion_twist
         elif method == "hmm":
             all_attn = torch.stack(output_attentions, dim=0)  # [num_layers, beamsize, num_heads, seq_len, seq_len]
@@ -666,7 +668,7 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
                             self.segment_positions[i].append(current_sem_len)
                     
                     model_kwargs["attention_phase"][i] += 1
-                    print(f"Beam {i} enters phase {model_kwargs['attention_phase'][i]} at sem {all_attn.shape[-1]} ")
+                    _logger.debug(f"Beam {i} enters phase {model_kwargs['attention_phase'][i]} at sem {all_attn.shape[-1]} ")
                    
                 # ===== 新增：通知 duration_processor 段切换信息 =====
                 if self.duration_processor is not None:
@@ -766,7 +768,7 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
                             self.segment_positions[i].append(current_sem_len)
                     
                     model_kwargs["attention_phase"][i] += 1
-                    print(f"[Max head] Beam {i} enters phase {model_kwargs['attention_phase'][i]} at sem {all_attn.shape[-1]} ")
+                    _logger.debug(f"[Max head] Beam {i} enters phase {model_kwargs['attention_phase'][i]} at sem {all_attn.shape[-1]} ")
                 # ===== 新增：通知 duration_processor 段切换信息 =====
                 if self.duration_processor is not None:
                     self.duration_processor.update_segment_positions(self.segment_positions)
@@ -864,7 +866,7 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
                             self.segment_positions[i].append(current_sem_len)
                     
                     model_kwargs["attention_phase"][i] += 1
-                    print(f"[Max head topk] Beam {i} enters phase {model_kwargs['attention_phase'][i]} at sem {all_attn.shape[-1]} ")
+                    _logger.debug(f"[Max head topk] Beam {i} enters phase {model_kwargs['attention_phase'][i]} at sem {all_attn.shape[-1]} ")
                 # ===== 新增：通知 duration_processor 段切换信息 =====
                 if self.duration_processor is not None:
                     self.duration_processor.update_segment_positions(self.segment_positions)
@@ -948,7 +950,7 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
                             self.segment_positions[i].append(current_sem_len)
                     
                     model_kwargs["attention_phase"][i] += 1
-                    print(f"[Mas] Beam {i} enters phase {model_kwargs['attention_phase'][i]} at sem {current_sem_len} ")
+                    _logger.debug(f"[Mas] Beam {i} enters phase {model_kwargs['attention_phase'][i]} at sem {current_sem_len} ")
                 # ===== 新增：通知 duration_processor 段切换信息 =====
                 if self.duration_processor is not None:
                     self.duration_processor.update_segment_positions(self.segment_positions)
@@ -975,7 +977,7 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
             new_phases_list = new_phases.tolist()
             for i in range(len(new_phases_list)):
                 if new_phases_list[i] != current_phases[i]:
-                    print(f"[Wo align] Beam {i} jumps from phase {current_phases[i]} to {new_phases_list[i]}")
+                    _logger.debug(f"[Wo align] Beam {i} jumps from phase {current_phases[i]} to {new_phases_list[i]}")
             model_kwargs["attention_phase"] = new_phases_list
             return False      
         else:
@@ -1701,7 +1703,7 @@ class UnifiedVoice(nn.Module):
             cond_cum_lengths.append(cond_cum_lengths[-1] + length)
         total_cond_len = cond_cum_lengths[-1]
         target_len = total_cond_len + L + 2 # 留2个给
-        print(f"target_len: {target_len}, cond_lens: {cond_lengths}, L: {L}")
+        _logger.debug(f"target_len: {target_len}, cond_lens: {cond_lengths}, L: {L}")
         
 
 
@@ -1713,7 +1715,7 @@ class UnifiedVoice(nn.Module):
         text_input_pos = torch.arange(0, text_input.size(-1), device=device)
         text_emb = self.text_embedding(text_input) + self.text_pos_embedding.emb(text_input_pos)
         # concatenate [conditional latents][text embeddings]
-        print(f"conditional_latents shape: {conditional_latents[0].shape}, text_emb shape: {text_emb.shape}")
+        _logger.debug(f"conditional_latents shape: {conditional_latents[0].shape}, text_emb shape: {text_emb.shape}")
         conds_text_emb = [c.squeeze(0) for c in conditional_latents] + [
             text_emb.squeeze(0),
         ]
@@ -1836,15 +1838,15 @@ class UnifiedVoice(nn.Module):
             speech_conditioning_latent = self.get_conditioning(speech_condition.transpose(1,2), cond_lengths)
         
         if emo_vecs is None:
-            print('compute emo vec')
+            _logger.debug('compute emo vec')
             emo_vec = self.get_emo_conditioning(emo_speech_condition.transpose(1,2), emo_cond_lengths)
             emo_vec = self.emovec_layer(emo_vec)
             emo_vec = self.emo_layer(emo_vec)
             emo_vecs = [emo_vec]
         else:
-            print('Use the specified emotion vector')
+            _logger.debug('Use the specified emotion vector')
         for text_inputs in text_inputs_list:
-            print("text input shape:", text_inputs.shape)
+            _logger.debug(f"text input shape: {text_inputs.shape}")
 
 
         tmp = torch.zeros(text_inputs_list[0].size(0)).to(text_inputs_list[0].device)
@@ -1853,7 +1855,7 @@ class UnifiedVoice(nn.Module):
         
         conds_latents = []
         global_duration_cursor = 0
-        print("[DEBUG] target_duration_tokens (model side) =", target_duration_tokens)
+        _logger.debug(f"[DEBUG] target_duration_tokens (model side) = {target_duration_tokens}")
 
         for i, emo_vec in enumerate(emo_vecs):
             tmp = torch.zeros(text_inputs.size(0), device=text_inputs.device)
@@ -1863,7 +1865,7 @@ class UnifiedVoice(nn.Module):
                 seg_len = int(target_duration_tokens[i])
                 global_duration_cursor += seg_len
                 if i < 10: 
-                    print(
+                    _logger.debug(
                         f"[DurationCtrl] seg={i} | "
                         f"seg_len={seg_len} | "
                         f"global_cursor={global_duration_cursor}"
@@ -1899,10 +1901,10 @@ class UnifiedVoice(nn.Module):
                 )
             conds_latents.append(conds_latent)
             
-        print(f"Emo cond length: {emo_vecs[0].shape}")
+        _logger.debug(f"Emo cond length: {emo_vecs[0].shape}")
         full_text = not (hf_generate_kwargs.get("method", "eos") == "eos")
         input_ids, inputs_embeds, attention_masks, attention_masks_full_view, text_last_token_position, input_attention_masks, dynamic_cond_mask_idx = self.prepare_gpt_inputs(conds_latents, text_inputs_list, full_text=full_text)
-        print(f"attention_mask: {attention_masks}")
+        _logger.debug(f"attention_mask: {attention_masks}")
         self.inference_model.store_mel_emb(inputs_embeds)
         # if input_tokens is None:
         inputs = input_ids
@@ -1956,10 +1958,10 @@ class UnifiedVoice(nn.Module):
             
             logits_processor.append(duration_processor)
             
-            print(f"\n>> [RemainingBudgetEOS] Enabled")
-            print(f"   Num segments: {len(target_duration_tokens)}")
-            print(f"   Target per segment: {target_duration_tokens}")
-            print(f"   Total target: {sum(target_duration_tokens)} semantic tokens")
+            _logger.info("[RemainingBudgetEOS] Enabled")
+            _logger.debug(f"   Num segments: {len(target_duration_tokens)}")
+            _logger.debug(f"   Target per segment: {target_duration_tokens}")
+            _logger.debug(f"   Total target: {sum(target_duration_tokens)} semantic tokens")
 
         # 从generate kwargs中提取save_attention_maps参数（不传给generate）
         save_attention_maps = hf_generate_kwargs.pop("save_attention_maps", False)
@@ -1983,7 +1985,7 @@ class UnifiedVoice(nn.Module):
         # self.inference_model.hmm = None   # 清除hmm实例
         
         output.sequences = output.sequences[:, trunc_index:]  # remove the input part
-        print(f"Generated output shape: {output.sequences.shape}, inputs shape: {inputs.shape}")
+        _logger.debug(f"Generated output shape: {output.sequences.shape}, inputs shape: {inputs.shape}")
     
         # min_dtype = torch.finfo(mask_dtype).min
         # causal_masks = []
@@ -2017,24 +2019,24 @@ class UnifiedVoice(nn.Module):
         #     )
         #     causal_masks.append(causal_mask)
         causal_mask = construct_attn_mask(attention_masks_full_view, output.attention_mask_ids, trunc_index, input_attention_masks if input_full_attention_mask==False else None, None, None, output.sequences.device, next(self.gpt.parameters()).dtype)
-        print("causal_mask shape:", causal_mask.shape)
+        _logger.debug(f"causal_mask shape: {causal_mask.shape}")
 
         # ========== 调试：统计每段的 semantic token 数量 ==========
-        print("\n" + "="*70)
-        print("Multi-segment Semantic Token:")
+        _logger.debug("="*70)
+        _logger.info("Multi-segment Semantic Token:")
         
         total_semantic_tokens = output.sequences.shape[1] - 1
         selected_beam = output.beam_indices[0][0]
         seg_lens = []
-        print(f"Total semantic tokens: {total_semantic_tokens}")
+        _logger.info(f"Total semantic tokens: {total_semantic_tokens}")
         
         # 从 HMM 的段切换记录中获取位置
         if hasattr(self.inference_model, 'segment_positions') and self.inference_model.segment_positions is not None:
             # 使用之前记录的段切换位置
             for beam_id, positions in self.inference_model.segment_positions.items():
-                print(f"\nBeam {beam_id}:")
+                _logger.info(f"\nBeam {beam_id}:")
                 if beam_id == selected_beam:
-                    print(f"* selected beam *")
+                    _logger.info("* selected beam *")
                 all_positions = [0] + positions + [total_semantic_tokens]
                 
                 for seg_idx in range(len(all_positions) - 1):
@@ -2043,24 +2045,24 @@ class UnifiedVoice(nn.Module):
                     seg_len = end_pos - start_pos
                     percentage = (seg_len / total_semantic_tokens * 100) if total_semantic_tokens > 0 else 0
                     
-                    print(f"  Segment {seg_idx + 1}: {seg_len} tokens ({percentage:.1f}%) - location [{start_pos}, {end_pos})")
+                    _logger.info(f"  Segment {seg_idx + 1}: {seg_len} tokens ({percentage:.1f}%) - location [{start_pos}, {end_pos})")
                     
                     if beam_id == selected_beam:
                         seg_lens.append(seg_len)
                 
-                print(f"  Total: {total_semantic_tokens} tokens")
+                _logger.info(f"  Total: {total_semantic_tokens} tokens")
             
             # 清空记录
             if self.inference_model.duration_processor is not None:
                 self.inference_model.duration_processor = None
             self.inference_model.segment_positions = None
         else:
-            print("No switching record")
-            print(f"  hasattr check: {hasattr(self.inference_model, 'segment_positions')}")
+            _logger.info("No switching record")
+            _logger.debug(f"  hasattr check: {hasattr(self.inference_model, 'segment_positions')}")
             if hasattr(self.inference_model, 'segment_positions'):
-                print(f"  segment_positions value: {self.inference_model.segment_positions}")
+                _logger.debug(f"  segment_positions value: {self.inference_model.segment_positions}")
         
-        print("="*70 + "\n")
+        _logger.info("="*70)
         # ========== 调试输出结束 ==========
         
         # if isinstance(output, torch.Tensor):

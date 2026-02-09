@@ -34,12 +34,14 @@ logger = get_logger("MyModule")
 ### 3. 基本日志输出
 
 ```python
-logger.info("这是一条信息")
-logger.success("操作成功!")
-logger.warning("这是一个警告")
-logger.error("发生错误!")
-logger.debug("调试信息")
+logger.info("这是一条信息")      # [ℹ info] 这是一条信息
+logger.success("操作成功!")      # [✓ success] 操作成功!
+logger.warning("这是一个警告")    # [⚠ warning] 这是一个警告
+logger.error("发生错误!")        # [✗ error] 发生错误!
+logger.debug("调试信息")         # [• debug] 调试信息
 ```
+
+注意：所有日志级别都使用统一的符号+文字标签格式，便于快速识别消息类型。
 
 ### 4. 阶段标题
 
@@ -75,6 +77,7 @@ logger.print_dict("配置信息", config)
 ### 8. 情感向量显示
 
 ```python
+# 单个情感向量
 emotion_dict = {
     "happy": 0.8,
     "angry": 0.1,
@@ -82,7 +85,20 @@ emotion_dict = {
     # ... 其他情感
 }
 logger.print_emotion_vector(emotion_dict)
+
+# 多个情感向量（并列显示）
+emotion_vectors = [
+    {"happy": 0.9, "angry": 0.1, "sad": 0.0, ...},
+    {"happy": 0.2, "angry": 0.7, "sad": 0.3, ...}
+]
+logger.print_emotion_vector(emotion_vectors)
 ```
+
+**输出效果：**
+- 单个向量：显示为单棵树
+- 多个向量：并列显示为多列，每列一个编号的情感向量
+
+这对于比较不同文本段落的情感非常有用！
 
 ### 9. 时间统计表格
 

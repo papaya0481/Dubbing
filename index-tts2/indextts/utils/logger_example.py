@@ -26,6 +26,7 @@ def example_emotion_vector():
     
     logger.stage("Emotion Vector Display")
     
+    # Single emotion vector
     emotion_dict = {
         "happy": 0.8,
         "angry": 0.1,
@@ -38,6 +39,34 @@ def example_emotion_vector():
     }
     
     logger.print_emotion_vector(emotion_dict)
+    
+    print("\n=== Multiple Emotion Vectors (Side by Side) ===\n")
+    
+    # Multiple emotion vectors (side by side display)
+    emotion_vectors = [
+        {
+            "happy": 0.9,
+            "angry": 0.1,
+            "sad": 0.0,
+            "afraid": 0.0,
+            "disgusted": 0.0,
+            "melancholic": 0.0,
+            "surprised": 0.3,
+            "calm": 0.1,
+        },
+        {
+            "happy": 0.2,
+            "angry": 0.7,
+            "sad": 0.3,
+            "afraid": 0.0,
+            "disgusted": 0.5,
+            "melancholic": 0.1,
+            "surprised": 0.0,
+            "calm": 0.0,
+        }
+    ]
+    
+    logger.print_emotion_vector(emotion_vectors)
 
 def example_time_stats():
     """Example of time statistics display"""

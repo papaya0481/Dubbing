@@ -331,7 +331,6 @@ class IndexTTS2:
             emo_texts = emo_text.split("|")
             for emo_text in emo_texts:
                 emo_dict = self.qwen_emo.inference(emo_text)
-                self.logger.print_emotion_vector(emo_dict)
                 # convert ordered dict to list of vectors; the order is VERY important!
                 emo_vector = list(emo_dict.values())
                 emo_vectors.append(emo_vector)
@@ -341,9 +340,13 @@ class IndexTTS2:
             emo_audio_prompt = None
             emo_alpha = 1.0
             EMOTION_DIMENSIONS = ["happy", "angry", "sad", "afraid", "disgusted", "melancholic", "surprised", "calm"]
+            # Collect all emotion vectors for display
+            emo_vec_maps = []
             for emo in emo_vectors:
                 emo_vec_map = {dim: val for dim, val in zip(EMOTION_DIMENSIONS, emo)}
-                self.logger.print_emotion_vector(emo_vec_map)
+                emo_vec_maps.append(emo_vec_map)
+            # Display all emotion vectors side by side
+            self.logger.print_emotion_vector(emo_vec_maps)
             # assert emo_audio_prompt is None
             # assert emo_alpha == 1.0
 

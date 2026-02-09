@@ -50,25 +50,25 @@ class ColorfulLogger:
             return f"[dim]{datetime.now().strftime('%H:%M:%S')}[/dim] "
         return ""
     
-    def info(self, message: str, prefix: str = ">>"):
+    def info(self, message: str, prefix: str = "ℹ"):
         """Print info message"""
-        self.console.print(f"{self._get_timestamp()}{prefix} {message}", style=self.styles['info'])
+        self.console.print(f"{self._get_timestamp()}[bold]{prefix} [/bold] {message}", style=self.styles['info'])
     
     def success(self, message: str, prefix: str = "✓"):
         """Print success message"""
-        self.console.print(f"{self._get_timestamp()}{prefix} {message}", style=self.styles['success'])
+        self.console.print(f"{self._get_timestamp()}[bold]{prefix} [/bold] {message}", style=self.styles['success'])
     
     def warning(self, message: str, prefix: str = "⚠"):
         """Print warning message"""
-        self.console.print(f"{self._get_timestamp()}{prefix} {message}", style=self.styles['warning'])
+        self.console.print(f"{self._get_timestamp()}[bold]{prefix} [/bold] {message}", style=self.styles['warning'])
     
     def error(self, message: str, prefix: str = "✗"):
         """Print error message"""
-        self.console.print(f"{self._get_timestamp()}{prefix} {message}", style=self.styles['error'])
+        self.console.print(f"{self._get_timestamp()}[bold]{prefix} [/bold] {message}", style=self.styles['error'])
     
     def debug(self, message: str, prefix: str = "•"):
         """Print debug message"""
-        self.console.print(f"{self._get_timestamp()}{prefix} {message}", style=self.styles['debug'])
+        self.console.print(f"{self._get_timestamp()}[bold]{prefix} [/bold] {message}", style=self.styles['debug'])
     
     def stage(self, message: str):
         """Print stage header"""
@@ -130,28 +130,57 @@ class ColorfulLogger:
         self.console.print()
         self.console.print(table)
     
-    def print_emotion_vector(self, emotion_dict: Dict[str, float]):
-        """Print emotion vector in a beautiful format"""
-        tree = Tree("[bold yellow]🎭 Emotion Vector[/bold yellow]")
+    def print_emotion_vector(self, emotion_data):
+        """Print emotion vector(s) in a beautiful format
         
-        for emotion, value in emotion_dict.items():
-            # Color based on value
-            if value > 0.7:
-                color = "red"
-            elif value > 0.4:
-                color = "yellow"
-            elif value > 0.1:
-                color = "cyan"
+        Args:
+            emotion_data: Can be either:
+                - A single dict {emotion: value}
+                - A list of dicts [{emotion: value}, ...]
+        """
+        from rich.columns import Columns
+        
+        # Normalize input to list
+        if isinstance(emotion_data, dict):
+            emotion_dicts = [emotion_data]
+        else:
+            emotion_dicts = emotion_data
+        
+        # Create trees for each emotion vector
+        trees = []
+        for idx, emotion_dict in enumerate(emotion_dicts):
+            # Use different title for multiple vectors
+            if len(emotion_dicts) > 1:
+                title = f"[bold yellow]🎭 Emotion Vector #{idx+1}[/bold yellow]"
             else:
-                color = "dim"
+                title = "[bold yellow]🎭 Emotion Vector[/bold yellow]"
             
-            # Create bar visualization
-            bar_length = int(value * 20)
-            bar = "█" * bar_length + "░" * (20 - bar_length)
+            tree = Tree(title)
             
-            tree.add(f"[{color}]{emotion:12s}[/{color}] [{color}]{bar}[/{color}] [{color}]{value:.3f}[/{color}]")
+            for emotion, value in emotion_dict.items():
+                # Color based on value
+                if value > 0.7:
+                    color = "red"
+                elif value > 0.4:
+                    color = "yellow"
+                elif value > 0.1:
+                    color = "cyan"
+                else:
+                    color = "dim"
+                
+                # Create bar visualization
+                bar_length = int(value * 20)
+                bar = "█" * bar_length + "░" * (20 - bar_length)
+                
+                tree.add(f"[{color}]{emotion:12s}[/{color}] [{color}]{bar}[/{color}] [{color}]{value:.3f}[/{color}]")
+            
+            trees.append(tree)
         
-        self.console.print(tree)
+        # Display side by side if multiple vectors
+        if len(trees) > 1:
+            self.console.print(Columns(trees, equal=True, expand=True))
+        else:
+            self.console.print(trees[0])
     
     def panel(self, message: str, title: str = "", style: str = "cyan"):
         """Print message in a panel"""
