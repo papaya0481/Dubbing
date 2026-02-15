@@ -13,8 +13,6 @@ tg_dir = 'mel_convert/test/aligned'
 LEVEL_NAME = 'words'  # 选择对齐的层级名称，通常是 'words' 或 'phones'
 output_dir = f'mel_convert/test/images_{LEVEL_NAME}'
 
-
-
 # 确保输出目录存在
 os.makedirs(output_dir, exist_ok=True)
 

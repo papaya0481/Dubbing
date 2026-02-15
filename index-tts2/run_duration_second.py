@@ -48,12 +48,12 @@ if __name__ == "__main__":
     emo_text = "|".join(emotions)
     
     # 设置每段的秒数
-    target_seconds = [1.5, 1.5, 3]
+    target_seconds = [1.5, 3]
     
     # 转换为 mel tokens（每段）
     target_duration_tokens = seconds_to_mel_tokens(target_seconds)
 
-    target_duration_tokens = None
+    # target_duration_tokens = None
     output = tts.infer(
         spk_audio_prompt=emotion_prompt_path,
         text=text,

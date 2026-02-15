@@ -41,3 +41,4 @@ ESD/
 
 # convert mel spectrograms
 mel_convert/test/
+**/__pycache__/

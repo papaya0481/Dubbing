@@ -1600,12 +1600,12 @@ class UnifiedVoice(nn.Module):
         clamped = lengths.clamp(max=max_index).long()
         
         import os
-        if check and os.path.exists("mel_pos_embedding.csv") == False:
-            # 将所有位置embedding输出csv
-            import pandas as pd
-            all_pos_emb = self.mel_pos_embedding.emb.weight.data.cpu().numpy()
-            df = pd.DataFrame(all_pos_emb)
-            df.to_csv("mel_pos_embedding.csv", index=False, header=False)
+        # if check and os.path.exists("mel_pos_embedding.csv") == False:
+        #     # 将所有位置embedding输出csv
+        #     import pandas as pd
+        #     all_pos_emb = self.mel_pos_embedding.emb.weight.data.cpu().numpy()
+        #     df = pd.DataFrame(all_pos_emb)
+        #     df.to_csv("mel_pos_embedding.csv", index=False, header=False)
         return self.mel_pos_embedding.emb(clamped)
         
     def forward(self, speech_conditioning_latent, text_inputs, text_lengths, mel_codes, mel_codes_lengths, emo_speech_conditioning_latent,
@@ -1935,33 +1935,33 @@ class UnifiedVoice(nn.Module):
             logits_processor.append(TypicalLogitsWarper(mass=typical_mass, min_tokens_to_keep=min_tokens_to_keep))
 
         # ========== Duration Control via RemainingBudgetEOS ==========
-        if target_duration_tokens is not None:
-            # 确保是列表格式
-            if not isinstance(target_duration_tokens, list):
-                target_duration_tokens = [target_duration_tokens]
+        # if target_duration_tokens is not None:
+        #     # 确保是列表格式
+        #     if not isinstance(target_duration_tokens, list):
+        #         target_duration_tokens = [target_duration_tokens]
             
-            # 使用新的 RemainingBudgetEOSProcessor
-            duration_processor = RemainingBudgetEOSProcessor(
-                target_tokens_per_segment=target_duration_tokens,  # 直接传入列表
-                stop_token_id=self.stop_mel_token,
-                verbose=True,
-                # 超参数（根据需要调整）
-                min_ratio=0.5,              # 当前段进度 < 50% 时强力抑制 EOS
-                neutral_ratio=(0.7, 1.0),   # 80%-120% 不干预
-                max_ratio=1.2,              # 超过 200% 时强力鼓励 EOS
-                max_negative_bias=-5.0,     # 抑制强度（可以调整）
-                max_positive_bias=15.0      # 鼓励强度（可以调整）
-            )
+        #     # 使用新的 RemainingBudgetEOSProcessor
+        #     duration_processor = RemainingBudgetEOSProcessor(
+        #         target_tokens_per_segment=target_duration_tokens,  # 直接传入列表
+        #         stop_token_id=self.stop_mel_token,
+        #         verbose=True,
+        #         # 超参数（根据需要调整）
+        #         min_ratio=0.5,              # 当前段进度 < 50% 时强力抑制 EOS
+        #         neutral_ratio=(0.7, 1.0),   # 80%-120% 不干预
+        #         max_ratio=1.2,              # 超过 200% 时强力鼓励 EOS
+        #         max_negative_bias=-5.0,     # 抑制强度（可以调整）
+        #         max_positive_bias=15.0      # 鼓励强度（可以调整）
+        #     )
             
-            # 重要：将 processor 存储到 inference_model 中
-            self.inference_model.duration_processor = duration_processor
+        #     # 重要：将 processor 存储到 inference_model 中
+        #     self.inference_model.duration_processor = duration_processor
             
-            logits_processor.append(duration_processor)
+        #     logits_processor.append(duration_processor)
             
-            _logger.info("[RemainingBudgetEOS] Enabled")
-            _logger.debug(f"   Num segments: {len(target_duration_tokens)}")
-            _logger.debug(f"   Target per segment: {target_duration_tokens}")
-            _logger.debug(f"   Total target: {sum(target_duration_tokens)} semantic tokens")
+        #     _logger.info("[RemainingBudgetEOS] Enabled")
+        #     _logger.debug(f"   Num segments: {len(target_duration_tokens)}")
+        #     _logger.debug(f"   Target per segment: {target_duration_tokens}")
+        #     _logger.debug(f"   Total target: {sum(target_duration_tokens)} semantic tokens")
 
         # 从generate kwargs中提取save_attention_maps参数（不传给generate）
         save_attention_maps = hf_generate_kwargs.pop("save_attention_maps", False)
