@@ -9,7 +9,10 @@ class StreamingHMMAligner:
                  transition_prob=0.1,
                  sigma=1.2,           
                  window_size=None, 
-                 device='cpu'):
+                 device='cpu',
+                 debug=False,
+                 enable_std_head_prune=False,
+                 std_head_topk=10):
         """
         初始化对齐器
         
@@ -23,6 +26,9 @@ class StreamingHMMAligner:
         self.B = num_beams
         self.p = transition_prob
         self.device = device
+        self.debug = debug
+        self.enable_std_head_prune = enable_std_head_prune
+        self.std_head_topk = std_head_topk
         
         # 初始化隐状态 belief state
         self.belief = torch.zeros((self.B, self.Sk), device=self.device)
@@ -30,7 +36,6 @@ class StreamingHMMAligner:
         
         # 用于记录历史对齐轨迹
         self.history = []
-        self.transition_matrix = self._build_transition_matrix().to(self.device)
         
         # 预计算高斯卷积核 (用于 Step B 和 Step C)
         self.kernel_radius = int(3 * sigma) if window_size is None else window_size // 2
@@ -104,9 +109,12 @@ class StreamingHMMAligner:
         根据物理规律，推测当前可能在哪。
         规则：要么停在原地 (1-p)，要么向前走一步 (p)。
         """
-        # 构造移位后的分布 (向前走一步)
-        # 也就是 belief[i] 移动到 belief[i+1]
-        prior = torch.matmul(self.belief, self.transition_matrix)
+        # 稀疏带状转移的等价实现，避免 (B,N) x (N,N) 的矩阵乘法
+        # prior[:, i] = belief[:, i] * (1-p) + belief[:, i-1] * p
+        # 其中最后一个状态保持吸收态：prior[:, -1] 额外加上 belief[:, -1] * p
+        prior = self.belief * (1 - self.p)
+        prior[:, 1:] += self.belief[:, :-1] * self.p
+        prior[:, -1] += self.belief[:, -1] * self.p
         return prior
 
     def _select_best_head(self, prior, attention_heads):
@@ -150,28 +158,53 @@ class StreamingHMMAligner:
         log_prior = torch.log(prior + epsilon) # (B, N)
         
         attn_norm = self._normalize(attention_heads, dim=-1) # (K, B, N)
+
+        # 可选优化：按每个 head 在 N 维上的 std 进行 Top-K 剪枝（默认关闭）
+        # 保留 std 排名前 std_head_topk 的 head，减少后续打分计算量。
+        if self.enable_std_head_prune and attn_norm.shape[0] > self.std_head_topk:
+            # head_std: (K, B)
+            head_std = torch.std(attn_norm, dim=-1)
+            k_keep = min(self.std_head_topk, attn_norm.shape[0])
+            # topk_idx: (k_keep, B)
+            topk_idx = torch.topk(head_std, k=k_keep, dim=0, largest=True, sorted=True).indices
+
+            # 按 beam 维度选择各自的 top-k head
+            attn_norm_perm = attn_norm.permute(1, 0, 2)            # (B, K, N)
+            attn_heads_perm = attention_heads.permute(1, 0, 2)     # (B, K, N)
+            gather_idx = topk_idx.permute(1, 0).unsqueeze(-1).expand(-1, -1, attn_norm.shape[-1])
+
+            pruned_attn_norm = torch.gather(attn_norm_perm, dim=1, index=gather_idx).permute(1, 0, 2)   # (k_keep, B, N)
+            pruned_attention_heads = torch.gather(attn_heads_perm, dim=1, index=gather_idx).permute(1, 0, 2)  # (k_keep, B, N)
+
+            candidate_indices = topk_idx
+        else:
+            pruned_attn_norm = attn_norm
+            pruned_attention_heads = attention_heads
+            candidate_indices = torch.arange(attn_norm.shape[0], device=attn_norm.device).unsqueeze(1).expand(-1, attn_norm.shape[1])
+
         # 计算所有头的得分: shape (L*H, B)
         # attention_heads: (K, B, N), log_prior: (B, N)
         # dot product: sum(head_i * log_prior)
-        scores = torch.sum(attn_norm * log_prior.unsqueeze(0), dim=-1)
+        scores = torch.sum(pruned_attn_norm * log_prior.unsqueeze(0), dim=-1)
         
         # center < 1的不考虑，
-        center = torch.sum(self.indices.unsqueeze(0) * attn_norm, dim=-1) # (K, B)
+        center = torch.sum(self.indices.unsqueeze(0) * pruned_attn_norm, dim=-1) # (K, B)
         mask = center < 1.0
         scores = scores.masked_fill(mask, float('-inf'))
         
-        best_idx = torch.argmax(scores, dim=0) # (B,)
-        
-        # 调试用，直接返回最大的那个头
-        avg = torch.mean(attention_heads, dim=-1)
-        avg_best_idx = torch.argmax(avg, dim=0)
+        best_idx_local = torch.argmax(scores, dim=0) # (B,)
+        b_indices = torch.arange(self.B, device=self.device)
+        best_idx = candidate_indices[best_idx_local, b_indices]  # 映射回原始 head 索引
         
         # Gather best_head: (B, N)
-        b_indices = torch.arange(self.B, device=self.device)
-        best_head_norm = attn_norm[best_idx, b_indices, :]  # shape (B, N)
-        if (torch.sum(self.indices.unsqueeze(0) * best_head_norm, dim=-1) < 1.0).any():
-            import pdb; pdb.set_trace()
-        best_head = attention_heads[avg_best_idx, b_indices, :]
+        best_head_norm = pruned_attn_norm[best_idx_local, b_indices, :]  # shape (B, N)
+        # best_head 仅在 debug 模式下计算
+        if self.debug:
+            avg = torch.mean(pruned_attention_heads, dim=-1)
+            avg_best_idx_local = torch.argmax(avg, dim=0)
+            best_head = pruned_attention_heads[avg_best_idx_local, b_indices, :]
+        else:
+            best_head = best_head_norm
         
         return best_head_norm, best_idx, best_head
 

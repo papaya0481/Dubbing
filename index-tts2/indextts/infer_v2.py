@@ -152,7 +152,7 @@ class IndexTTS2:
         self.logger.model_loaded("CAMPPlus Model", campplus_ckpt_path)
 
         bigvgan_name = self.cfg.vocoder.name
-        self.bigvgan = bigvgan.BigVGAN.from_pretrained(bigvgan_name, use_cuda_kernel=False)
+        self.bigvgan = bigvgan.BigVGAN.from_pretrained(bigvgan_name, use_cuda_kernel=self.use_cuda_kernel)
         self.bigvgan = self.bigvgan.to(self.device)
         self.bigvgan.remove_weight_norm()
         self.bigvgan.eval()
@@ -294,6 +294,24 @@ class IndexTTS2:
 
         return wavs_list
 
+    def _load_and_cut_audio(self, audio_path, max_audio_length_seconds, verbose=False, sr=None):
+        if sr is None:
+            audio, sr = librosa.load(audio_path)
+        else:
+            audio, _ = librosa.load(audio_path, sr=sr)
+        if verbose:
+            self.logger.debug(f"audio shape: {audio.shape}, sample rate: {sr}")
+        if len(audio.shape) == 2:
+            audio = torch.tensor(audio).mean(0).unsqueeze(0)
+        else:
+            audio = torch.tensor(audio).unsqueeze(0)
+        max_len_samples = int(max_audio_length_seconds * sr)
+        if audio.shape[1] > max_len_samples:
+            audio = audio[:, :max_len_samples]
+            if verbose:
+                self.logger.warning(f"audio too long, cut to first {max_audio_length_seconds} seconds")
+        return audio, sr
+
     def _set_gr_progress(self, value, desc):
         if self.gr_progress is not None:
             self.gr_progress(value, desc=desc)
@@ -305,7 +323,7 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None, style_prompt=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_sentence=120, save_attention_maps=False, **generation_kwargs):
+              verbose=False, max_text_tokens_per_sentence=120, return_stats=False, save_attention_maps=False, **generation_kwargs):
         self.logger.stage("Starting Inference")
         self._set_gr_progress(0, "start inference...")
         if verbose:
@@ -361,8 +379,7 @@ class IndexTTS2:
             self._set_gr_progress(0.05, "processing reference audio...")
             self.logger.info("Processing reference audio...")
             if isinstance(spk_audio_prompt, str):
-                audio, sr = librosa.load(spk_audio_prompt)
-                audio = torch.tensor(audio).unsqueeze(0)
+                audio, sr = self._load_and_cut_audio(spk_audio_prompt, 15, verbose)
                 audio_22k = torchaudio.transforms.Resample(sr, 22050)(audio)
                 audio_16k = torchaudio.transforms.Resample(sr, 16000)(audio)
 
@@ -392,8 +409,7 @@ class IndexTTS2:
                 styles_list = []
                 prompt_conditions_list = []
                 for spk_path in spk_audio_prompt:
-                    audio, sr = librosa.load(spk_path)
-                    audio = torch.tensor(audio).unsqueeze(0)
+                    audio, sr = self._load_and_cut_audio(spk_path, 15, verbose)
                     audio_22k = torchaudio.transforms.Resample(sr, 22050)(audio)
                     audio_16k = torchaudio.transforms.Resample(sr, 16000)(audio)
 
@@ -430,8 +446,7 @@ class IndexTTS2:
                 # ref_mel = ref_mel_list[0]
                 # prompt_condition = prompt_conditions_list[0]
                 if style_prompt is not None:
-                    style_audio, sr = librosa.load(style_prompt)
-                    style_audio = torch.tensor(style_audio).unsqueeze(0)
+                    style_audio, sr = self._load_and_cut_audio(style_prompt, 15, verbose)
                     style_audio_16k = torchaudio.transforms.Resample(sr, 16000)(style_audio)
                     
                     feat = torchaudio.compliance.kaldi.fbank(style_audio_16k.to(ref_mel.device),
@@ -460,26 +475,30 @@ class IndexTTS2:
         
         # 新增模块：情感矩阵
         emovec_mats = []
-        if emo_vectors is not None:
-            for emo_vector in emo_vectors:
-                weight_vector = torch.tensor(emo_vector).to(self.device)
-                if use_random:
-                    random_index = [random.randint(0, x - 1) for x in self.emo_num]
-                else:
-                    random_index = [find_most_similar_cosine(style, tmp) for tmp in self.spk_matrix]
+        emo_weight_sums = None
+        if emo_vectors is not None and len(emo_vectors) > 0:
+            emo_vectors_tensor = torch.as_tensor(emo_vectors, device=self.device, dtype=style.dtype)
+            emo_weight_sums = emo_vectors_tensor.sum(dim=1, keepdim=True)
 
+            if use_random:
+                for emo_vector in emo_vectors_tensor:
+                    random_index = [random.randint(0, x - 1) for x in self.emo_num]
+                    emo_matrix = [tmp[index].unsqueeze(0) for index, tmp in zip(random_index, self.emo_matrix)]
+                    emo_matrix = torch.cat(emo_matrix, 0)
+                    emovec_mat = torch.sum(emo_vector.unsqueeze(1) * emo_matrix, 0, keepdim=True)
+                    emovec_mats.append(emovec_mat)
+            else:
+                random_index = [find_most_similar_cosine(style, tmp) for tmp in self.spk_matrix]
                 emo_matrix = [tmp[index].unsqueeze(0) for index, tmp in zip(random_index, self.emo_matrix)]
                 emo_matrix = torch.cat(emo_matrix, 0)
-                emovec_mat = weight_vector.unsqueeze(1) * emo_matrix
-                emovec_mat = torch.sum(emovec_mat, 0)
-                emovec_mat = emovec_mat.unsqueeze(0)
-                emovec_mats.append(emovec_mat)
+                emovec_mats_tensor = emo_vectors_tensor @ emo_matrix
+                emovec_mats = list(emovec_mats_tensor.split(1, dim=0))
 
         if self.cache_emo_cond is None or self.cache_emo_audio_prompt != emo_audio_prompt:
             self._set_gr_progress(0.08, "processing emotion audio...")
             self.logger.info("Processing emotion reference...")
             if isinstance(emo_audio_prompt, str):
-                emo_audio, _ = librosa.load(emo_audio_prompt, sr=16000)
+                emo_audio, _ = self._load_and_cut_audio(emo_audio_prompt, 15, verbose, sr=16000)
                 emo_inputs = self.extract_features(emo_audio, sampling_rate=16000, return_tensors="pt")
                 emo_input_features = emo_inputs["input_features"]
                 emo_attention_mask = emo_inputs["attention_mask"]
@@ -492,7 +511,7 @@ class IndexTTS2:
             elif isinstance(emo_audio_prompt, list):
                 emo_cond_embs = []
                 for emo_audio_path in emo_audio_prompt:
-                    emo_audio, _ = librosa.load(emo_audio_path, sr=16000)
+                    emo_audio, _ = self._load_and_cut_audio(emo_audio_path, 15, verbose, sr=16000)
                     emo_inputs = self.extract_features(emo_audio, sampling_rate=16000, return_tensors="pt")
                     emo_input_features = emo_inputs["input_features"]
                     emo_attention_mask = emo_inputs["attention_mask"]
@@ -580,10 +599,17 @@ class IndexTTS2:
                     )
                     
                 if emo_vectors is not None and len(emo_vectors) > 0:
-                    for emovec_mat in emovec_mats:
-                        emovec = emovec_mat + (1 - torch.sum(weight_vector)) * emovec
-                        emovecs.append(emovec)
-                    # emovec = emovec_mat
+                    if len(emovec_mats) > 0:
+                        base_emovec = emovecs[-1] if len(emovecs) > 0 else emovec
+                        emovec_mats_tensor = torch.cat(emovec_mats, dim=0)
+                        if emo_weight_sums is None:
+                            emo_weight_sums = torch.ones(
+                                (emovec_mats_tensor.size(0), 1),
+                                device=emovec_mats_tensor.device,
+                                dtype=emovec_mats_tensor.dtype,
+                            )
+                        mixed_emovecs = emovec_mats_tensor + (1 - emo_weight_sums.to(base_emovec.dtype)) * base_emovec.expand(emovec_mats_tensor.size(0), -1)
+                        emovecs.extend(mixed_emovecs.split(1, dim=0))
                 elif len(emovecs) == 0:
                     emovecs.append(emovec)
                 
@@ -593,8 +619,10 @@ class IndexTTS2:
                 else:
                     input_cond_lengths = torch.tensor([spk_cond_emb.shape[-1]], device=text_tokens_list[0].device)
                     input_emo_cond_lengths = torch.tensor([emo_cond_emb.shape[-1]], device=text_tokens_list[0].device)
+                
+                # print(f"Merge emovec time: {time.perf_counter() - p_start_time:.2f}s")
 
-                codes, speech_conditioning_latent, attention_mask, seg_lens = self.gpt.inference_speech(
+                codes, speech_conditioning_latent, attention_mask, seg_lens, token_generation_time = self.gpt.inference_speech(
                     spk_cond_emb,
                     text_tokens_list,
                     emo_cond_emb,
@@ -721,6 +749,8 @@ class IndexTTS2:
         wavs = self.insert_interval_silence(wavs, sampling_rate=sampling_rate, interval_silence=interval_silence)
         wav = torch.cat(wavs, dim=1)
         wav_length = wav.shape[-1] / sampling_rate
+        total_inference_time = end_time - start_time
+        rtf = total_inference_time / wav_length if wav_length > 0 else float("inf")
         
         # Print time statistics with beautiful table
         time_stats = {
@@ -729,7 +759,18 @@ class IndexTTS2:
             "S2Mel": s2mel_time,
             "BigVGAN": bigvgan_time,
         }
-        self.logger.print_time_stats(time_stats, end_time - start_time, wav_length)
+        
+        inference_stats = {
+            "total_inference_time": total_inference_time,
+            "wav_length": wav_length,
+            "rtf": rtf,
+            "token_generation_time": token_generation_time,
+            "gpt_gen_time": gpt_gen_time,
+            "gpt_forward_time": gpt_forward_time,
+            "s2mel_time": s2mel_time,
+            "bigvgan_time": bigvgan_time,
+        }
+        self.logger.print_time_stats(time_stats, total_inference_time, wav_length)
 
         # save audio
         wav = wav.cpu()  # to cpu
@@ -742,11 +783,15 @@ class IndexTTS2:
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
             torchaudio.save(output_path, wav.type(torch.int16), sampling_rate)
             self.logger.success(f"wav file saved to: {output_path}")
+            if return_stats:
+                return output_path, seg_lens, wav_length, inference_stats
             return output_path, seg_lens, wav_length
         else:
             # 返回以符合Gradio的格式要求
             wav_data = wav.type(torch.int16)
             wav_data = wav_data.numpy().T
+            if return_stats:
+                return (sampling_rate, wav_data), inference_stats
             return (sampling_rate, wav_data)
 
 

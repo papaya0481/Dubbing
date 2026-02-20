@@ -1,4 +1,5 @@
 import functools
+import time
 
 import numpy as np
 
@@ -489,22 +490,43 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
         input_attention_masks = kwargs.get("input_attention_masks", None)
         dynamic_cond_mask_idx = kwargs.get("dynamic_cond_mask_idx", None)
         trunc_index = input_attention_masks.shape[0] if input_attention_masks is not None else 0
+        
+        is_decoding = past_key_values is not None
+        
+        seq_len = input_ids.shape[1]
         device = input_ids.device
         mask_dtype = next(self.parameters()).dtype
+        
+        # 向量化处理 attention_phase 和 attention_masks，避免循环，提高效率
         if attention_phase is not None:
             attention_masks = kwargs.get("attention_masks")
-            attention_mask_list = []
-            for i, phase in enumerate(attention_phase):
-                attention_mask_list.append(attention_masks[phase]) # [B, seq_len]
-            attention_mask = torch.cat(attention_mask_list, dim=0) # [B*num_beams, seq_len]
+            attention_masks = torch.stack(attention_masks, dim=0).to(device)  # [B, 1, seq_len]
             
-            attention_mask = F.pad(attention_mask, (0, input_ids.shape[1] - attention_mask.shape[1]), value=1)
+            if isinstance(attention_phase, list):
+                attention_phase = torch.tensor(attention_phase, device=device)  # [B, ]
+            
+            selected_attention_mask = attention_masks[attention_phase]  # [B, 1, seq_len]
+            # squeeze掉中间的维度，得到 [B, seq_len]
+            selected_attention_mask = selected_attention_mask.squeeze(1)  # [B, seq_len]
+            
+            attention_mask = F.pad(selected_attention_mask, (0, seq_len - selected_attention_mask.shape[1]), value=1)
             kwargs["attention_mask"] = attention_mask
             # attention mask 右侧补1直到len(input_ids)
             
             if input_full_attention_mask==False:
-                kwargs["_4d_attention_mask"] = construct_attn_mask(
-                    attention_masks, phases_attn_mask_ids, trunc_index, input_attention_masks if input_full_attention_mask==False else None, dynamic_cond_mask_idx, attention_phase, device, mask_dtype
+                # kwargs["_4d_attention_mask"] = construct_attn_mask(
+                #     attention_masks, phases_attn_mask_ids, trunc_index, input_attention_masks if input_full_attention_mask==False else None, dynamic_cond_mask_idx, attention_phase, device, mask_dtype
+                # )
+                kwargs["_4d_attention_mask"] = self.construct_attn_mask_opt(
+                    phase_1dim_attn_masks=attention_masks,
+                    phases_attn_mask_ids=phases_attn_mask_ids,
+                    trunc_index=trunc_index,
+                    input_attention_masks=input_attention_masks if input_full_attention_mask==False else None,
+                    dynamic_cond_mask_idx=dynamic_cond_mask_idx,
+                    current_phases=attention_phase,
+                    device=device,
+                    mask_dtype=mask_dtype,
+                    is_decoding=is_decoding,
                 )
                 kwargs["attention_mask"] = torch.ones(input_ids.shape, device=device, dtype=mask_dtype)
             
@@ -512,6 +534,7 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
         token_type_ids = kwargs.get("token_type_ids", None)  # usually None
         if not self.kv_cache:
             past_key_values = None
+            
         # only last token for inputs_ids if past is defined in kwargs
         if past_key_values:
             input_ids = input_ids[:, -1].unsqueeze(-1)
@@ -546,6 +569,178 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
             "attention_phase": attention_phase,
             "output_path": output_path,
         }
+        
+    def construct_attn_mask_opt(
+        self,
+        phase_1dim_attn_masks,  
+        phases_attn_mask_ids, 
+        trunc_index, 
+        input_attention_masks, 
+        dynamic_cond_mask_idx, 
+        current_phases, 
+        device, 
+        mask_dtype,
+        is_decoding=False  # 指示是否处于解码阶段
+    ):
+        """
+        构造 4D Attention Mask（优化版）。
+        
+        与 construct_attn_mask 逻辑完全一致，但在 decoding 阶段只计算最后一行，
+        避免每步重建完整 [output_len, output_len] 矩阵。
+        
+        原始逻辑回顾：
+          1. 构建 attention_mask [1, 1, output_len, output_len]（每行是该 token 的可见性向量）
+          2. 构建上三角 causal_mask（对角线以上为 min_dtype，其余为 0）
+          3. padding_mask = (causal_mask + attention_mask) == 0
+             即：causal 允许（==0）且 attention 也为 0 的位置，才需要额外屏蔽
+          4. causal_mask.masked_fill(padding_mask, min_dtype)
+          
+        对于最后一行（decoding 时唯一需要的行）：
+          causal_mask 的最后一行全为 0（最后一个 token 可以看到所有之前的 token）
+          所以 padding_mask 的最后一行 = (0 + attention_mask[-1]) == 0 = (attention_mask[-1] == 0)
+          最终 mask[-1] 的逻辑：attention_mask 为 0 的位置填 min_dtype，其余为 0
+          
+        这与 prefill 阶段的完整逻辑是一致的（最后一行的 causal 部分本身就是全 0）。
+
+        Args:
+            phase_1dim_attn_masks (`Tensor`): 不同阶段 Attention masks 集合，形状 [num_phases, 1, mask_len]
+            phases_attn_mask_ids (`List[List[int]]`): 每个生成 token 对应的 mask_id 列表，即 tokenwise_attention_mask
+            trunc_index (`int`): 前置 token 数量（prompt 长度）
+            input_attention_masks (`Tensor` or `None`): 前置 token 的 attention masks，形状 [trunc_index, mask_len]
+            dynamic_cond_mask_idx (`List[int]` or `None`): 特殊 token 位置列表，这些位置的 mask 需要动态替换为当前 phase 的 mask
+            current_phases (`Tensor`): 当前 batch 中每个样本的 attention phase
+            device (`torch.device`): 设备信息
+            mask_dtype (`torch.dtype`): mask 的 dtype
+            is_decoding (`bool`): 是否处于解码阶段（如果是，则只计算最后一行的 mask）
+            
+        Returns:
+            `Tensor`: 4D Attention Mask
+                - Prefill: [batch_size, 1, output_len, output_len]
+                - Decoding: [batch_size, 1, 1, output_len]
+        """
+        min_dtype = torch.finfo(mask_dtype).min
+        batch_size = len(phases_attn_mask_ids)
+
+        if dynamic_cond_mask_idx is not None and isinstance(dynamic_cond_mask_idx, torch.Tensor):
+            dynamic_cond_mask_idx = dynamic_cond_mask_idx.tolist()
+
+        if is_decoding:
+            # ==========================================
+            # Decoding 阶段：只计算最后一行的 mask
+            # ==========================================
+            # 最后一行的 causal_mask 全为 0（可以看到所有之前的 token），
+            # 所以最终 mask = min_dtype where attention_mask == 0, else 0
+            # 这与原始代码构建完整矩阵后取 [-1:, :] 的结果完全一致。
+            output_lens = torch.as_tensor(
+                [len(mask_ids) + trunc_index for mask_ids in phases_attn_mask_ids],
+                device=device,
+                dtype=torch.long,
+            )
+            if not torch.equal(output_lens, output_lens[:1].expand_as(output_lens)):
+                raise ValueError(
+                    "Decoding expects equal output_len across batch for stacking 4D mask."
+                )
+            output_len = int(output_lens[0].item())
+            last_row_indices = output_lens - 1
+
+            last_mask_ids = torch.as_tensor(
+                [mask_ids[-1] for mask_ids in phases_attn_mask_ids],
+                device=device,
+                dtype=torch.long,
+            )
+
+            if isinstance(current_phases, torch.Tensor):
+                current_phases_t = current_phases.to(device=device, dtype=torch.long)
+            else:
+                current_phases_t = torch.as_tensor(
+                    current_phases, device=device, dtype=torch.long
+                )
+
+            if dynamic_cond_mask_idx is not None:
+                dyn_idx = torch.as_tensor(dynamic_cond_mask_idx, device=device, dtype=torch.long)
+                use_dynamic = torch.isin(last_row_indices, dyn_idx)
+                mask_ids = torch.where(use_dynamic, current_phases_t, last_mask_ids)
+            else:
+                mask_ids = last_mask_ids
+
+            mask_bank = phase_1dim_attn_masks
+            if mask_bank.dim() == 3 and mask_bank.shape[1] == 1:
+                mask_bank = mask_bank.squeeze(1)  # [num_phases, mask_len]
+
+            row_mask = mask_bank.index_select(0, mask_ids)
+            if row_mask.shape[1] < output_len:
+                row_mask = F.pad(row_mask, (0, output_len - row_mask.shape[1]), value=1)
+            else:
+                row_mask = row_mask[:, :output_len]
+
+            final_rows = torch.zeros((batch_size, output_len), dtype=mask_dtype, device=device)
+            final_rows.masked_fill_(row_mask == 0, min_dtype)
+
+            # [batch_size, output_len] -> [batch_size, 1, 1, output_len]
+            return final_rows.unsqueeze(1).unsqueeze(1)
+
+        else:
+            # ==========================================
+            # Prefill 阶段：构建完整矩阵（与原始逻辑一致）
+            # ==========================================
+            causal_masks = []
+            for i in range(batch_size):
+                output_len = len(phases_attn_mask_ids[i]) + trunc_index
+
+                # 1. 构建 attention_mask 矩阵的每一行
+                if input_attention_masks is None:
+                    attention_mask_list = [
+                        torch.ones((1, output_len), dtype=torch.long, device=device)
+                    ] * trunc_index
+                else:
+                    # 注意：原始代码中 list comprehension 的循环变量 i 遮蔽了外层 i，
+                    # 实际效果是用 input_attention_masks[0..trunc_index-1]。
+                    # input_attention_masks 形状为 [trunc_index, mask_len]，逐行 pad
+                    attention_mask_list = [
+                        F.pad(
+                            input_attention_masks[k],
+                            (0, output_len - input_attention_masks[k].shape[0]),
+                            value=1,
+                        ).unsqueeze(0)
+                        for k in range(trunc_index)
+                    ]
+
+                # 2. Generated token 部分
+                for mask_id in phases_attn_mask_ids[i]:
+                    mask_vec = phase_1dim_attn_masks[mask_id]
+                    if mask_vec.dim() == 1:
+                        mask_vec = mask_vec.unsqueeze(0)
+                    attention_mask_list.append(
+                        F.pad(mask_vec, (0, output_len - mask_vec.shape[1]), value=1)
+                    )
+
+                # 3. 拼接 -> [1, 1, output_len, output_len]
+                attention_mask = torch.cat(attention_mask_list, dim=0).unsqueeze(0).unsqueeze(0)
+
+                # 4. dynamic_cond_mask_idx 行替换
+                if dynamic_cond_mask_idx is not None:
+                    for j in dynamic_cond_mask_idx:
+                        phase_mask = phase_1dim_attn_masks[current_phases[i]]
+                        if phase_mask.dim() == 1:
+                            phase_mask = phase_mask.unsqueeze(0)
+                        attention_mask[0, 0, j, :] = F.pad(
+                            phase_mask,
+                            (0, output_len - phase_mask.shape[-1]),
+                            value=1,
+                        )
+
+                # 5. 构建 causal_mask 并合并
+                causal_mask = torch.full(
+                    (output_len, output_len), fill_value=min_dtype, dtype=mask_dtype, device=device
+                )
+                causal_mask = torch.triu(causal_mask, diagonal=1)
+                causal_mask = causal_mask[None, None, :, :]
+                # 原始逻辑：padding_mask = (causal_mask + attention_mask) == 0
+                padding_mask = (causal_mask + attention_mask) == 0
+                causal_mask = causal_mask.masked_fill(padding_mask, min_dtype)
+                causal_masks.append(causal_mask)
+
+            return torch.cat(causal_masks, dim=0)
         
     def detect_emotion_twist(self, 
                         next_indices, 
@@ -591,12 +786,17 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
                 _logger.debug(f"[eos] Beam {i} enters phase {model_kwargs['attention_phase'][i]}")
             return is_emotion_twist
         elif method == "hmm":
-            all_attn = torch.stack(output_attentions, dim=0)  # [num_layers, beamsize, num_heads, seq_len, seq_len]
-            
             text_last_token_position = model_kwargs.get('text_last_token_position', None)
             text_bos_idx = text_last_token_position[0]
             text_eos_idx = text_last_token_position[1][-1] + 1
-            all_layer_attn = all_attn[:, :, :, -1, text_bos_idx:text_eos_idx] # [num_layers, beamsize, num_heads, seq_len], 只取最后一个token的attn，以及text部分
+
+            # 性能优化：避免先构造完整 [L, B, H, T, T] 的 all_attn，再切片。
+            # 直接对每层取最后 query + text 区间后再 stack，可显著降低内存带宽与中间张量开销。
+            all_layer_attn = torch.stack(
+                [layer_attn[:, :, -1, text_bos_idx:text_eos_idx] for layer_attn in output_attentions],
+                dim=0,
+            )  # [L, B, H, Sk]
+            current_total_len = output_attentions[0].shape[-1]
             
             L, B, H, Sk = all_layer_attn.shape  # L: 层数，H: 头，B: beamsize, Sk: text_len
 
@@ -632,14 +832,18 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
             # TODO: 以上可视化属于增强功能，下面才是核心逻辑。
             
             attention_phase = model_kwargs.get("attention_phase", None)
-            text_last_position_array = torch.tensor(
-                text_last_token_position[1] - text_last_token_position[0], 
-                device=all_layer_attn.device)  # [B, ]
+            text_last_position_array = model_kwargs.get("_text_last_position_array")
+            if text_last_position_array is None:
+                text_last_position_array = torch.as_tensor(
+                    text_last_token_position[1] - text_last_token_position[0],
+                    device=all_layer_attn.device,
+                )  # [B, ]
+                model_kwargs["_text_last_position_array"] = text_last_position_array
             text_last_pos_per_beam = text_last_position_array[attention_phase]  # [B, ]
             
             
             if self.hmm is None:
-                self.hmm = StreamingHMMAligner(num_beams=B, num_text_tokens=Sk, device=all_layer_attn.device)
+                self.hmm = StreamingHMMAligner(num_beams=B, num_text_tokens=Sk, device=all_layer_attn.device, enable_std_head_prune=False)
             
             # 只有在需要保存attention maps时才传递processor
             processor = self.attn_map_processor if model_kwargs.get("save_attention_maps", False) else None
@@ -651,7 +855,6 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
                     i = i.item()
                     
                      # 调试：记录段切换位置（减去前置token）
-                    current_total_len = all_attn.shape[-1]  # 包含前置token的总长度
                     trunc_index = self.trunc_index  # 从 self 读取前置token数量
                     current_sem_len = current_total_len - trunc_index  # 实际生成的semantic token位置
                     
@@ -668,7 +871,7 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
                             self.segment_positions[i].append(current_sem_len)
                     
                     model_kwargs["attention_phase"][i] += 1
-                    _logger.debug(f"[hmm] Beam {i} enters phase {model_kwargs['attention_phase'][i]} at sem {all_attn.shape[-1]} ")
+                    _logger.debug(f"[hmm] Beam {i} enters phase {model_kwargs['attention_phase'][i]} at sem {current_total_len} ")
                    
                 # ===== 新增：通知 duration_processor 段切换信息 =====
                 if self.duration_processor is not None:
@@ -842,6 +1045,7 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
             suspect_twist_pos = (token_idx > text_last_pos_per_beam) & \
                                 (prev_token_idx == token_idx - 1)
                                 # 位置超过text最后token的位置, bool tensor
+                                
             if suspect_twist_pos.any():
                 # 执行情感转折比较
                 indices = torch.where(suspect_twist_pos)[0]
@@ -1600,12 +1804,12 @@ class UnifiedVoice(nn.Module):
         clamped = lengths.clamp(max=max_index).long()
         
         import os
-        # if check and os.path.exists("mel_pos_embedding.csv") == False:
-        #     # 将所有位置embedding输出csv
-        #     import pandas as pd
-        #     all_pos_emb = self.mel_pos_embedding.emb.weight.data.cpu().numpy()
-        #     df = pd.DataFrame(all_pos_emb)
-        #     df.to_csv("mel_pos_embedding.csv", index=False, header=False)
+        if check and os.path.exists("mel_pos_embedding.csv") == False:
+            # 将所有位置embedding输出csv
+            import pandas as pd
+            all_pos_emb = self.mel_pos_embedding.emb.weight.data.cpu().numpy()
+            df = pd.DataFrame(all_pos_emb)
+            df.to_csv("mel_pos_embedding.csv", index=False, header=False)
         return self.mel_pos_embedding.emb(clamped)
         
     def forward(self, speech_conditioning_latent, text_inputs, text_lengths, mel_codes, mel_codes_lengths, emo_speech_conditioning_latent,
@@ -1935,38 +2139,39 @@ class UnifiedVoice(nn.Module):
             logits_processor.append(TypicalLogitsWarper(mass=typical_mass, min_tokens_to_keep=min_tokens_to_keep))
 
         # ========== Duration Control via RemainingBudgetEOS ==========
-        # if target_duration_tokens is not None:
-        #     # 确保是列表格式
-        #     if not isinstance(target_duration_tokens, list):
-        #         target_duration_tokens = [target_duration_tokens]
+        if target_duration_tokens is not None:
+            # 确保是列表格式
+            if not isinstance(target_duration_tokens, list):
+                target_duration_tokens = [target_duration_tokens]
             
-        #     # 使用新的 RemainingBudgetEOSProcessor
-        #     duration_processor = RemainingBudgetEOSProcessor(
-        #         target_tokens_per_segment=target_duration_tokens,  # 直接传入列表
-        #         stop_token_id=self.stop_mel_token,
-        #         verbose=True,
-        #         # 超参数（根据需要调整）
-        #         min_ratio=0.5,              # 当前段进度 < 50% 时强力抑制 EOS
-        #         neutral_ratio=(0.7, 1.0),   # 80%-120% 不干预
-        #         max_ratio=1.2,              # 超过 200% 时强力鼓励 EOS
-        #         max_negative_bias=-5.0,     # 抑制强度（可以调整）
-        #         max_positive_bias=15.0      # 鼓励强度（可以调整）
-        #     )
+            # 使用新的 RemainingBudgetEOSProcessor
+            duration_processor = RemainingBudgetEOSProcessor(
+                target_tokens_per_segment=target_duration_tokens,  # 直接传入列表
+                stop_token_id=self.stop_mel_token,
+                verbose=True,
+                # 超参数（根据需要调整）
+                min_ratio=0.5,              # 当前段进度 < 50% 时强力抑制 EOS
+                neutral_ratio=(0.7, 1.0),   # 80%-120% 不干预
+                max_ratio=1.2,              # 超过 200% 时强力鼓励 EOS
+                max_negative_bias=-5.0,     # 抑制强度（可以调整）
+                max_positive_bias=15.0      # 鼓励强度（可以调整）
+            )
             
-        #     # 重要：将 processor 存储到 inference_model 中
-        #     self.inference_model.duration_processor = duration_processor
+            # 重要：将 processor 存储到 inference_model 中
+            self.inference_model.duration_processor = duration_processor
             
-        #     logits_processor.append(duration_processor)
+            logits_processor.append(duration_processor)
             
-        #     _logger.info("[RemainingBudgetEOS] Enabled")
-        #     _logger.debug(f"   Num segments: {len(target_duration_tokens)}")
-        #     _logger.debug(f"   Target per segment: {target_duration_tokens}")
-        #     _logger.debug(f"   Total target: {sum(target_duration_tokens)} semantic tokens")
+            _logger.info("[RemainingBudgetEOS] Enabled")
+            _logger.debug(f"   Num segments: {len(target_duration_tokens)}")
+            _logger.debug(f"   Target per segment: {target_duration_tokens}")
+            _logger.debug(f"   Total target: {sum(target_duration_tokens)} semantic tokens")
 
         # 从generate kwargs中提取save_attention_maps参数（不传给generate）
         save_attention_maps = hf_generate_kwargs.pop("save_attention_maps", False)
         
         max_length = (trunc_index + self.max_mel_tokens - 1) if max_generate_length is None else trunc_index + max_generate_length
+        token_gen_start_time = time.perf_counter()
         output = self.inference_model.generate(inputs, 
                                             bos_token_id=self.start_mel_token, pad_token_id=self.stop_mel_token,
                                             eos_token_id=self.stop_mel_token, attention_masks=attention_masks,
@@ -1978,6 +2183,8 @@ class UnifiedVoice(nn.Module):
                                             dynamic_cond_mask_idx=dynamic_cond_mask_idx,
                                             save_attention_maps=save_attention_maps,
                                             **hf_generate_kwargs)
+        token_generation_time = time.perf_counter() - token_gen_start_time
+        print(f">> Token generation time (model_v2.generate): {token_generation_time:.4f} seconds")
         
         # 只有在需要时才保存attention maps
         if save_attention_maps:
@@ -2066,7 +2273,7 @@ class UnifiedVoice(nn.Module):
         # pd.DataFrame(causal_mask[0,0].cpu().numpy()).to_csv('mask.csv', index=False, header=False)
         if speech_conditioning_latent_list is not None:
             speech_conditioning_latent = speech_conditioning_latent_list
-        return output.sequences, speech_conditioning_latent, causal_mask, seg_lens
+        return output.sequences, speech_conditioning_latent, causal_mask, seg_lens, token_generation_time
 
     def get_emovec(self, emo_speech_conditioning_latent, emo_cond_lengths):
         emo_vec_syn_ori = self.get_emo_conditioning(emo_speech_conditioning_latent.transpose(1,2), emo_cond_lengths)

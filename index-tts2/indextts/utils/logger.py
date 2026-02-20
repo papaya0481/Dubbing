@@ -25,10 +25,18 @@ from rich.style import Style
 class ColorfulLogger:
     """Beautiful colorful logger with hierarchical display"""
     
-    def __init__(self, name: str = "IndexTTS2", enable_timestamp: bool = True):
+    LEVELS = {
+        "DEBUG": 10,
+        "INFO": 20,
+        "WARNING": 30,
+        "ERROR": 40,
+    }
+
+    def __init__(self, name: str = "IndexTTS2", enable_timestamp: bool = True, level: str = "INFO"):
         self.name = name
         self.console = Console()
         self.enable_timestamp = enable_timestamp
+        self.level = self._normalize_level(level)
         
         # Define color styles
         self.styles = {
@@ -43,6 +51,22 @@ class ColorfulLogger:
             'value': Style(color="cyan", bold=True),
             'key': Style(color="white", dim=True),
         }
+
+    def _normalize_level(self, level: str) -> int:
+        if level is None:
+            return self.LEVELS["INFO"]
+        if isinstance(level, str):
+            return self.LEVELS.get(level.upper(), self.LEVELS["INFO"])
+        if isinstance(level, int):
+            return level
+        return self.LEVELS["INFO"]
+
+    def set_level(self, level: str):
+        self.level = self._normalize_level(level)
+
+    def _should_log(self, level_name: str) -> bool:
+        required = self.LEVELS[level_name]
+        return required >= self.level
     
     def _get_timestamp(self) -> str:
         """Get formatted timestamp"""
@@ -52,22 +76,32 @@ class ColorfulLogger:
     
     def info(self, message: str, prefix: str = "ℹ"):
         """Print info message"""
+        if not self._should_log("INFO"):
+            return
         self.console.print(f"{self._get_timestamp()}[bold]{prefix} [/bold] {message}", style=self.styles['info'])
     
     def success(self, message: str, prefix: str = "✓"):
         """Print success message"""
+        if not self._should_log("INFO"):
+            return
         self.console.print(f"{self._get_timestamp()}[bold]{prefix} [/bold] {message}", style=self.styles['success'])
     
     def warning(self, message: str, prefix: str = "⚠"):
         """Print warning message"""
+        if not self._should_log("WARNING"):
+            return
         self.console.print(f"{self._get_timestamp()}[bold]{prefix} [/bold] {message}", style=self.styles['warning'])
     
     def error(self, message: str, prefix: str = "✗"):
         """Print error message"""
+        if not self._should_log("ERROR"):
+            return
         self.console.print(f"{self._get_timestamp()}[bold]{prefix} [/bold] {message}", style=self.styles['error'])
     
     def debug(self, message: str, prefix: str = "•"):
         """Print debug message"""
+        if not self._should_log("DEBUG"):
+            return
         from rich.text import Text
         # Create text with bold prefix and plain message (no markup parsing in message)
         text = Text()
@@ -79,6 +113,8 @@ class ColorfulLogger:
     
     def stage(self, message: str):
         """Print stage header"""
+        if not self._should_log("INFO"):
+            return
         self.console.print()
         self.console.print(f"{'='*60}", style="blue")
         self.console.print(f"  {message}", style=self.styles['stage'])
@@ -86,12 +122,16 @@ class ColorfulLogger:
     
     def model_loaded(self, model_name: str, checkpoint_path: str):
         """Print model loading success"""
+        if not self._should_log("INFO"):
+            return
         self.console.print(
             f"{self._get_timestamp()}[green]✓[/green] {model_name:20s} loaded from: [dim]{checkpoint_path}[/dim]"
         )
     
     def device_info(self, device: str, is_fp16: bool, use_cuda_kernel: bool):
         """Print device configuration info"""
+        if not self._should_log("INFO"):
+            return
         tree = Tree(f"[bold cyan]Device Configuration[/bold cyan]")
         tree.add(f"[green]Device:[/green] {device}")
         tree.add(f"[green]FP16:[/green] {is_fp16}")
@@ -100,6 +140,8 @@ class ColorfulLogger:
     
     def print_dict(self, title: str, data: Dict[str, Any], level: int = 0):
         """Print dictionary with hierarchical structure"""
+        if not self._should_log("INFO"):
+            return
         indent = "  " * level
         if level == 0:
             self.console.print(f"\n{self._get_timestamp()}[bold]{title}[/bold]")
@@ -117,6 +159,8 @@ class ColorfulLogger:
     
     def print_time_stats(self, stats: Dict[str, float], total_time: float, audio_length: float):
         """Print time statistics in a beautiful table"""
+        if not self._should_log("INFO"):
+            return
         table = Table(title="⏱ Performance Statistics", show_header=True, header_style="bold magenta")
         table.add_column("Stage", style="cyan", width=25)
         table.add_column("Time (s)", justify="right", style="yellow", width=15)
@@ -145,6 +189,8 @@ class ColorfulLogger:
                 - A single dict {emotion: value}
                 - A list of dicts [{emotion: value}, ...]
         """
+        if not self._should_log("INFO"):
+            return
         from rich.columns import Columns
         
         # Normalize input to list
@@ -191,10 +237,14 @@ class ColorfulLogger:
     
     def panel(self, message: str, title: str = "", style: str = "cyan"):
         """Print message in a panel"""
+        if not self._should_log("INFO"):
+            return
         self.console.print(Panel(message, title=title, border_style=style))
     
     def rule(self, title: str = "", style: str = "cyan"):
         """Print a horizontal rule"""
+        if not self._should_log("INFO"):
+            return
         from rich.rule import Rule
         self.console.print(Rule(title, style=style))
     
@@ -210,6 +260,8 @@ class ColorfulLogger:
             total_tokens: Total number of semantic tokens
             selected_beam: ID of the selected beam (can be int or tensor)
         """
+        if not self._should_log("INFO"):
+            return
         from rich.panel import Panel
         from rich.columns import Columns
         import torch
@@ -317,13 +369,19 @@ class ColorfulProgress:
 
 # Global logger instance
 _logger_instance = None
+_UNSET = object()
 
 
-def get_logger(name: str = "IndexTTS2") -> ColorfulLogger:
+def get_logger(name: str = "IndexTTS2", log_level: Optional[str] = _UNSET) -> ColorfulLogger:
     """Get or create global logger instance"""
     global _logger_instance
     if _logger_instance is None:
-        _logger_instance = ColorfulLogger(name)
+        init_level = "INFO" if log_level is _UNSET else log_level
+        _logger_instance = ColorfulLogger(name, level=init_level)
+    else:
+        if log_level is not _UNSET:
+            _logger_instance.set_level(log_level)
+    return _logger_instance
     return _logger_instance
 
 

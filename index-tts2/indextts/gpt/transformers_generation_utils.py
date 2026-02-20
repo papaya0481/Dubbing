@@ -25,6 +25,8 @@ import torch.distributed as dist
 from torch import nn
 from torch.nn import functional as F
 
+import time
+
 from transformers.cache_utils import (
     Cache,
     DynamicCache,
@@ -2049,7 +2051,7 @@ class GenerationMixin:
 
         device = inputs_tensor.device
         self._prepare_special_tokens(generation_config, device=device)
-        print(f"inputs_tensor shape: {inputs_tensor.shape}, model_input_name: {model_input_name}")
+        # print(f"inputs_tensor shape: {inputs_tensor.shape}, model_input_name: {model_input_name}")
         # decoder-only models must use left-padding for batched generation.
         if not self.config.is_encoder_decoder and not is_torchdynamo_compiling():
             # If `input_ids` was given, check if the last id in any sequence is `pad_token_id`
@@ -3244,7 +3246,6 @@ class GenerationMixin:
 
         batch_size = len(beam_scorer._beam_hyps)
         num_beams = beam_scorer.num_beams
-        print("num_beams: ", num_beams)
 
         batch_beam_size, cur_len = input_ids.shape
         model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
@@ -3297,10 +3298,14 @@ class GenerationMixin:
         if model_kwargs.get("method") is not None and model_kwargs.get("method") == "mas":
             self.mas_mu = None
         
+        g_start_time = time.perf_counter()
+        inter = 0
         while self._has_unfinished_sequences(this_peer_finished, synced_gpus, device=input_ids.device):
+            inter += 1
             # have_emotion_twist = True
             # while have_emotion_twist:
                 # print("model_kwargs: ", model_kwargs)
+            e_start_time = time.perf_counter()
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
             # prepare variable output controls (note: some models won't accept all output controls)
@@ -3420,7 +3425,7 @@ class GenerationMixin:
                 **model_kwargs,
             )
                 
-            if have_emotion_twist:
+            # if have_emotion_twist:
                 # 回退n个token，让衔接更自然一些
                 # backoff_len = min(0, input_ids.shape[-1] - 1)
                 # if backoff_len > 0:
@@ -3429,8 +3434,8 @@ class GenerationMixin:
                 #     for i in range(batch_size * num_beams):
                 #         tokenwise_attention_mask[i] = tokenwise_attention_mask[i][:-backoff_len]
                 # 丢弃失效的缓存，避免长度与attention mask不一致
-                model_kwargs["past_key_values"] = None
-                model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
+                # model_kwargs["past_key_values"] = None
+                # model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
                 
                 # TODO: 将已经生成的past_key_values回退1位，但是会导致eos继续生成直到彻底结束（硬mask时的问题）
                 # if model_kwargs.get("past_key_values", None) is not None:
@@ -3440,7 +3445,7 @@ class GenerationMixin:
                 #         for layer in current_kv_cache
                 #     )
                 #     model_kwargs["past_key_values"] = new_kv_cache
-                
+            
             # stateless
             beam_outputs = beam_scorer.process(
                 input_ids,
@@ -3457,13 +3462,16 @@ class GenerationMixin:
             beam_scores = beam_outputs["next_beam_scores"]
             beam_next_tokens = beam_outputs["next_beam_tokens"]
             beam_idx = beam_outputs["next_beam_indices"]
+            cpu_beam_idx = beam_idx.tolist()
             
             #  ===== beam 重排序相关的额外操作 =====
-            model_kwargs["attention_phase"] = [model_kwargs["attention_phase"][i] for i in beam_idx]    # 重要：更新attention_phase顺序
+            model_kwargs["attention_phase"] = [model_kwargs["attention_phase"][i] for i in cpu_beam_idx]    # 重要：更新attention_phase顺序
             # 更新tokenwise_attention_mask
-            old_tokenwise_attention_mask = copy.deepcopy(tokenwise_attention_mask)
-            for i, beam_id in enumerate(beam_idx):
-                tokenwise_attention_mask[i] = old_tokenwise_attention_mask[beam_id] + [model_kwargs["attention_phase"][i]]
+            tokenwise_attention_mask = [
+                tokenwise_attention_mask[beam_id] + [model_kwargs["attention_phase"][i]]
+                for i, beam_id in enumerate(cpu_beam_idx)
+            ]
+            model_kwargs["tokenwise_attention_mask"] = tokenwise_attention_mask
             
             # 1. 重排 HMM 状态
             if self.hmm is not None:
@@ -3473,12 +3481,10 @@ class GenerationMixin:
             # 新的 beam i 来自旧的 beam beam_idx[i]
             if self.segment_positions is not None:
                 new_positions = {}
-                # beam_idx 是 Tensor，转成 list 方便遍历
-                cpu_beam_idx = beam_idx.cpu().tolist()
                 for i, old_beam_id in enumerate(cpu_beam_idx):
                     if old_beam_id in self.segment_positions:
-                        # 必须使用 deepcopy，防止引用的列表被后续修改污染
-                        new_positions[i] = copy.deepcopy(self.segment_positions[old_beam_id])
+                        # 列表元素为 int，浅拷贝即可避免后续引用污染
+                        new_positions[i] = list(self.segment_positions[old_beam_id])
                 self.segment_positions = new_positions
 
             input_ids = torch.cat([input_ids[beam_idx, :], beam_next_tokens.unsqueeze(-1)], dim=-1)
@@ -3509,7 +3515,9 @@ class GenerationMixin:
             if beam_scorer.is_done or all(stopping_criteria(input_ids, scores)) or cur_len >= 1500:
                 this_peer_finished = True
             # print("="*20)
+            # print(f"detect emotion {inter} twist time: {time.perf_counter() - e_start_time:.7f} seconds")
 
+        print(f"gen token time: {time.perf_counter() - g_start_time:.4f} seconds")
         sequence_outputs = beam_scorer.finalize(
             input_ids,
             beam_scores,
