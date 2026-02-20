@@ -317,7 +317,61 @@ class IndexTTS2:
             self.gr_progress(value, desc=desc)
         if self.colorful_progress is not None:
             self.colorful_progress.update(completed=value * 100, description=desc)
+            
+    def decode_text(self, 
+                    text_tokens_list: list[torch.Tensor] | torch.Tensor = None,
+                    aligned_sequences: list | None = None,
+                    output_wav_path: str = None,
+                    output_path: str = "./decode_output.json"
+                    ) -> list:
+        """
+        1. Decode a list of text tokens into a list of strings.
+        2. save the decoded info into json.
 
+        Args:
+            text_token_list (list | torch.Tensor): A list or tensor of text tokens.
+
+        Returns:
+            list: A list of decoded strings.
+        """
+        decode_tokens_list = []
+        aligned_sequences = aligned_sequences.cpu().tolist() if aligned_sequences is not None else None
+        
+        decoded_dict = dict(
+            pieces = [],
+            surface = [],
+            aligned_sequences = aligned_sequences
+        )
+        
+        for text_tokens in text_tokens_list:
+            text_tokens = text_tokens.cpu().tolist()[0] if isinstance(text_tokens, torch.Tensor) else text_tokens
+            text_proto = self.tokenizer.sp_model.Decode(
+                text_tokens,
+                out_type="immutable_proto"
+            )
+            
+            pieces = []
+            surface = []
+            for token in text_proto.pieces:
+                pieces.append(token.piece)
+                surface.append(token.surface)
+                
+            decoded_dict["pieces"].append(pieces)
+            decoded_dict["surface"].append(surface)
+
+        # if 存在json文件，先读取原有内容
+        if os.path.exists(output_path):
+            with open(output_path, "r", encoding="utf-8") as f:
+                existing_data = json.load(f)
+            # 如果存在原有内容，覆盖。默认通过key读取，如果key不存在则追加
+            existing_data[output_wav_path] = decoded_dict
+        else:
+            existing_data = {output_wav_path: decoded_dict}
+        
+        # 写入更新后的内容到文件
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(existing_data, f, ensure_ascii=False, indent=2)
+        
     # 原始推理模式
     def infer(self, spk_audio_prompt, text, output_path,
               emo_audio_prompt=None, emo_alpha=1.0,
@@ -622,7 +676,7 @@ class IndexTTS2:
                 
                 # print(f"Merge emovec time: {time.perf_counter() - p_start_time:.2f}s")
 
-                codes, speech_conditioning_latent, attention_mask, seg_lens, token_generation_time = self.gpt.inference_speech(
+                gpt_output = self.gpt.inference_speech(
                     spk_cond_emb,
                     text_tokens_list,
                     emo_cond_emb,
@@ -641,6 +695,9 @@ class IndexTTS2:
                     target_duration_tokens=target_duration_tokens,
                     **generation_kwargs
                 )
+                
+                codes, speech_conditioning_latent, \
+                    attention_mask, seg_lens, token_generation_time, aligned_sequences = gpt_output
 
             gpt_gen_time += time.perf_counter() - m_start_time
             self._set_gr_progress(0.4, "speech codes generated")            
@@ -712,7 +769,29 @@ class IndexTTS2:
                 S_infer = self.semantic_codec.quantizer.vq2emb(codes.unsqueeze(1))
                 S_infer = S_infer.transpose(1, 2)
                 S_infer = S_infer + latent
-                target_lengths = (code_lens * 1.72).long()
+                
+                mel_ratio = 1 / 50 * 22050 / 256
+                target_lengths = (code_lens * mel_ratio).long()
+                
+                # speed_list = [0.8, 1.6, 2.5]
+                # speech_conditions_list = []
+                # prev_seg = 0
+                # for i, seg in enumerate(seg_lens):
+                #     curr_seg = prev_seg + seg
+                #     part_S_infer = S_infer[:, prev_seg:curr_seg, :]
+                #     part_target_length = part_S_infer.size(1) * 1.72 * speed_list[i % len(speed_list)]
+                #     part_target_length = torch.tensor([part_target_length], device=part_S_infer.device).long()
+                #     speech_conds = self.s2mel.models['length_regulator'](part_S_infer,
+                #                                                 ylens=part_target_length,
+                #                                                 n_quantizers=3,
+                #                                                 f0=None)[0]
+                #     speech_conditions_list.append(speech_conds)
+                #     prev_seg = curr_seg
+                self.decode_text(
+                    text_tokens_list=text_tokens_list,
+                    aligned_sequences=aligned_sequences,
+                    output_wav_path=output_path,
+                )
 
                 cond = self.s2mel.models['length_regulator'](S_infer,
                                                                 ylens=target_lengths,
@@ -720,9 +799,11 @@ class IndexTTS2:
                                                                 f0=None)[0]
                 
                 cat_condition = torch.cat([prompt_condition, cond], dim=1)
+                print(f"cat_condition shape: {cat_condition.shape}")
+                print(f"ref_mel shape: {ref_mel.shape}")
                 vc_target = self.s2mel.models['cfm'].inference(cat_condition,
                                                                 torch.LongTensor([cat_condition.size(1)]).to(
-                                                                    cond.device),
+                                                                    cat_condition.device),
                                                                 ref_mel, style, None, diffusion_steps,
                                                                 inference_cfg_rate=inference_cfg_rate)
                 vc_target = vc_target[:, :, ref_mel.size(-1):]

@@ -279,7 +279,7 @@ class StreamingHMMAligner:
         # # 同时只有alignment_center >= last_alignment的地方，更新alignment_center
         # alignment_center[update_mask == False] = last_alignment[update_mask == False]
         
-        self.history.append(alignment_center.cpu().tolist())
+        self.history.append(alignment_center.cpu().tolist())    # [seq_len, B] 的列表，记录每一步的对齐中心
         
         if attn_map_processor:
             attn_map_processor.prcess_hmm(

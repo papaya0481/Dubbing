@@ -2190,6 +2190,12 @@ class UnifiedVoice(nn.Module):
         if save_attention_maps:
             self.inference_model.attn_map_processor.save_attention_maps(input_embeds_len=inputs_embeds.shape[1],)
         # self.inference_model.hmm = None   # 清除hmm实例
+        if self.inference_model.hmm.history is not None:
+            # 将list(list[float])转换为torch tensor
+            history_np = np.array(self.inference_model.hmm.history)
+            self.inference_model.hmm.history_tensor = torch.from_numpy(history_np).T # on cpu
+            
+
         
         output.sequences = output.sequences[:, trunc_index:]  # remove the input part
         _logger.debug(f"Generated output shape: {output.sequences.shape}, inputs shape: {inputs.shape}")
@@ -2234,6 +2240,7 @@ class UnifiedVoice(nn.Module):
         # Convert tensor to int for dict key access
         if isinstance(selected_beam, torch.Tensor):
             selected_beam = selected_beam.item()
+            aligned_sequences = self.align_tokens(self.inference_model.hmm.history_tensor[selected_beam], alignment_shift=0.0)
         seg_lens = []
         
         # 从 HMM 的段切换记录中获取位置
@@ -2273,7 +2280,14 @@ class UnifiedVoice(nn.Module):
         # pd.DataFrame(causal_mask[0,0].cpu().numpy()).to_csv('mask.csv', index=False, header=False)
         if speech_conditioning_latent_list is not None:
             speech_conditioning_latent = speech_conditioning_latent_list
-        return output.sequences, speech_conditioning_latent, causal_mask, seg_lens, token_generation_time
+        return (
+            output.sequences, 
+            speech_conditioning_latent, 
+            causal_mask, 
+            seg_lens, 
+            token_generation_time,
+            aligned_sequences,
+        )
 
     def get_emovec(self, emo_speech_conditioning_latent, emo_cond_lengths):
         emo_vec_syn_ori = self.get_emo_conditioning(emo_speech_conditioning_latent.transpose(1,2), emo_cond_lengths)
@@ -2287,3 +2301,30 @@ class UnifiedVoice(nn.Module):
 
         out = base_vec + alpha * (emo_vec - base_vec)
         return out
+    
+    def align_tokens(self, 
+                     selected_beam_alignment_history: list | torch.Tensor = None,
+                     alignment_shift: float = 0.5,):
+        """
+        Args:
+            selected_beam_alignment_history (list | torch.Tensor, optional): 
+                选择好的对齐期望值历史记录，通常来源于 HMM 的路径。每个元素表示在生成过程中某个时间步的对齐期望值。
+                ```
+                [1.0, 1.1, ...]
+                ``` 
+            alignment_shift (float, optional): _对齐偏移量_. Defaults to 0.0.
+            
+        Returns:
+            每个序列的对齐列表，经过对齐偏移调整后的结果。
+            ```
+            >>> [1.0, 1.1, 2.1, ...]
+            >>> output: [1, 1, 2, ...]
+            ```
+        """
+        if selected_beam_alignment_history is None:
+            _logger.warning("No alignment history provided for token alignment.")
+            return
+        
+        aligned_sequences = torch.floor(selected_beam_alignment_history + alignment_shift).long()
+        return aligned_sequences
+        
