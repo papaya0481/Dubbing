@@ -9,6 +9,33 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
+import torch
+
+EMOTION_DIMENSIONS = ["happy", "angry", "sad", "afraid", "disgusted", "melancholic", "surprised", "calm"]
+
+_EMOTION_ALIASES: dict[str, str] = {
+    # MELD labels
+    "joy": "happy",
+    "anger": "angry",
+    "sadness": "sad",
+    "fear": "afraid",
+    "fearful": "afraid",
+    "disgust": "disgusted",
+    "surprise": "surprised",
+    "neutral": "calm",
+    # already-canonical passthrough handled below
+}
+
+
+def get_emotion_vector(emotion: str) -> list[float]:
+    emotion = emotion.lower().strip()
+    emotion = _EMOTION_ALIASES.get(emotion, emotion)
+    if emotion not in EMOTION_DIMENSIONS:
+        emotion = "calm"  # fallback
+    vec = [0.0] * len(EMOTION_DIMENSIONS)
+    vec[EMOTION_DIMENSIONS.index(emotion)] = 1.0
+    return vec
+
 # 将常见 Unicode 标点替换为 ASCII 等价字符，并去除零宽不可见字符
 _UNICODE_TO_ASCII: dict[int, str] = {
     # 弯单引号 / 撇号
@@ -268,10 +295,11 @@ def load_candidates(args: argparse.Namespace) -> list[dict[str, Any]]:
 	return all_rows
 
 
-def build_text_and_emotion(sample: dict[str, Any]) -> tuple[str, str]:
+def build_text_and_emotion(sample: dict[str, Any]) -> tuple[str, str, list[list[float]]]:
 	text = "|".join(sample["utterances"])
 	emo_text = "|".join(sample["emotions"])
-	return text, emo_text
+	emo_vectors = [get_emotion_vector(e) for e in sample["emotions"]]
+	return text, emo_text, emo_vectors
 
 
 def count_total_words(utterances: list[str]) -> int:
@@ -307,6 +335,9 @@ def main() -> None:
 	args = parse_args()
 	output_dir = Path(args.output_dir)
 	output_dir.mkdir(parents=True, exist_ok=True)
+
+	emb_dir = output_dir.parent / "code_embeddings"
+	emb_dir.mkdir(parents=True, exist_ok=True)
 
 	spk_audio_prompt = Path(args.spk_audio_prompt)
 	if not spk_audio_prompt.exists():
@@ -375,7 +406,7 @@ def main() -> None:
 		writer.writeheader()
 
 		for sample in selected:
-			text, emo_text = build_text_and_emotion(sample)
+			text, emo_text, emo_vectors = build_text_and_emotion(sample)
 			sample_spk_audio_prompt: Path | None = None
 			sample_prompt_error = ""
 			try:
@@ -408,18 +439,18 @@ def main() -> None:
 					error_msg = sample_prompt_error or "未解析到 spk_audio_prompt"
 				else:
 					try:
-						_, seg_lens_raw, wav_secs_raw = tts.infer(
+						_, seg_lens_raw, wav_secs_raw, inference_stats = tts.infer(
 							spk_audio_prompt=str(sample_spk_audio_prompt),
 							text=text,
 							output_path=str(out_wav),
 							style_prompt=None,
 							emo_audio_prompt=None,
 							emo_alpha=0,
-							use_emo_text=True,
-							emo_text=emo_text,
+							use_emo_text=False,
+							emo_text=None,
 							use_random=False,
 							verbose=True,
-							emo_vector=None,
+							emo_vector=emo_vectors,
 							target_duration_tokens=None,
 							method="hmm",
 							save_attention_maps=False,
@@ -432,9 +463,14 @@ def main() -> None:
 							num_beams=args.num_beams,
 							repetition_penalty=10.0,
 							max_mel_tokens=args.max_mel_tokens,
+							return_stats=True,
 						)
 						seg_lens = str(seg_lens_raw)
 						wav_secs = str(wav_secs_raw)
+						s_infer_tensor = inference_stats.get("S_infer")
+						if s_infer_tensor is not None:
+							emb_path = emb_dir / out_wav.with_suffix(".pt").name
+							torch.save(s_infer_tensor, emb_path)
 					except Exception as exc:
 						status = "failed"
 						error_msg = str(exc)

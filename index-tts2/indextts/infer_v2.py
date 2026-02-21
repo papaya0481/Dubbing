@@ -787,11 +787,11 @@ class IndexTTS2:
                 #                                                 f0=None)[0]
                 #     speech_conditions_list.append(speech_conds)
                 #     prev_seg = curr_seg
-                self.decode_text(
-                    text_tokens_list=text_tokens_list,
-                    aligned_sequences=aligned_sequences,
-                    output_wav_path=output_path,
-                )
+                # self.decode_text(
+                #     text_tokens_list=text_tokens_list,
+                #     aligned_sequences=aligned_sequences,
+                #     output_wav_path=output_path,
+                # )
 
                 cond = self.s2mel.models['length_regulator'](S_infer,
                                                                 ylens=target_lengths,
@@ -850,6 +850,7 @@ class IndexTTS2:
             "gpt_forward_time": gpt_forward_time,
             "s2mel_time": s2mel_time,
             "bigvgan_time": bigvgan_time,
+            "S_infer": S_infer.cpu(),
         }
         self.logger.print_time_stats(time_stats, total_inference_time, wav_length)
 
