@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
 import os
+import sys
 import traceback
 import re
+from pathlib import Path
 from typing import List, Union, overload
 import warnings
+BASE_DIR = Path(__file__).resolve().parents[2]
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 from indextts.utils.common import tokenize_by_CJK_char, de_tokenized_by_CJK_char
 from sentencepiece import SentencePieceProcessor
 
@@ -482,7 +487,7 @@ if __name__ == "__main__":
     ]
     # 测试分词器
     tokenizer = TextTokenizer(
-        vocab_file="checkpoints/bpe.model",
+        vocab_file="/data2/ruixin/index-tts2/checkpoints/bpe.model",
         normalizer=text_normalizer,
     )
 
@@ -532,5 +537,5 @@ if __name__ == "__main__":
         #print(f"Token IDs (first 10): {codes[i][:10]}")
         if tokenizer.unk_token in codes[i]:
             print(f"Warning: `{cases[i]}` contains UNKNOWN token")
-        print(f"Decoded: {tokenizer.decode(codes[i], do_lower_case=True)}")
+        print(f"Decoded: {tokenizer.decode(codes[i], do_lower_case=True, out_type='immutable_proto')}")
         print("-" * 50)

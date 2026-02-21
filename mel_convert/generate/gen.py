@@ -5,8 +5,72 @@ import importlib
 import random
 import sys
 import traceback
+import unicodedata
 from pathlib import Path
 from typing import Any
+
+# 将常见 Unicode 标点替换为 ASCII 等价字符，并去除零宽不可见字符
+_UNICODE_TO_ASCII: dict[int, str] = {
+    # 弯单引号 / 撇号
+    0x2018: "'",  # '
+    0x2019: "'",  # '
+    0x02BC: "'",  # ʼ (modifier letter apostrophe)
+    # 弯双引号
+    0x201C: '"',  # "
+    0x201D: '"',  # "
+    # 破折号
+    0x2013: "-",  # en dash
+    0x2014: "-",  # em dash
+    0x2012: "-",  # figure dash
+    # 不间断空格 → 普通空格
+    0x00A0: " ",
+    0x202F: " ",
+    0x3000: " ",
+    # CP-1252 字符被错误解码为 UTF-8 时产生的 C1 控制字符
+    # 例如 CSV 以 Windows-1252 存储但按 UTF-8 读取：\x92 → U+0092
+    0x0091: "'",  # CP-1252 left single quotation mark
+    0x0092: "'",  # CP-1252 right single quotation mark / apostrophe
+    0x0093: '"',  # CP-1252 left double quotation mark
+    0x0094: '"',  # CP-1252 right double quotation mark
+    0x0096: "-",  # CP-1252 en dash
+    0x0097: "-",  # CP-1252 em dash
+}
+# 零宽字符 → 删除
+_ZERO_WIDTH = {
+    0x200B,  # zero-width space
+    0x200C,  # zero-width non-joiner
+    0x200D,  # zero-width joiner
+    0x200E,  # left-to-right mark
+    0x200F,  # right-to-left mark
+    0x2060,  # word joiner
+    0xFEFF,  # zero-width no-break space / BOM
+    0x00AD,  # soft hyphen
+}
+
+
+def sanitize_text(text: str) -> str:
+    """将文本规范化为干净的 ASCII 可打印字符串。
+    - 替换常见 Unicode 标点为 ASCII 等价字符（弯引号、破折号等）
+    - 删除零宽不可见字符
+    - NFKC 归一化后丢弃无法转为 ASCII 的字符
+    """
+    # 先做 NFKC 归一化（合并兼容字符）
+    text = unicodedata.normalize("NFKC", text)
+    # 逐字符替换
+    chars: list[str] = []
+    for ch in text:
+        cp = ord(ch)
+        if cp in _ZERO_WIDTH:
+            continue
+        replacement = _UNICODE_TO_ASCII.get(cp)
+        if replacement is not None:
+            chars.append(replacement)
+        else:
+            chars.append(ch)
+    text = "".join(chars)
+    # 最终只保留 ASCII 可打印字符及常规空白
+    text = text.encode("ascii", errors="ignore").decode("ascii")
+    return text
 
 
 def seconds_to_mel_tokens(seconds: list[float], mel_to_sec_ratio: float = 0.02) -> list[int]:
@@ -65,7 +129,7 @@ def load_sent_emo_rows(csv_path: Path, split: str, start_idx: int) -> list[dict[
 		reader = csv.DictReader(f)
 		for local_idx, raw_row in enumerate(reader, start=1):
 			row = sanitize_row_keys(raw_row)
-			utterance = str(row.get("Utterance", "")).strip()
+			utterance = sanitize_text(str(row.get("Utterance", "")).strip())
 			emotion = str(row.get("Emotion", "neutral")).strip().lower()
 			if not utterance:
 				continue
@@ -102,7 +166,7 @@ def load_dialog_rows(csv_path: Path, split: str, start_idx: int) -> list[dict[st
 		reader = csv.DictReader(f)
 		for local_idx, raw_row in enumerate(reader, start=1):
 			row = sanitize_row_keys(raw_row)
-			utterances = [str(x).strip() for x in parse_list_field(row.get("Utterances")) if str(x).strip()]
+			utterances = [sanitize_text(str(x).strip()) for x in parse_list_field(row.get("Utterances")) if str(x).strip()]
 			emotions = [str(x).strip().lower() for x in parse_list_field(row.get("Emotions")) if str(x).strip()]
 
 			if not utterances or len(utterances) != len(emotions):
@@ -356,7 +420,7 @@ def main() -> None:
 							use_random=False,
 							verbose=True,
 							emo_vector=None,
-							target_duration_tokens=target_duration_tokens,
+							target_duration_tokens=None,
 							method="hmm",
 							save_attention_maps=False,
 							max_text_tokens_per_sentence=args.max_text_tokens_per_sentence,
