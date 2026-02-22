@@ -37,6 +37,9 @@ class Qwen3DecodeLayerForAlignment(nn.Module):
                 f"Sliding Window Attention is enabled but not implemented for `{config._attn_implementation}`; "
                 "unexpected results may be encountered."
             )
+        
+        # Fobidden is_causal
+        self.self_attn.is_causal = False
 
     def forward(
         self,
@@ -258,12 +261,10 @@ class ConvTransformerAligner(nn.Module):
     def forward(self, x):
         # x shape: [Batch, Time, Dim]
         # 过 Conv 层需要 [Batch, Channel, Time]
-        x = self.transformer_encoder(x)
+        x = self.transformer_encoder(inputs_embeds=x) # [Batch, Time, Dim]
         x = x.last_hidden_state # [Batch, Time, Dim]
         
-        x = x.transpose(1, 2)
         x = self.conv_prenet(x)
-        x = x.transpose(1, 2) # 切回 [B, T, D]
         
         # 输出 Logits
         logits = self.classifier(x) # [Batch, Time, Vocab_Size]
