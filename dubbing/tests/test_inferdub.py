@@ -1,4 +1,6 @@
 from indextts.inferDub import IndexTTS2ForDub
+import torchaudio
+import torch
 
 if __name__ == "__main__":
     # Example usage
@@ -14,7 +16,7 @@ if __name__ == "__main__":
 
     emotions = [
         "surprise",
-        "neutral",
+        "angry",
     ]
 
     output_path = "dubbed_audio.wav"
@@ -25,6 +27,8 @@ if __name__ == "__main__":
         text=texts,
         output_path=output_path,
         use_emo_text=True,
+        emo_text=emotions,
+        emo_alpha=1.4,
         verbose=True,
         
         method="hmm",
@@ -41,3 +45,7 @@ if __name__ == "__main__":
     )
 
     print("Inference result:", result)
+    
+    # save wav to file
+    wavs = result.wavs.type(torch.int16)
+    torchaudio.save("dubbed_audio.wav", wavs, result.sampling_rate)

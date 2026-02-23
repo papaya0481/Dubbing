@@ -1,5 +1,6 @@
 from indextts.infer_v2 import IndexTTS2
 from typing import Any, List
+from dataclasses import dataclass
 
 import torch
 import torchaudio
@@ -7,6 +8,18 @@ import time
 import os
 import warnings
 import random
+
+
+@dataclass
+class IndexTTS2Outputs:
+    wavs: torch.Tensor = None
+    vc_targets: torch.Tensor = None
+    seg_lens: List[int] = None
+    wav_length: float = None
+    inference_stats: dict | None = None
+    
+    sampling_rate: int = 22050
+
 
 class IndexTTS2ForDub(IndexTTS2):
     def __init__(self, *args, **kwargs):
@@ -67,15 +80,13 @@ class IndexTTS2ForDub(IndexTTS2):
                 generation.
             **generation_kwargs: Extra generation arguments forwarded to GPT decoding.
 
-        Returns:
-            tuple:
-                - If `output_path` is provided:
-                  `(output_path, seg_lens, wav_length)` or
-                  `(output_path, seg_lens, wav_length, inference_stats)` when
-                  `return_stats=True`.
-                - If `output_path` is None:
-                  `(sampling_rate, wav_data)` or
-                  `((sampling_rate, wav_data), inference_stats)` when `return_stats=True`.
+                Returns:
+                        IndexTTS2Outputs: Wrapped synthesis outputs.
+                                - `wavs`: generated waveform tensor.
+                                - `vc_targets`: generated mel target tensor.
+                                - `seg_lens`: segment lengths inferred by GPT alignment.
+                                - `wav_length`: waveform duration in seconds.
+                                - `inference_stats`: detailed stats when `return_stats=True`, otherwise `None`.
         """
         
         self.logger.stage("Starting Inference")
@@ -92,10 +103,13 @@ class IndexTTS2ForDub(IndexTTS2):
             })
         start_time = time.perf_counter()
         emo_vectors = emo_vector
+        emo_alpha = max(0.0, min(emo_alpha, 1.4))  # ensure emo_alpha is in [0, 1]
+        if emo_alpha > 1.0:
+            self.logger.warning(f"Warning: emo_alpha {emo_alpha} is greater than 1.0, which may lead to exaggerated emotion effects. ")
+        
         if use_emo_text:
             emo_vectors = []
             emo_audio_prompt = None
-            emo_alpha = 1.0
             # assert emo_audio_prompt is None
             # assert emo_alpha == 1.0
             
@@ -112,12 +126,14 @@ class IndexTTS2ForDub(IndexTTS2):
                 emo_dict = self.qwen_emo.inference(emo_text)
                 # convert ordered dict to list of vectors; the order is VERY important!
                 emo_vector = list(emo_dict.values())
+                
+                # scale emo_vector by emo_alpha
+                emo_vector = [val * emo_alpha for val in emo_vector]
                 emo_vectors.append(emo_vector)
         # emo_vectors = [[1., 0, 0, 0, 0, 0, 0, 0], emo_vector, [1., 0, 0, 0, 0, 0, 0, 0]]
         # emo_vectors = [emo_vector]
         if emo_vectors is not None:
             emo_audio_prompt = None
-            emo_alpha = 1.0
             EMOTION_DIMENSIONS = ["happy", "angry", "sad", "afraid", "disgusted", "melancholic", "surprised", "calm"]
             # Collect all emotion vectors for display
             emo_vec_maps = []
@@ -131,7 +147,6 @@ class IndexTTS2ForDub(IndexTTS2):
 
         if emo_audio_prompt is None:
             emo_audio_prompt = spk_audio_prompt
-            emo_alpha = 1.0
             # assert emo_alpha == 1.0
 
         # 如果参考音频改变了，才需要重新生成, 提升速度
@@ -567,9 +582,13 @@ class IndexTTS2ForDub(IndexTTS2):
         # save audio
         wav = wav.cpu()  # to cpu
         
-        
-        if return_stats:
-            return wav, vc_target, seg_lens, wav_length, inference_stats
-        return wav, vc_target, seg_lens, wav_length
+        return IndexTTS2Outputs(
+            wavs=wav,
+            vc_targets=vc_target,
+            seg_lens=seg_lens,
+            wav_length=wav_length,
+            inference_stats=inference_stats if return_stats else None,
+            sampling_rate=sampling_rate,
+        )
         
 
