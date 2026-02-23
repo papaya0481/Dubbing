@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import numpy as np
 from scipy.interpolate import PchipInterpolator
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Any, Optional, List, Tuple
 from abc import ABC, abstractmethod
 from meldataset import get_mel_spectrogram
 
@@ -18,24 +18,38 @@ except ImportError:
 # 1. 基类定义
 # ==========================================
 class BaseAudioTransformer(ABC):
-    def __init__(self, min_gap_threshold: float = 0.001, max_stretch: float = 8.0, verbose: bool = True):
+    def __init__(self, min_gap_threshold: float = 0.001, max_stretch: float = 8.0, verbose: bool = True) -> None:
+        """初始化音频变换基类。/ Initialize base audio transformer settings."""
         self.min_gap_threshold = min_gap_threshold
         self.max_stretch = max_stretch
         self.verbose = verbose
     
     @abstractmethod
-    def load_audio(self, path: str): pass
+    def load_audio(self, path: str) -> Tuple[torch.Tensor, int]:
+        """加载音频并返回波形与采样率。/ Load audio and return waveform with sample rate."""
+        pass
+
     @abstractmethod
-    def get_duration(self, audio) -> float: pass
+    def get_duration(self, audio: Tuple[torch.Tensor, int]) -> float:
+        """获取音频时长（秒）。/ Get audio duration in seconds."""
+        pass
+
     @abstractmethod
-    def get_sample_rate(self, audio) -> int: pass
+    def get_sample_rate(self, audio: Tuple[torch.Tensor, int]) -> int:
+        """获取音频采样率。/ Get sample rate from audio container."""
+        pass
+
     @abstractmethod
-    def save_audio(self, audio, output_path: str, sample_rate: int = None): pass
+    def save_audio(self, audio: torch.Tensor, output_path: str, sample_rate: Optional[int] = None) -> None:
+        """保存音频结果。/ Save transformed audio to disk."""
+        pass
     
     def get_real_words(self, tier: tgt.IntervalTier) -> List[tgt.Interval]:
+        """提取有效词区间。/ Extract non-silence word intervals from a tier."""
         return [i for i in tier if i.text not in ['', 'sp', 'sil', '<eps>']]
 
-    def transform(self, *args, **kwargs):
+    def transform(self, *args: Any, **kwargs: Any) -> bool:
+        """执行变换流程。/ Run the transformation pipeline."""
         raise NotImplementedError
 
 # ==========================================
@@ -51,7 +65,8 @@ class GlobalWarpTransformer(BaseAudioTransformer):
     def __init__(self,
                  model_id: str = "nvidia/bigvgan_v2_22khz_80band_256x",
                  device: str = "cuda", 
-                 verbose: bool = True):
+                 verbose: bool = True) -> None:
+        """初始化全局时间扭曲变换器。/ Initialize global time-warp transformer."""
         super().__init__(0.001, 8.0, verbose)
         self.device = device
         
@@ -73,7 +88,8 @@ class GlobalWarpTransformer(BaseAudioTransformer):
             
         if verbose: print(f"✅ Ready. SR: {self.sample_rate}, Hop: {self.h.hop_size}")
 
-    def load_audio(self, path: str):
+    def load_audio(self, path: str) -> Tuple[torch.Tensor, int]:
+        """读取并重采样音频。/ Load audio and resample to model sample rate."""
         wav, sr = torchaudio.load(path)
         wav = wav.to(self.device)
         if sr != self.sample_rate:
@@ -82,20 +98,24 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         if wav.dim() == 1: wav = wav.unsqueeze(0)
         return wav, self.sample_rate
 
-    def get_duration(self, audio) -> float:
+    def get_duration(self, audio: Tuple[torch.Tensor, int]) -> float:
+        """返回音频时长（秒）。/ Return duration in seconds."""
         return audio[0].shape[-1] / audio[1]
     
-    def get_sample_rate(self, audio) -> int:
+    def get_sample_rate(self, audio: Tuple[torch.Tensor, int]) -> int:
+        """返回采样率。/ Return sample rate."""
         return audio[1]
 
-    def create_silence(self, duration: float, sample_rate: int):
+    def create_silence(self, duration: float, sample_rate: int) -> torch.Tensor:
+        """生成静音 Mel。/ Create a near-silent mel segment."""
         num_samples = int(duration * sample_rate)
         silent_wav = torch.randn((1, num_samples), device=self.device) * 1e-6
         with torch.no_grad():
             silent_mel = get_mel_spectrogram(silent_wav, self.h)
         return silent_mel
 
-    def save_audio(self, audio_mel, output_path: str, sample_rate: int = None):
+    def save_audio(self, audio_mel: torch.Tensor, output_path: str, sample_rate: Optional[int] = None) -> None:
+        """将 Mel 通过声码器保存为音频。/ Vocode mel and save waveform to file."""
         if self.verbose: print(f"Vocoding...")
         with torch.no_grad():
             wav_gen = self.model(audio_mel)
@@ -103,187 +123,141 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         wav_cpu = torch.tanh(wav_cpu) # Soft clip
         torchaudio.save(output_path, wav_cpu, self.sample_rate)
 
-    def calculate_warping_path(self, src_anchors, tgt_anchors, total_tgt_frames):
-        """
-        核心算法：计算光滑的时间映射路径
-        src_anchors: 源音频的关键时间点 (秒)
-        tgt_anchors: 目标音频的关键时间点 (秒)
-        """
-        # 1. 转换为帧索引
-        def sec2frame(sec): return sec * self.sample_rate / self.h.hop_size
+    def calculate_warping_path(self, src_anchors: List[float], tgt_anchors: List[float], total_tgt_frames: int) -> torch.Tensor:
+        """计算时间映射路径。/ Compute smooth source-time mapping for target frames."""
+        def sec2frame(sec: float) -> float:
+            return sec * self.sample_rate / self.h.hop_size
         
         src_frames = np.array([sec2frame(t) for t in src_anchors])
         tgt_frames = np.array([sec2frame(t) for t in tgt_anchors])
         
-        # 2. 使用 Pchip 插值 (Piecewise Cubic Hermite Interpolating Polynomial)
-        # 为什么要用 Pchip 而不是 CubicSpline？
-        # 因为 Pchip 保证单调性 (Monotonicity)。时间是不能倒流的。
-        # 普通样条曲线可能会产生震荡，导致时间“倒退”，这是不允许的。
+        # PCHIP keeps monotonicity and avoids time-reversal artifacts.
         interpolator = PchipInterpolator(tgt_frames, src_frames)
         
-        # 3. 生成所有目标帧对应的源帧索引
         grid_tgt = np.arange(total_tgt_frames)
         grid_src = interpolator(grid_tgt)
         
         return torch.from_numpy(grid_src).float().to(self.device)
 
-    def warp_mel(self, source_mel, warping_path):
+    def warp_mel(self, source_mel: torch.Tensor, warping_path: torch.Tensor) -> torch.Tensor:
         """
-        使用 grid_sample 进行非均匀拉伸
-        source_mel: (1, n_mels, src_len)
-        warping_path: (tgt_len, ) 每个目标帧对应的源帧位置
+        使用 grid_sample 沿时间轴扭曲 Mel。/ Warp mel on time axis with grid_sample.
+
+        Args:
+            source_mel: 输入 Mel，形状为 (1, n_mels, src_len)。/ Input mel of shape (1, n_mels, src_len).
+            warping_path: 目标帧对应源帧索引，形状为 (tgt_len,)。/ Source-frame index per target frame, shape (tgt_len,).
+
+        Returns:
+            torch.Tensor: 扭曲后的 Mel，形状为 (1, n_mels, tgt_len)。/ Warped mel of shape (1, n_mels, tgt_len).
         """
         B, C, src_len = source_mel.shape
         tgt_len = warping_path.shape[0]
-        
-        # grid_sample 需要归一化到 [-1, 1] 的坐标
-        # -1 代表 index 0, 1 代表 index src_len-1
-        
-        # 归一化 X 坐标 (时间轴)
-        # map: 0 -> -1, src_len-1 -> 1
-        # formula: 2 * (x / (src_len - 1)) - 1
+
         norm_x = 2 * (warping_path / (src_len - 1)) - 1
-        
-        # 扩展维度以适配 grid_sample (N, H, W, 2)
-        # 我们把 Mel 看作高度为 1 的图像，宽度为 Time
-        # 其实可以直接处理 2D，这里为了物理意义清晰，我们只扭曲时间轴
-        
-        # grid shape: (1, 1, tgt_len, 2)
-        # 最后一个维度 2 代表 (x, y)。我们只变 x，y 保持不变
-        
-        # 构建 Y 坐标 (频率轴)
-        # 频率轴不需要扭曲，所以是线性的 -1 到 1
-        # 但 grid_sample 的 grid 是输出图像的坐标网格。
-        # 对于 Mel 谱，我们希望保留所有频率信息，所以可以用一种 hack：
-        # 将 Mel 视为 (1, C, T) 的 1D 序列处理，或者 (C, T) 的 2D 图片
-        
-        # 更简单的做法：把 Mel 视为 Batch=1, Channels=n_mels, Height=1, Width=src_len
-        # 这样我们只需要在 Width 方向采样
-        
+
         source_mel_4d = source_mel.unsqueeze(2) # (1, n_mels, 1, src_len)
-        
-        # 构建 Grid
-        # x: norm_x (1, 1, tgt_len)
-        # y: 0 (代表中心)
+
         grid_x = norm_x.view(1, 1, tgt_len, 1).expand(1, 1, -1, 1) # (1, 1, tgt_len, 1)
         grid_y = torch.zeros_like(grid_x) # (1, 1, tgt_len, 1)
-        
-        # grid: (1, 1, tgt_len, 2)
+
         grid = torch.cat([grid_x, grid_y], dim=-1)
-        
-        # 采样
-        # mode='bicubic': 双三次插值，保证光滑
-        # padding_mode='border': 防止边缘黑边
+
         warped_mel = F.grid_sample(source_mel_4d, grid, mode='bicubic', padding_mode='border', align_corners=True)
-        
+
         return warped_mel.squeeze(2) # (1, n_mels, tgt_len)
 
+    def _append_monotonic_anchor(
+        self,
+        src_anchors: List[float],
+        tgt_anchors: List[float],
+        src_time: float,
+        tgt_time: float,
+        eps: float = 1e-4,
+        dup_tol: float = 1e-6,
+    ) -> None:
+        """追加严格单调关键点。/ Append anchor while keeping target time strictly increasing."""
+        if tgt_time <= tgt_anchors[-1]:
+            is_same_point = abs(tgt_time - tgt_anchors[-1]) < dup_tol and abs(src_time - src_anchors[-1]) < dup_tol
+            if is_same_point:
+                return
+            tgt_time = tgt_anchors[-1] + eps
 
-    def transform(self, source_audio_path, source_textgrid_path, target_textgrid_path, target_audio_path, output_path, tier_name="words"):
-        try:
-            if self.verbose: print(f"Processing Global Warp...")
-            
-            # 1. 加载源音频并转 Mel
-            wav_src, sr = self.load_audio(source_audio_path)
-            with torch.no_grad():
-                mel_src = get_mel_spectrogram(wav_src, self.h)
-            
-            # 2. 准备 TextGrid
-            tg_src = tgt.io.read_textgrid(source_textgrid_path)
-            tg_tgt = tgt.io.read_textgrid(target_textgrid_path)
-            words_src = self.get_real_words(tg_src.get_tier_by_name(tier_name))
-            words_tgt = self.get_real_words(tg_tgt.get_tier_by_name(tier_name))
-            
-            if len(words_src) != len(words_tgt): return False
-            
-            # 3. 构建关键点 (Anchors)
-            # 我们需要建立 Source Time <-> Target Time 的映射关系
-            # 起点 (0, 0)
-            src_anchors = [0.0]
-            tgt_anchors = [0.0]
-            
-            for i in range(len(words_tgt)):
-                w_src = words_src[i]
-                w_tgt = words_tgt[i]
-                
-                # 添加单词的起点和终点作为“桩”
-                # 需要保证 Target Time 是严格单调递增的
-                
-                # --- Start Point ---
-                t_start = w_tgt.start_time
-                s_start = w_src.start_time
-                
-                # 检查与上一个点是否重复或逆序
-                if t_start <= tgt_anchors[-1]:
-                    # 如果时间完全重叠，且源时间也重叠，那就是完全同一个点（例如单词紧挨着），跳过添加
-                    if abs(t_start - tgt_anchors[-1]) < 1e-6 and abs(s_start - src_anchors[-1]) < 1e-6:
-                        pass
-                    else:
-                        # 如果时间重叠但源时间不同（跳跃），或者微小逆序，强制稍微平移一点
-                        # 0.1ms 的平移对听感无影响，但能满足严格单调递增条件
-                        t_start = tgt_anchors[-1] + 1e-4
-                        tgt_anchors.append(t_start)
-                        src_anchors.append(s_start)
-                else:
-                    tgt_anchors.append(t_start)
-                    src_anchors.append(s_start)
+        tgt_anchors.append(tgt_time)
+        src_anchors.append(src_time)
 
-                # --- End Point ---
-                t_end = w_tgt.end_time
-                s_end = w_src.end_time
-                
-                if t_end <= tgt_anchors[-1]:
-                    if abs(t_end - tgt_anchors[-1]) < 1e-6 and abs(s_end - src_anchors[-1]) < 1e-6:
-                        pass
-                    else:
-                        t_end = tgt_anchors[-1] + 1e-4
-                        tgt_anchors.append(t_end)
-                        src_anchors.append(s_end)
-                else:
-                    tgt_anchors.append(t_end)
-                    src_anchors.append(s_end)
-            
-            # 加上尾部终点
-            # 获取目标总时长
-            wav_tgt_raw, sr_tgt_raw = torchaudio.load(target_audio_path)
-            tgt_duration = wav_tgt_raw.shape[-1] / sr_tgt_raw
-            src_duration = wav_src.shape[-1] / sr
-            
-            # 如果最后一个单词结束时间小于总时长，把终点也加上
-            # 同样需要保证严格单调递增
-            if tgt_anchors[-1] < tgt_duration - 1e-4: # 留一点余量，防止浮点误差导致极其接近的点
-                tgt_anchors.append(tgt_duration)
-                src_anchors.append(src_duration)
-            elif tgt_anchors[-1] >= tgt_duration:
-                # 如果由于前面的 shift 导致最后一点已经超过了实际时长，
-                # 其实也没关系，interpolate 会覆盖整个 range。
-                # 但为了逻辑严谨，我们不再添加回退的点。
-                pass
-            
-            # 4. 计算光滑路径
-            # 目标总帧数
-            total_target_frames = int(tgt_duration * self.sample_rate / self.h.hop_size)
-            
-            warping_path = self.calculate_warping_path(src_anchors, tgt_anchors, total_target_frames)
-            
-            # 5. 执行全局扭曲
-            # 这一步包含了你想要的所有特性：
-            # - 速率自动平滑 (Pchip 插值特性)
-            # - 无拼接断点 (全局采样)
-            # - 音调不变 (Mel 域操作)
-            final_mel = self.warp_mel(mel_src, warping_path)
-            
-            # 6. 生成保存
-            self.save_audio(final_mel, output_path)
-            
-            if self.verbose: print(f"✅ Saved: {output_path}")
-            return True
+    def build_anchors(
+        self,
+        words_src: List[tgt.Interval],
+        words_tgt: List[tgt.Interval],
+        src_duration: float,
+        tgt_duration: float,
+        eps: float = 1e-4,
+    ) -> Tuple[List[float], List[float]]:
+        """构建单调关键点。/ Build monotonic source/target anchors from aligned words."""
+        src_anchors = [0.0]
+        tgt_anchors = [0.0]
 
-        except Exception as e:
-            print(f"Error: {e}")
-            import traceback
-            traceback.print_exc()
+        for w_src, w_tgt in zip(words_src, words_tgt):
+            self._append_monotonic_anchor(src_anchors, tgt_anchors, w_src.start_time, w_tgt.start_time, eps=eps)
+            self._append_monotonic_anchor(src_anchors, tgt_anchors, w_src.end_time, w_tgt.end_time, eps=eps)
+
+        if tgt_anchors[-1] < tgt_duration - eps:
+            tgt_anchors.append(tgt_duration)
+            src_anchors.append(src_duration)
+
+        return src_anchors, tgt_anchors
+
+
+    def transform(
+        self,
+        source_audio_path: str,
+        source_textgrid_path: str,
+        target_textgrid_path: str,
+        target_audio_path: str,
+        output_path: str,
+        tier_name: str = "words",
+    ) -> bool:
+        """
+        执行全局扭曲并输出音频。/ Run global warp transform and save output audio.
+
+        Args:
+            source_audio_path: 源音频路径。/ Path to source audio.
+            source_textgrid_path: 源对齐 TextGrid 路径。/ Path to source TextGrid.
+            target_textgrid_path: 目标对齐 TextGrid 路径。/ Path to target TextGrid.
+            target_audio_path: 目标音频路径（用于总时长）。/ Path to target audio used for target duration.
+            output_path: 输出音频路径。/ Output audio path.
+            tier_name: 使用的 TextGrid 层名。/ Tier name used in TextGrid.
+
+        Returns:
+            bool: 成功返回 True，词数不匹配返回 False。/ True on success, False when word counts mismatch.
+        """
+        if self.verbose: print(f"Processing Global Warp...")
+
+        wav_src, sr = self.load_audio(source_audio_path)
+        with torch.no_grad():
+            mel_src = get_mel_spectrogram(wav_src, self.h)
+
+        tg_src = tgt.io.read_textgrid(source_textgrid_path)
+        tg_tgt = tgt.io.read_textgrid(target_textgrid_path)
+        words_src = self.get_real_words(tg_src.get_tier_by_name(tier_name))
+        words_tgt = self.get_real_words(tg_tgt.get_tier_by_name(tier_name))
+
+        if len(words_src) != len(words_tgt):
             return False
+
+        wav_tgt_raw, sr_tgt_raw = torchaudio.load(target_audio_path)
+        tgt_duration = wav_tgt_raw.shape[-1] / sr_tgt_raw
+        src_duration = wav_src.shape[-1] / sr
+
+        src_anchors, tgt_anchors = self.build_anchors(words_src, words_tgt, src_duration, tgt_duration)
+
+        total_target_frames = int(tgt_duration * self.sample_rate / self.h.hop_size)
+        warping_path = self.calculate_warping_path(src_anchors, tgt_anchors, total_target_frames)
+        final_mel = self.warp_mel(mel_src, warping_path)
+        self.save_audio(final_mel, output_path)
+
+        if self.verbose: print(f"✅ Saved: {output_path}")
+        return True
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
