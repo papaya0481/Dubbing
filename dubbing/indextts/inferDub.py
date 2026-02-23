@@ -98,9 +98,16 @@ class IndexTTS2ForDub(IndexTTS2):
             emo_alpha = 1.0
             # assert emo_audio_prompt is None
             # assert emo_alpha == 1.0
+            
+            # if emo_text is None, use synthesis text as emotion analysis text by default
             if emo_text is None:
                 emo_text = text
-            emo_texts = emo_text.split("|")
+                
+            if isinstance(emo_text, str):
+                emo_texts = emo_text.split("|")
+            else:
+                emo_texts = emo_text
+                
             for emo_text in emo_texts:
                 emo_dict = self.qwen_emo.inference(emo_text)
                 # convert ordered dict to list of vectors; the order is VERY important!
@@ -283,7 +290,11 @@ class IndexTTS2ForDub(IndexTTS2):
 
         self._set_gr_progress(0.1, "text processing...")        
         self.logger.info("Processing text...")        # 以“|”作为句子分割符，不同部分对应不同的情绪
-        text_list = text.split("|")
+        
+        if isinstance(text, str):
+            text_list = text.split("|")
+        else:
+            text_list = text
         text_tokens_list = []
         for txt in text_list:
             text_tokens_list.append(self.tokenizer.tokenize(txt))

@@ -2184,7 +2184,6 @@ class UnifiedVoice(nn.Module):
                                             save_attention_maps=save_attention_maps,
                                             **hf_generate_kwargs)
         token_generation_time = time.perf_counter() - token_gen_start_time
-        print(f">> Token generation time (model_v2.generate): {token_generation_time:.4f} seconds")
         
         # 只有在需要时才保存attention maps
         if save_attention_maps:

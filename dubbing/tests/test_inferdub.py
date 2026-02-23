@@ -26,7 +26,18 @@ if __name__ == "__main__":
         output_path=output_path,
         use_emo_text=True,
         verbose=True,
-        return_stats=True
+        
+        method="hmm",
+        max_text_tokens_per_sentence=200,
+        do_sample=True,
+        top_p=0.8,
+        top_k=30,
+        temperature=0.8,
+        length_penalty=0,
+        num_beams=3,
+        repetition_penalty=10.0,
+        max_mel_tokens=2000,
+        return_stats=True,
     )
 
     print("Inference result:", result)

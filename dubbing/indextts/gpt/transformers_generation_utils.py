@@ -3517,7 +3517,6 @@ class GenerationMixin:
             # print("="*20)
             # print(f"detect emotion {inter} twist time: {time.perf_counter() - e_start_time:.7f} seconds")
 
-        print(f"gen token time: {time.perf_counter() - g_start_time:.4f} seconds")
         sequence_outputs = beam_scorer.finalize(
             input_ids,
             beam_scores,
