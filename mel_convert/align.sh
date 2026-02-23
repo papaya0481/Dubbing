@@ -1,4 +1,4 @@
-mfa align -c mel_convert/mfa_config.yaml /data2/ruixin/Dubbing/index-tts2/results/meld600_seed42_beam2_repeat3 \
+mfa align -c mel_convert/mfa_config.yaml mel_convert/test \
     english_us_arpa english_us_arpa \
-    /data2/ruixin/Dubbing/index-tts2/results/aligned/meld600_seed42_beam2_repeat3 \
+    mel_convert/test/aligned \
     --clean --single_speaker

@@ -1,4 +1,4 @@
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=2
 
 python mel_convert/generate/gen.py \
     --dataset-option sent_emo \

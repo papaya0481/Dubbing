@@ -27,7 +27,7 @@ def seconds_to_mel_tokens(seconds, mel_to_sec_ratio=0.02):
 
 if __name__ == "__main__":
     
-    checkpoint_path = "./checkpoints"
+    checkpoint_path = "/data2/ruixin/index-tts2/checkpoints"
     
     tts = IndexTTS2(
         model_dir=checkpoint_path,
@@ -42,7 +42,7 @@ if __name__ == "__main__":
         "neutral",
     ]
     
-    emotion_prompt_path = "ESD/ESD/0011/Angry/0011_000352.wav"
+    emotion_prompt_path = "/data2/ruixin/ted-tts/AllInferenceResults/ESD/0001/Angry/0001_000351.wav"
     
     text = "|".join(texts)
     emo_text = "|".join(emotions)
