@@ -10,6 +10,7 @@ import torch.nn.functional as F
 import transformers
 from transformers import LogitsProcessor
 from transformers import GPT2Config, LogitsProcessorList
+from transformers.cache_utils import Cache, DynamicCache
 from indextts.gpt.transformers_gpt2 import GPT2PreTrainedModel, GPT2Model
 
 # from transformers import GPT2Config, GPT2PreTrainedModel, LogitsProcessorList
@@ -1396,7 +1397,11 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
             )
         transformer_outputs = self.transformer(
             inputs_embeds=emb,
-            past_key_values=past_key_values,
+            past_key_values=(
+                past_key_values.to_legacy_cache()
+                if Cache is not None and isinstance(past_key_values, Cache)
+                else past_key_values
+            ),
             attention_mask=attention_mask if _4d_attention_mask is None else _4d_attention_mask,
             token_type_ids=token_type_ids,
             position_ids=position_ids,
@@ -1436,7 +1441,11 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
         return CausalLMOutputWithCrossAttentions(
             loss=None,
             logits=lm_logits,
-            past_key_values=transformer_outputs.past_key_values,
+            past_key_values=(
+                DynamicCache.from_legacy_cache(transformer_outputs.past_key_values)
+                if DynamicCache is not None and isinstance(transformer_outputs.past_key_values, tuple)
+                else transformer_outputs.past_key_values
+            ),
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
             cross_attentions=transformer_outputs.cross_attentions,
@@ -1449,6 +1458,10 @@ class GPT2InferenceModel(GPT2PreTrainedModel):
         :meth:`~transformers.PreTrainedModel.beam_search` or :meth:`~transformers.PreTrainedModel.beam_sample` is
         called. This is required to match :obj:`past_key_values` with the correct beam_idx at every generation step.
         """
+        if Cache is not None and isinstance(past, Cache):
+            past.reorder_cache(beam_idx)
+            return past
+
         return tuple(
             tuple(
                 past_state.index_select(0, beam_idx.to(past_state.device))
