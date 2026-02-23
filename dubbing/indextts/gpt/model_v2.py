@@ -1526,7 +1526,9 @@ def build_hf_gpt_transformer(layers, model_dim, heads, max_mel_seq_len, max_text
                             n_layer=layers,
                             n_head=heads,
                             gradient_checkpointing=checkpointing,
-                            use_cache=not checkpointing)
+                            use_cache=not checkpointing,
+                            attn_implementation="eager")
+    gpt_config._attn_implementation = "eager"
     gpt = GPT2Model(gpt_config)
     # Override the built in positional embeddings
     del gpt.wpe
@@ -1679,7 +1681,9 @@ class UnifiedVoice(nn.Module):
             n_head=self.heads,
             gradient_checkpointing=False,
             use_cache=True,
+            attn_implementation="eager",
         )
+        gpt_config._attn_implementation = "eager"
         self.inference_model = GPT2InferenceModel(
             gpt_config,
             self.gpt,
