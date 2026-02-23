@@ -52,9 +52,7 @@ class BaseAudioTransformer(ABC):
         """执行变换流程。/ Run the transformation pipeline."""
         raise NotImplementedError
 
-# ==========================================
-# 2. 全局光滑扭曲 Transformer
-# ==========================================
+
 class GlobalWarpTransformer(BaseAudioTransformer):
     """
     基于全局时间扭曲 (Global Time Warping) 的变换器。
@@ -264,10 +262,10 @@ if __name__ == "__main__":
     transformer = GlobalWarpTransformer(device=device, verbose=True)
     
     transformer.transform(
-        source_audio_path="mel_convert/test/test_long1_1.wav",
-        source_textgrid_path="mel_convert/test/aligned/test_long1_1.TextGrid",
-        target_textgrid_path="mel_convert/test/aligned/test_long1_2.TextGrid",
-        target_audio_path="mel_convert/test/test_long1_2.wav",
+        source_audio_path="mel_convert/test/test_short1_1.wav",
+        source_textgrid_path="mel_convert/test/aligned/test_short1_1.TextGrid",
+        target_textgrid_path="mel_convert/test/aligned/test_short_gt.TextGrid",
+        target_audio_path="mel_convert/test/test_short_gt.wav",
         output_path="output_.wav",
-        tier_name="words"
+        tier_name="phones"
     )

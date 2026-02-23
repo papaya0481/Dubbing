@@ -1,3 +1,10 @@
+import sys
+from pathlib import Path
+
+project_dubbing_root = Path(__file__).resolve().parents[1]
+if str(project_dubbing_root) not in sys.path:
+    sys.path.insert(0, str(project_dubbing_root))
+
 from indextts.inferDub import IndexTTS2ForDub
 import torchaudio
 import torch

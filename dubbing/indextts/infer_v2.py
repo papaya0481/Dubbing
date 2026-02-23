@@ -887,12 +887,12 @@ class IndexTTS2:
 
 class QwenEmotion:
     def __init__(self, model_dir):
-        self.model_dir = model_dir
+        self.model_dir = os.path.normpath(model_dir)
         self.logger = get_logger("QwenEmotion")
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir)
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_dir,
-            torch_dtype="float16",  # "auto"
+            dtype="float16",  # "auto"
             device_map="auto"
         )
         self.prompt = "文本情感分类"
