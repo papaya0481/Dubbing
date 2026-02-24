@@ -640,3 +640,12 @@ class TimestepEmbedding(nn.Module):
         time_hidden = time_hidden.to(timestep.dtype)
         time = self.time_mlp(time_hidden)  # b d
         return time
+
+
+# sequence mask
+
+def sequence_mask(lengths: torch.Tensor, max_len: int | None = None) -> torch.Tensor:
+    if max_len is None:
+        max_len = int(lengths.max().item())
+    arange = torch.arange(max_len, device=lengths.device)
+    return arange.unsqueeze(0) < lengths.unsqueeze(1)

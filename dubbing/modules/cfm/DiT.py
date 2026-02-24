@@ -1,8 +1,31 @@
 import torch
 import torch.nn as nn
 import math
-from indextts.s2mel.modules.gpt_fast.model import ModelArgs, Transformer
-from indextts.s2mel.modules.commons import sequence_mask
+from .attn import DiTBlock, TimestepEmbedding, sequence_mask
+
+
+class CFMTransformerBackbone(nn.Module):
+    def __init__(self, hidden_dim: int, num_heads: int, depth: int, ff_mult: int = 4, dropout: float = 0.1):
+        super().__init__()
+        self.blocks = nn.ModuleList(
+            [
+                DiTBlock(
+                    dim=hidden_dim,
+                    heads=num_heads,
+                    dim_head=hidden_dim // num_heads,
+                    ff_mult=ff_mult,
+                    dropout=dropout,
+                )
+                for _ in range(depth)
+            ]
+        )
+        self.final_norm = nn.LayerNorm(hidden_dim, eps=1e-6)
+
+    def forward(self, x: torch.Tensor, t_emb: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        x_out = x
+        for block in self.blocks:
+            x_out = block(x_out, t_emb, mask=mask, rope=None)
+        return self.final_norm(x_out)
 
 class LipSyncDiT(nn.Module):
     def __init__(self, args):
@@ -11,6 +34,7 @@ class LipSyncDiT(nn.Module):
         self.num_heads = args.DiT.num_heads
         self.depth = args.DiT.depth
         self.mel_dim = args.DiT.in_channels  # 通常是 80
+        self.is_causal = getattr(args.DiT, "is_causal", False)
         
         # -------------------------------------------------------
         # 1. 条件特征提取器
@@ -38,21 +62,15 @@ class LipSyncDiT(nn.Module):
         self.input_projection = nn.Linear(fusion_input_dim, self.hidden_dim)
 
         # -------------------------------------------------------
-        # 3. Transformer Backbone (保持原样)
+        # 3. Transformer Backbone (from cfm.attn)
         # -------------------------------------------------------
-        model_args = ModelArgs(
-            block_size=4096, 
-            n_layer=self.depth,
-            n_head=self.num_heads,
-            dim=self.hidden_dim,
-            head_dim=self.hidden_dim // self.num_heads,
-            vocab_size=1, # 不使用 token embedding，直接用 continuous input
-            uvit_skip_connection=False
+        self.transformer_backbone = CFMTransformerBackbone(
+            hidden_dim=self.hidden_dim,
+            num_heads=self.num_heads,
+            depth=self.depth,
+            ff_mult=4,
+            dropout=0.1,
         )
-        self.transformer = Transformer(model_args)
-        
-        # 位置编码 buffer
-        self.register_buffer("input_pos", torch.arange(4096))
 
         # -------------------------------------------------------
         # 4. 输出层
@@ -70,7 +88,7 @@ class LipSyncDiT(nn.Module):
             lip_embedding: [B, T, Lip_Dim] - 唇形特征
             x_lens: [B] - 长度
         """
-        B, _, T = x.size()
+        _, _, T = x.size()
 
         # 1. 维度调整：全部转为 [B, T, C]
         x = x.transpose(1, 2)              # [B, T, 80]
@@ -95,13 +113,11 @@ class LipSyncDiT(nn.Module):
         x_in = x_in + t_emb.unsqueeze(1) 
 
         # 6. Transformer Forward
-        # 创建 mask
-        mask = sequence_mask(x_lens, max_len=T).to(x.device).unsqueeze(1).unsqueeze(1) # [B, 1, 1, T]
-        input_pos = self.input_pos[:T]
-        
-        # 这里的 mask 处理可能需要根据你的 Transformer 实现调整
-        # 如果是 causal mask (GPT)，需要 causal=True；如果是 DiT (Bi-directional)，causal=False
-        x_out = self.transformer(x_in, input_pos=input_pos, mask=mask if args.DiT.is_causal else None)
+        # DiTBlock 使用 [B, T] 布尔 mask（True 表示有效位置）
+        mask = sequence_mask(x_lens, max_len=T).to(x.device)
+        block_mask = None if self.is_causal else mask
+
+        x_out = self.transformer_backbone(x_in, t_emb, mask=block_mask)
 
         # 7. 输出投影
         output = self.final_layer(x_out) # [B, T, 80]
@@ -110,5 +126,9 @@ class LipSyncDiT(nn.Module):
 
 # 需要包含之前的 TimestepEmbedder 类定义
 class TimestepEmbedder(nn.Module):
-    # ... (保持原代码不变) ...
-    pass
+    def __init__(self, dim: int, freq_embed_dim: int = 256):
+        super().__init__()
+        self.embedder = TimestepEmbedding(dim=dim, freq_embed_dim=freq_embed_dim)
+
+    def forward(self, timestep: torch.Tensor) -> torch.Tensor:
+        return self.embedder(timestep)
