@@ -311,6 +311,36 @@ def resolve_spk_prompt_for_sample(
 	dataset_option: str,
 	sample: dict[str, Any],
 ) -> Path:
+	if dataset_option == "dialog":
+		if spk_audio_prompt.is_file():
+			return spk_audio_prompt
+
+		if not spk_audio_prompt.is_dir():
+			raise FileNotFoundError(f"dialog 模式下 spk_audio_prompt 需要是目录或音频文件: {spk_audio_prompt}")
+
+		split = str(sample.get("split", "")).strip()
+		dialogue_id = str(sample.get("dialogue_id", "")).strip()
+		utterance_ids = sample.get("utterance_ids", []) or []
+		first_utt_id = str(utterance_ids[0]).strip() if len(utterance_ids) > 0 else ""
+
+		candidate_stems: list[str] = []
+		if split and dialogue_id and first_utt_id:
+			candidate_stems.append(f"{split}_dia{dialogue_id}_utt{first_utt_id}")
+		if split and dialogue_id:
+			candidate_stems.append(f"{split}_dia{dialogue_id}_utt0")
+		candidate_stems.append(str(sample["sample_key"]))
+
+		for stem in candidate_stems:
+			for ext in (".wav", ".flac", ".mp3", ".m4a", ".ogg"):
+				candidate = spk_audio_prompt / f"{stem}{ext}"
+				if candidate.exists():
+					return candidate
+
+		raise FileNotFoundError(
+			f"dialog 模式下未找到第一句参考音频，split={split}, dialogue_id={dialogue_id}, "
+			f"first_utt_id={first_utt_id}, dir={spk_audio_prompt}"
+		)
+
 	if dataset_option != "sent_emo":
 		if not spk_audio_prompt.is_file():
 			raise FileNotFoundError(f"spk_audio_prompt 需要是音频文件: {spk_audio_prompt}")
