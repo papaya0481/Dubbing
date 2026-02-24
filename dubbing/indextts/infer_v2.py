@@ -893,7 +893,8 @@ class QwenEmotion:
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_dir,
             dtype="float16",  # "auto"
-            device_map="auto"
+            device_map="auto",
+            tp_plan=None,
         )
         self.prompt = "文本情感分类"
         self.cn_key_to_en = {
