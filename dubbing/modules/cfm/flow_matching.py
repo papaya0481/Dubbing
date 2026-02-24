@@ -289,7 +289,7 @@ class LipSyncCFM(nn.Module):
                 else:
                     spks_in = None
 
-                dphi_dt = self.forward_estimator(
+                dphi_dt = self.estimator(
                     x=x_in,
                     mask=mask_in,
                     mu=mu_in,
@@ -301,7 +301,7 @@ class LipSyncCFM(nn.Module):
                 dphi_dt, cfg_dphi_dt = dphi_dt.chunk(2, dim=0)
                 dphi_dt = (1.0 + cfg_scale) * dphi_dt - cfg_scale * cfg_dphi_dt
             else:
-                dphi_dt = self.forward_estimator(
+                dphi_dt = self.estimator(
                     x=x,
                     mask=mask,
                     mu=mu,
