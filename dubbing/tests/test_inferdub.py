@@ -58,6 +58,7 @@ if __name__ == "__main__":
     )
 
     print("Inference result:", result)
+    print("shape of generated wav:", result.wavs.shape)
     
     # save wav to file
     wavs = result.wavs.type(torch.int16)

@@ -15,13 +15,14 @@ from kalpy.utterance import Utterance as KalpyUtterance
 from montreal_forced_aligner import config
 from montreal_forced_aligner.alignment import PretrainedAligner
 
-from montreal_forced_aligner.corpus.classes import FileData
+from montreal_forced_aligner.corpus.classes import FileData, UtteranceData
 from montreal_forced_aligner.data import (
     BRACKETED_WORD,
     CUTOFF_WORD,
     LAUGHTER_WORD,
     OOV_WORD,
     Language,
+    TextFileType,
 )
 from montreal_forced_aligner.dictionary.mixins import (
     DEFAULT_BRACKETS,
@@ -51,6 +52,66 @@ class MFAAligner:
             self.dictionary_model_path = DictionaryModel.get_pretrained_path(dictionary_model)
         else:
             self.dictionary_model_path = None
+            
+    def _build_utteranceData(self, 
+                            text: str,
+                            speaker_name: str = None,
+                            file_name: str = None,
+                            begin: float = 0.0,
+                            end: float = None,
+                             ):
+        """
+        Generate UtteranceData for alignment from text and other metadata.
+
+        Args:
+            text (str): _description_
+            speaker_name (str, optional): _description_. Defaults to None.
+            file_name (str, optional): _description_. Defaults to None.
+            begin (float, optional): _description_. Defaults to 0.0.
+            end (float, optional): _description_. Defaults to None.
+        """
+        uttdata = []
+        utt = UtteranceData(
+            text=text,
+            speaker_name=speaker_name,
+            file_name=file_name,
+            begin=begin,
+            end=end,
+            channel=0,
+        )
+        
+        uttdata.append(utt)
+        
+        return uttdata
+    
+    def _build_Segment(self,
+                       wavs: torch.Tensor,
+                       sampling_rate: int = 22050,
+                       utterance: UtteranceData = None,
+                       ):
+        
+        """Build a Segment object for alignment from wavs and utterance metadata.
+        
+        Args:
+            wavs (torch.Tensor): The input wavs to be aligned.
+            sampling_rate (int, optional): The sampling rate of the wavs. Defaults to
+                22050.
+            utterance (UtteranceData, optional): The metadata of the utterance. Defaults
+                to None.
+        """
+        
+        # resample wavs to 16kHz if needed
+        if sampling_rate != 16000:
+            wavs = wavs.cpu().numpy()
+            wavs = librosa.resample(wavs, orig_sr=sampling_rate, target_sr=16000)
+            
+        if wavs.ndim > 1:
+            wavs = wavs.mean(axis=0)
+            
+        seg = Segment(None, utterance.begin, utterance.end, utterance.channel)
+        seg._wave = wavs
+            
+        return seg
         
     def align_one_file(
         self,
@@ -182,6 +243,7 @@ class MFAAligner:
     def align_one_wav(
         self,
         wavs: torch.Tensor = None,
+        sampling_rate: int = 22050,
         text: str = None,
         **kwargs,
     ):
@@ -196,7 +258,7 @@ class MFAAligner:
         dictionary_path: Path = self.dictionary_model_path or kwargs.get("dictionary_path", None)
         acoustic_model_path = self.acoustic_model_path or kwargs.get("acoustic_model_path", None)
         
-        output_path: Path = output_path or kwargs.get("output_path", Path("alignment.TextGrid"))
+        output_path: Path = kwargs.get("output_path", Path("alignment.TextGrid"))
         
         output_format = kwargs.get("output_format", "long_textgrid")
         no_tokenization = kwargs.get("no_tokenization", False)
@@ -256,17 +318,25 @@ class MFAAligner:
             tokenizer = generate_language_tokenizer(acoustic_model.language)
             
         # file processing
-        file = FileData.parse_file("", None, text_file_path, "", 0)
+        wav_length_seconds = wavs.shape[-1] / sampling_rate
+        
+        raw_utteracesData = self._build_utteranceData(
+            text=text,
+            speaker_name=kwargs.get("speaker_name", None),
+            file_name=kwargs.get("file_name", None),
+            begin=0.0,
+            end=wav_length_seconds,
+        )
+        
         file_ctm = HierarchicalCtm([])
         utterances = []
         cmvn_computer = CmvnComputer()
-        for utterance in file.utterances:
-            seg = Segment(None, utterance.begin, utterance.end, utterance.channel)
-            print(f"{utterance}")
-            audio = wavs.numpy()
-            if audio.ndim > 1:
-                audio = audio.mean(axis=0)
-            seg._wave = audio
+        for utterance in raw_utteracesData:
+            seg = self._build_Segment(
+                wavs=wavs,
+                sampling_rate=sampling_rate,
+                utterance=utterance,
+            )
             normalized_text = tokenize_utterance_text(
                 utterance.text,
                 lexicon_compiler,
@@ -304,7 +374,9 @@ class MFAAligner:
             file_ctm.word_intervals.extend(ctm.word_intervals)
         if str(output_path) != "-":
             output_path.parent.mkdir(parents=True, exist_ok=True)
-        file_ctm.export_textgrid(
-            output_path, file_duration=file.wav_info.duration, output_format=output_format
-        )
+            
+        print(f"Alignment result: {file_ctm}")
+        # file_ctm.export_textgrid(
+        #     output_path, file_duration=file.wav_info.duration, output_format=output_format
+        # )
             

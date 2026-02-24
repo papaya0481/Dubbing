@@ -5,8 +5,8 @@ project_dubbing_root = Path(__file__).resolve().parents[1]
 if str(project_dubbing_root) not in sys.path:
     sys.path.insert(0, str(project_dubbing_root))
 
-# import os  
-# os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+import os  
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 from indextts.inferDub import IndexTTS2ForDub
 import torchaudio
@@ -62,11 +62,17 @@ def test_mfa_aligner_with_dub():
     wavs = result.wavs.type(torch.int16)
     torchaudio.save("dubbed_audio.wav", wavs, result.sampling_rate)
     
+    import librosa
+    wavs_reloaded = librosa.load("dubbed_audio.wav", sr=16000, mono=False)[0]
+    print(f"reloaded wav: {wavs_reloaded}, ")
+    print(f"reloaded wav shape: {wavs_reloaded.shape}, ")
+    print(f"original wav shape: {wavs.shape}, ")
+    
     aligner = MFAAligner()
     texts = " ".join(texts)
     align_result = aligner.align_one_wav(
         text=texts,
-        wav=result.wavs,
+        wavs=result.wavs,
         text_file_path="mel_convert/test/test_short1_1.txt"
     )
 
