@@ -16,12 +16,23 @@ class InputEmbedding(nn.Module):
 
     This module concatenates current state `x`, condition feature `cond`, prior feature `mu`,
     and optional speaker embedding `spks` on the channel dimension, then projects to `dim`.
+    
+    Here, `cond` is decided by phoneme embedding and lips embedding.
+    `mu` is the stretched prior mel-spectrogram feature.
     """
 
-    def __init__(self, mel_dim: int, mu_dim: int, dim: int, spk_dim: int | None = None):
+    def __init__(
+        self,
+        mel_dim: int,
+        cond_dim: int,
+        mu_dim: int,
+        dim: int,
+        spk_dim: int | None = None,
+    ):
         """
         Args:
             mel_dim (int): Number of mel channels.
+            cond_dim (int): Number of condition channels.
             mu_dim (int): Number of prior feature channels.
             dim (int): Hidden size of the DiT backbone.
             spk_dim (int | None): Speaker embedding dimension. If None, speaker condition is disabled.
@@ -30,7 +41,7 @@ class InputEmbedding(nn.Module):
         # Whether to append speaker embedding during fusion.
         self.spk_dim = spk_dim
         # Total concatenated channels: x + cond + mu + optional speaker embedding.
-        in_dim = mel_dim + mel_dim + mu_dim + (spk_dim or 0)
+        in_dim = mel_dim + cond_dim + mu_dim + (spk_dim or 0)
         # Project concatenated features to DiT hidden dimension.
         self.proj = nn.Linear(in_dim, dim)
 
@@ -158,8 +169,15 @@ class LipSyncDiT(nn.Module):
         dropout=0.1,
         ff_mult=4,
         mel_dim=80,
+        cond_dim=None,
         mu_dim=None,
         long_skip_connection=False,
+        
+        # New added arguments for lip-sync specific settings
+        phoneme_vocab_size=8194,
+        lip_dim=512,
+        
+        # other arguments for API compatibility, not used in current implementation
         spk_dim=None,
         out_channels=None,
         static_chunk_size=50,
@@ -174,7 +192,12 @@ class LipSyncDiT(nn.Module):
             dropout (float): Dropout used in attention/FFN.
             ff_mult (int): Expansion factor of FFN hidden layer.
             mel_dim (int): Mel channel dimension.
+            cond_dim (int | None): Condition feature dimension. Defaults to `mel_dim`.
             mu_dim (int | None): Prior feature dimension. Defaults to `mel_dim`.
+            
+            phoneme_vocab_size (int): Vocabulary size for phoneme embedding. Defaults to 8194.
+            lip_dim (int): Dimension for lip embedding. Defaults to 512.
+            
             long_skip_connection (bool): Whether to enable long skip connection.
             spk_dim (int | None): Speaker embedding dimension.
             out_channels (int | None): Reserved output channels argument.
@@ -186,13 +209,25 @@ class LipSyncDiT(nn.Module):
         # -------------------------------------------------------
         # 1. Time and input condition encoders
         # -------------------------------------------------------
+        
+        # Phoneme embedding (kept for compatibility; you may remove it when external cond is ready).
+        self.phoneme_embed = nn.Embedding(phoneme_vocab_size, dim)
+        # Lip embedding projection (kept for compatibility; you may remove it when external cond is ready).
+        self.lip_proj = nn.Linear(lip_dim, dim)
 
         # Time-step embedding: t [B] -> [B, dim]
         self.time_embed = TimestepEmbedding(dim)
         if mu_dim is None:
             mu_dim = mel_dim
+        if cond_dim is None:
+            cond_dim = mel_dim
+
+        self.mel_dim = mel_dim
+        self.mu_dim = mu_dim
+        self.cond_dim = cond_dim
+
         # Input fusion: x/cond/mu/(spk) -> [B, T, dim]
-        self.input_embed = InputEmbedding(mel_dim, mu_dim, dim, spk_dim)
+        self.input_embed = InputEmbedding(mel_dim, cond_dim, mu_dim, dim, spk_dim)
 
         # RoPE generator from sequence length.
         self.rotary_embed = RotaryEmbedding(dim_head)
@@ -227,13 +262,18 @@ class LipSyncDiT(nn.Module):
 
     def forward(self, x, mask, mu, t, spks=None, cond=None, streaming=False):
         """
+        
+        
         Args:
-            x (torch.Tensor): Noisy input state, shape [B, mel_dim, T].
-            mask (torch.Tensor): Length tensor [B] or boolean mask [B, T].
-            mu (torch.Tensor): Prior feature tensor, shape [B, mu_dim, T].
+            x (torch.Tensor): 
+                Noisy input state, shape [B, mel_dim, T].
+            mask (torch.Tensor): 
+                Length tensor [B] or boolean mask [B, T].
+            mu (torch.Tensor): P
+                Prior feature tensor, shape [B, mu_dim, T]. Here `mu` is the stretched prior mel-spectrogram feature.
             t (torch.Tensor): Diffusion timestep tensor [B] or scalar.
             spks (torch.Tensor | None): Optional speaker embedding [B, spk_dim].
-            cond (torch.Tensor | None): Optional condition tensor [B, mel_dim, T]. If None, use `mu`.
+            cond (torch.Tensor | None): Optional condition tensor [B, cond_dim, T]. If None, use `mu`.
             streaming (bool): Whether to use the streaming mask branch.
 
         Returns:
@@ -243,11 +283,23 @@ class LipSyncDiT(nn.Module):
         x = x.transpose(1, 2)
         mu = mu.transpose(1, 2)
 
+        if x.size(-1) != self.mel_dim:
+            raise ValueError(f"Expected x channel dim {self.mel_dim}, but got {x.size(-1)}")
+        if mu.size(-1) != self.mu_dim:
+            raise ValueError(f"Expected mu channel dim {self.mu_dim}, but got {mu.size(-1)}")
+
         # Use mu branch when cond is not provided.
         if cond is None:
+            if self.cond_dim != self.mu_dim:
+                raise ValueError(
+                    f"cond is required when cond_dim ({self.cond_dim}) != mu_dim ({self.mu_dim})"
+                )
             cond = mu
         else:
             cond = cond.transpose(1, 2)
+
+        if cond.size(-1) != self.cond_dim:
+            raise ValueError(f"Expected cond channel dim {self.cond_dim}, but got {cond.size(-1)}")
 
         # 2) Prepare timestep tensor.
         batch, seq_len = x.shape[0], x.shape[1]
