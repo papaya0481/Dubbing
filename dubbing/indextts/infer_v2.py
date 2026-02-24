@@ -543,7 +543,7 @@ class IndexTTS2:
                     emovec_mat = torch.sum(emo_vector.unsqueeze(1) * emo_matrix, 0, keepdim=True)
                     emovec_mats.append(emovec_mat)
             else:
-                random_index = [find_most_similar_cosine(style, tmp) for tmp in self.spk_matrix]
+                random_index = [self.find_most_similar_cosine(style, tmp) for tmp in self.spk_matrix]
                 emo_matrix = [tmp[index].unsqueeze(0) for index, tmp in zip(random_index, self.emo_matrix)]
                 emo_matrix = torch.cat(emo_matrix, 0)
                 emovec_mats_tensor = emo_vectors_tensor @ emo_matrix

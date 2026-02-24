@@ -23,7 +23,7 @@ if __name__ == "__main__":
         cfg_path=f"{checkpoint_path}/config.yaml",
         is_fp16=False
     )
-    spk_prompt = "/data2/ruixin/ted-tts/AllInferenceResults/ESD/0001/Angry/0001_000351.wav"
+    spk_prompt = "/data2/ruixin/datasets/MELD_raw_audio/test_dia2_utt6.wav"
 
     texts = ['I left my guitar in their apartment.', 'Well you can let me in later.']
 
@@ -41,7 +41,7 @@ if __name__ == "__main__":
         output_path=output_path,
         use_emo_text=True,
         emo_text=emotions,
-        emo_alpha=1.4,
+        emo_alpha=1.2,
         verbose=True,
         
         method="hmm",
