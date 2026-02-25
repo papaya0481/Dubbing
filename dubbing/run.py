@@ -29,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--phone_tier_name", type=str, default="phones", help="TextGrid tier used for phoneme IDs")
 	parser.add_argument("--phoneme_map_path", type=str, default="dubbing/modules/english_us_arpa_300.json", help="phoneme id mapping json")
 
-	parser.add_argument("--sample_rate", type=int, default=22050)
+	# parser.add_argument("--sample_rate", type=int, default=22050)
 
 	parser.add_argument("--hidden_dim", type=int, default=512)
 	parser.add_argument("--num_heads", type=int, default=8)

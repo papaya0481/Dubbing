@@ -85,17 +85,20 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         self.model = None
 
         def _default_hparams_from_model_id(mid: str) -> SimpleNamespace:
-            sr = 22050
-            hop = 256
-            return SimpleNamespace(
-                sampling_rate=sr,
-                n_fft=1024,
-                num_mels=80,
-                hop_size=hop,
-                win_size=1024,
-                fmin=0,
-                fmax=sr / 2.0,
-            )
+            from transformers import AutoConfig
+            try:
+                config = AutoConfig.from_pretrained(mid)
+                return SimpleNamespace(
+                    sampling_rate=config.sampling_rate,
+                    n_fft=config.n_fft,
+                    num_mels=config.num_mels,
+                    hop_size=config.hop_size,
+                    win_size=config.win_size,
+                    fmin=config.fmin,
+                    fmax=config.fmax if hasattr(config, 'fmax') else config.sampling_rate / 2.0,
+                )
+            except Exception:
+                raise ValueError(f"Failed to load config for model_id '{mid}'.")  
 
         if not self.use_vocoder:
             self.h = _default_hparams_from_model_id(model_id)
