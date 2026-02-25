@@ -30,12 +30,6 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--phoneme_map_path", type=str, default="dubbing/modules/english_us_arpa_300.json", help="phoneme id mapping json")
 
 	parser.add_argument("--sample_rate", type=int, default=22050)
-	parser.add_argument("--n_fft", type=int, default=1024)
-	parser.add_argument("--num_mels", type=int, default=80)
-	parser.add_argument("--hop_size", type=int, default=256)
-	parser.add_argument("--win_size", type=int, default=1024)
-	parser.add_argument("--fmin", type=int, default=0)
-	parser.add_argument("--fmax", type=int, default=11025)
 
 	parser.add_argument("--hidden_dim", type=int, default=512)
 	parser.add_argument("--num_heads", type=int, default=8)
@@ -73,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def inject_nested_cfg(args: argparse.Namespace) -> argparse.Namespace:
 	args.DiT = SimpleNamespace(
-		in_channels=args.num_mels,
+		in_channels=80,
 		hidden_dim=args.hidden_dim,
 		num_heads=args.num_heads,
 		depth=args.depth,

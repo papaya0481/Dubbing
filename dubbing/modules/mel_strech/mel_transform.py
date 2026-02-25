@@ -65,7 +65,7 @@ class GlobalWarpTransformer(BaseAudioTransformer):
     """
     
     def __init__(self,
-                 use_vocoder: bool = False,
+                 use_vocoder: bool = True,
                  model_id: str = "nvidia/bigvgan_v2_22khz_80band_256x",
                  vocoder_model: Optional[Any] = None,
                  device: str = "cuda", 
@@ -78,7 +78,7 @@ class GlobalWarpTransformer(BaseAudioTransformer):
             model_id (str): BigVGAN pretrained model ID.
             vocoder_model (Optional[Any]): Vocoder model instance.
         """
-        super().__init__(0.001, 8.0, verbose)
+        super().__init__()
         self.use_vocoder = use_vocoder
         self.device = device
         self.model_id = model_id
@@ -317,7 +317,7 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         words_tgt = self.get_real_words(tg_tgt.get_tier_by_name(tier_name))
 
         if len(words_src) != len(words_tgt):
-            return False
+            print(f"❌ Word count mismatch: {len(words_src)} in source vs {len(words_tgt)} in target. Double check.")
 
         wav_tgt_raw, sr_tgt_raw = torchaudio.load(target_audio_path)
         tgt_duration = wav_tgt_raw.shape[-1] / sr_tgt_raw
@@ -380,10 +380,7 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         src_duration = _duration_from_tier(tier_src)
         tgt_duration = _duration_from_tier(tier_tgt)
 
-        if len(words_src) > 0 and len(words_src) == len(words_tgt):
-            src_anchors, tgt_anchors = self.build_anchors(words_src, words_tgt, src_duration, tgt_duration)
-        else:
-            src_anchors, tgt_anchors = [0.0, src_duration], [0.0, tgt_duration]
+        src_anchors, tgt_anchors = self.build_anchors(words_src, words_tgt, src_duration, tgt_duration)
 
         total_target_frames = max(1, int(tgt_duration * self.sample_rate / self.h.hop_size))
         warping_path = self.calculate_warping_path(src_anchors, tgt_anchors, total_target_frames)

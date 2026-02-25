@@ -42,12 +42,6 @@ class Dataset_CFM_Phase1(Dataset):
         filter_enabled: bool = True,
         mse_threshold: float = 0.08,
         sample_rate: int = 22050,
-        n_fft: int = 1024,
-        num_mels: int = 80,
-        hop_size: int = 256,
-        win_size: int = 1024,
-        fmin: int = 0,
-        fmax: Optional[int] = None,
         tier_name: str = "words",
         phone_tier_name: str = "phones",
         phoneme_map_path: str = "dubbing/modules/english_us_arpa_300.json",
@@ -67,20 +61,17 @@ class Dataset_CFM_Phase1(Dataset):
         self.phoneme_to_id = self._load_phoneme_mapping(phoneme_map_path)
         self.pad_phoneme_id = int(self.phoneme_to_id.get("<eps>", 0))
 
-        self.mel_h = SimpleNamespace(
-            n_fft=n_fft,
-            num_mels=num_mels,
-            sampling_rate=sample_rate,
-            hop_size=hop_size,
-            win_size=win_size,
-            fmin=fmin,
-            fmax=(sample_rate // 2 if fmax is None else fmax),
+        self._warper = GlobalWarpTransformer(
+            use_vocoder=False,
+            device=str(self.device),
+            verbose=False,
         )
-
-        self._warper = GlobalWarpTransformer.__new__(GlobalWarpTransformer)
+        self.mel_h = SimpleNamespace(**vars(self._warper.h))
+        self.mel_h.sampling_rate = sample_rate
+        if not hasattr(self.mel_h, "fmax") or self.mel_h.fmax is None:
+            self.mel_h.fmax = sample_rate // 2
         self._warper.sample_rate = sample_rate
         self._warper.h = self.mel_h
-        self._warper.device = self.device
 
         all_pairs = self._discover_pairs()
         all_pairs = self._apply_filter(all_pairs)
