@@ -260,16 +260,14 @@ class Dataset_CFM_Phase1(Dataset):
         r1_mel = self._wav_to_mel(r1_wav)
         r2_mel = self._wav_to_mel(r2_wav)
 
-        warping_path = self._build_warping_path(sample.r1_tg, sample.r2_tg, r1_wav, r2_wav)
-        stretched_r1_mel = self._warper.warp_mel(r1_mel, warping_path)
-
-        tg_src = tgt.io.read_textgrid(str(sample.r1_tg))
-        phone_tier = tg_src.get_tier_by_name(self.phone_tier_name)
-        phoneme_ids = self._warper.length_regulate_phoneme_ids(
-            source_phone_tier=phone_tier,
+        stretched_r1_mel, phoneme_ids = self._warper.transform_mel_with_path(
+            source_mel=r1_mel,
+            source_textgrid=sample.r1_tg,
+            target_textgrid=sample.r2_tg,
+            align_tier_name=self.tier_name,
+            return_phoneme_ids=True,
+            phone_tier_name=self.phone_tier_name,
             phoneme_to_id=self.phoneme_to_id,
-            source_total_frames=r1_mel.shape[-1],
-            warping_path=warping_path,
             pad_id=self.pad_phoneme_id,
         )
 

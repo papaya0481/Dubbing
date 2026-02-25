@@ -5,8 +5,9 @@ import torch.nn.functional as F
 import numpy as np
 from scipy.interpolate import PchipInterpolator
 from pathlib import Path
-from typing import Any, Optional, List, Tuple
+from typing import Any, Optional, List, Tuple, Union
 from abc import ABC, abstractmethod
+from types import SimpleNamespace
 try:
     from .meldataset import get_mel_spectrogram
 except Exception:
@@ -15,7 +16,7 @@ except Exception:
 try:
     import bigvgan
 except ImportError:
-    raise ImportError("请安装 BigVGAN: pip install bigvgan einops")
+    bigvgan = None
 
 # ==========================================
 # 1. 基类定义
@@ -64,42 +65,64 @@ class GlobalWarpTransformer(BaseAudioTransformer):
     """
     
     def __init__(self,
+                 use_vocoder: bool = False,
                  model_id: str = "nvidia/bigvgan_v2_22khz_80band_256x",
                  vocoder_model: Optional[Any] = None,
                  device: str = "cuda", 
                  verbose: bool = True) -> None:
         """
         初始化全局时间扭曲变换器。/ Initialize global time-warp transformer.
+            use_vocoder (bool): 是否使用声码器将 Mel 转回音频。/ Whether to use vocoder to convert mel back to audio.
             vocoder_model (Optional[Any]): 可选的自定义声码器。提供后将强覆盖并忽略 model_id。
         Args:
             model_id (str): BigVGAN pretrained model ID.
             vocoder_model (Optional[Any]): Vocoder model instance.
         """
+        super().__init__(0.001, 8.0, verbose)
+        self.use_vocoder = use_vocoder
+        self.device = device
+        self.model_id = model_id
+        self.model = None
+
+        def _default_hparams_from_model_id(mid: str) -> SimpleNamespace:
+            sr = 22050
+            hop = 256
+            return SimpleNamespace(
+                sampling_rate=sr,
+                n_fft=1024,
+                num_mels=80,
+                hop_size=hop,
+                win_size=1024,
+                fmin=0,
+                fmax=sr / 2.0,
+            )
+
+        if not self.use_vocoder:
+            self.h = _default_hparams_from_model_id(model_id)
+            self.sample_rate = self.h.sampling_rate
+            if self.verbose:
+                print(f"Vocoder disabled. Use model_id params only. SR: {self.sample_rate}, Hop: {self.h.hop_size}")
+            return
+
+        if bigvgan is None:
+            raise ImportError("请安装 BigVGAN: pip install bigvgan einops")
 
         if vocoder_model is not None:
             self.model = vocoder_model.to(self.device) if hasattr(vocoder_model, "to") else vocoder_model
         else:
-            try:
-                self.model = bigvgan.BigVGAN.from_pretrained(model_id, use_cuda_kernel=False).to(self.device)
-            except:
-                print("Fallback load...")
-                self.model = bigvgan.BigVGAN.from_pretrained(model_id, use_cuda_kernel=False).to(self.device)
-            self.model = bigvgan.BigVGAN.from_pretrained(model_id, use_cuda_kernel=False).to(self.device)
-            
-        if hasattr(self.model, "remove_weight_norm"):
-            self.model.remove_weight_norm()
-            print("Fallback load...")
             self.model = bigvgan.BigVGAN.from_pretrained(model_id, use_cuda_kernel=False).to(self.device)
 
-        self.model.remove_weight_norm()
+        if hasattr(self.model, "remove_weight_norm"):
+            self.model.remove_weight_norm()
         self.model.eval()
-        
+
         self.h = self.model.h
         self.sample_rate = self.h.sampling_rate
         if not hasattr(self.h, 'fmax') or self.h.fmax is None:
             self.h.fmax = self.sample_rate / 2.0
-            
-        if verbose: print(f"✅ Ready. SR: {self.sample_rate}, Hop: {self.h.hop_size}")
+
+        if self.verbose:
+            print(f"✅ Ready. SR: {self.sample_rate}, Hop: {self.h.hop_size}")
 
     def load_audio(self, path: str) -> Tuple[torch.Tensor, int]:
         """读取并重采样音频。/ Load audio and resample to model sample rate."""
@@ -129,6 +152,8 @@ class GlobalWarpTransformer(BaseAudioTransformer):
 
     def save_audio(self, audio_mel: torch.Tensor, output_path: str, sample_rate: Optional[int] = None) -> None:
         """将 Mel 通过声码器保存为音频。/ Vocode mel and save waveform to file."""
+        if not self.use_vocoder or self.model is None:
+            raise RuntimeError("Vocoder is disabled (use_vocoder=False); cannot save waveform from mel.")
         if self.verbose: print(f"Vocoding...")
         with torch.no_grad():
             wav_gen = self.model(audio_mel)
@@ -312,35 +337,68 @@ class GlobalWarpTransformer(BaseAudioTransformer):
     def transform_mel_with_path(
         self,
         source_mel: torch.Tensor,
-        src_anchors_path: Optional[str],
-        tgt_anchors_path: Optional[str]
-    ) -> torch.Tensor:
+        source_textgrid: Union[str, Path, tgt.TextGrid],
+        target_textgrid: Union[str, Path, tgt.TextGrid],
+        tier_name: str = "phones",
+        phoneme_to_id: Optional[dict] = None,
+        pad_id: int = 0,
+    ):
         """
-        Directly warp mel given source/target anchors.
-        
-        Args:
-            source_mel (torch.Tensor): 输入 Mel，形状为 (1, n_mels, src_len)。/ Input mel of shape (1, n_mels, src_len).
-            src_anchors_path (Optional[str]): 源关键点文件路径，格式为每行 "src_time tgt_time"。/ Path to source anchors file, format: "src_time tgt_time" per line.
-            tgt_anchors_path (Optional[str]): 目标关键点文件路径，格式同 src_anchors。/ Path to target anchors file, same format as src_anchors.
+        Warp mel using source/target TextGrid alignment.
 
+        Args:
+            source_mel (torch.Tensor): Input mel of shape (1, n_mels, src_len).
+            source_textgrid (str | Path | tgt.TextGrid): Source TextGrid path or object.
+            target_textgrid (str | Path | tgt.TextGrid): Target TextGrid path or object.
+            phoneme_to_id (Optional[dict]): Phone-to-id mapping used when return_phoneme_ids=True.
+            pad_id (int): Fallback phone id for unknown/blank phones.
+
+        Returns:
+            torch.Tensor | Tuple[torch.Tensor, torch.Tensor]:
+                - warped mel, or
+                - (warped mel, frame-level phoneme ids).
         """
-        src_anchors = self.load_anchors(src_anchors_path)
-        tgt_anchors = self.load_anchors(tgt_anchors_path)
-        total_target_frames = int(tgt_anchors[-1] * self.sample_rate / self.h.hop_size)
+        def _as_textgrid(x: Union[str, Path, tgt.TextGrid]) -> tgt.TextGrid:
+            if isinstance(x, tgt.TextGrid):
+                return x
+            return tgt.io.read_textgrid(str(x))
+
+        def _duration_from_tier(tier: tgt.IntervalTier) -> float:
+            if len(tier) == 0:
+                return 0.0
+            return max(iv.end_time for iv in tier)
+
+        tg_src = _as_textgrid(source_textgrid)
+        tg_tgt = _as_textgrid(target_textgrid)
+
+        tier_src = tg_src.get_tier_by_name(tier_name)
+        tier_tgt = tg_tgt.get_tier_by_name(tier_name)
+
+        words_src = self.get_real_words(tier_src)
+        words_tgt = self.get_real_words(tier_tgt)
+
+        src_duration = _duration_from_tier(tier_src)
+        tgt_duration = _duration_from_tier(tier_tgt)
+
+        if len(words_src) > 0 and len(words_src) == len(words_tgt):
+            src_anchors, tgt_anchors = self.build_anchors(words_src, words_tgt, src_duration, tgt_duration)
+        else:
+            src_anchors, tgt_anchors = [0.0, src_duration], [0.0, tgt_duration]
+
+        total_target_frames = max(1, int(tgt_duration * self.sample_rate / self.h.hop_size))
         warping_path = self.calculate_warping_path(src_anchors, tgt_anchors, total_target_frames)
         final_mel = self.warp_mel(source_mel, warping_path)
-        return final_mel
-    
 
-if __name__ == "__main__":
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    transformer = GlobalWarpTransformer(device=device, verbose=True)
+        if phoneme_to_id is None:
+            raise ValueError("phoneme_to_id is required when return_phoneme_ids=True")
+
+        phone_tier = tg_src.get_tier_by_name(tier_name)
+        phoneme_ids = self.length_regulate_phoneme_ids(
+            source_phone_tier=phone_tier,
+            phoneme_to_id=phoneme_to_id,
+            source_total_frames=source_mel.shape[-1],
+            warping_path=warping_path,
+            pad_id=pad_id,
+        )
+        return final_mel, phoneme_ids
     
-    transformer.transform(
-        source_audio_path="mel_convert/test/test_short1_1.wav",
-        source_textgrid_path="mel_convert/test/aligned/test_short1_1.TextGrid",
-        target_textgrid_path="mel_convert/test/aligned/test_short_gt.TextGrid",
-        target_audio_path="mel_convert/test/test_short_gt.wav",
-        output_path="output_.wav",
-        tier_name="phones"
-    )
