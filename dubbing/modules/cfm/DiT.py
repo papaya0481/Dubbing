@@ -194,7 +194,7 @@ class LipSyncDiT(nn.Module):
             dropout (float): Dropout used in attention/FFN.
             ff_mult (int): Expansion factor of FFN hidden layer.
             mel_dim (int): Mel channel dimension.
-            cond_dim (int | None): Condition feature dimension. Defaults to `mel_dim`.
+            cond_dim (int | None): Condition feature dimension. Defaults to `dim`.
             mu_dim (int | None): Prior feature dimension. Defaults to `mel_dim`.
             
             phoneme_vocab_size (int): Vocabulary size for phoneme embedding. Defaults to 8194.
@@ -247,7 +247,7 @@ class LipSyncDiT(nn.Module):
         if mu_dim is None:
             mu_dim = mel_dim
         if cond_dim is None:
-            cond_dim = mel_dim
+            cond_dim = dim
 
         self.mel_dim = mel_dim
         self.mu_dim = mu_dim

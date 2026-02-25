@@ -33,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--depth", type=int, default=8)
 	parser.add_argument("--dropout", type=float, default=0.1)
 	parser.add_argument("--ff_mult", type=int, default=4)
-	parser.add_argument("--cond_dim", type=int, default=80)
+	parser.add_argument("--cond_dim", type=int, default=None)
 	parser.add_argument("--mu_dim", type=int, default=80)
 	parser.add_argument("--phoneme_vocab_size", type=int, default=72)
 	parser.add_argument("--lip_dim", type=int, default=512)

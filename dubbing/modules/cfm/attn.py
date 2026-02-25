@@ -21,15 +21,35 @@ from transformers.models.llama.modeling_llama import rotate_half
 
 
 def apply_rotary_pos_emb(x: torch.Tensor, freqs: torch.Tensor, scale: float | torch.Tensor = 1.0) -> torch.Tensor:
-    rotary_dim = x.shape[-1]
-    half_rotary_dim = rotary_dim // 2
+    rotary_dim = freqs.shape[-1]
+    x_dim = x.shape[-1]
 
+    if x_dim == rotary_dim:
+        x_view = x
+        out_shape = x.shape
+        need_unflatten = False
+    elif x_dim % rotary_dim == 0:
+        num_groups = x_dim // rotary_dim
+        x_view = x.view(*x.shape[:-1], num_groups, rotary_dim)
+        out_shape = x.shape
+        need_unflatten = True
+    else:
+        raise RuntimeError(
+            f"RoPE dim mismatch: x last dim={x_dim}, freqs dim={rotary_dim}. "
+            "Expected equal or divisible when x is flattened multi-head."
+        )
+
+    half_rotary_dim = rotary_dim // 2
     cos = freqs[..., :half_rotary_dim]
     sin = freqs[..., half_rotary_dim:rotary_dim]
     cos = torch.cat([cos, cos], dim=-1)
     sin = torch.cat([sin, sin], dim=-1)
 
-    while cos.ndim < x.ndim:
+    if need_unflatten:
+        cos = cos.unsqueeze(-2)
+        sin = sin.unsqueeze(-2)
+
+    while cos.ndim < x_view.ndim:
         cos = cos.unsqueeze(0)
         sin = sin.unsqueeze(0)
 
@@ -38,12 +58,15 @@ def apply_rotary_pos_emb(x: torch.Tensor, freqs: torch.Tensor, scale: float | to
 
     if torch.is_tensor(scale):
         scale = scale.to(device=x.device, dtype=x.dtype)
-        while scale.ndim < x.ndim:
+        while scale.ndim < x_view.ndim:
             scale = scale.unsqueeze(0)
     else:
         scale = torch.tensor(scale, device=x.device, dtype=x.dtype)
 
-    return ((x * cos) + (rotate_half(x) * sin)) * scale
+    out = ((x_view * cos) + (rotate_half(x_view) * sin)) * scale
+    if need_unflatten:
+        out = out.reshape(out_shape)
+    return out
 
 
 # raw wav to mel spec
