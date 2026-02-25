@@ -67,6 +67,7 @@ class Exp_CFM_Phase1(Exp_Basic):
 
 	def train(self, setting: str):
 		train_data, train_loader = self._get_data("train")
+		val_data, val_loader = self._get_data("val")
 		test_data, test_loader = self._get_data("test")
 
 		os.makedirs(self.args.checkpoints, exist_ok=True)
@@ -79,11 +80,11 @@ class Exp_CFM_Phase1(Exp_Basic):
 		best_val = float("inf")
 		stale_epochs = 0
 
-		logger.info(f"Train samples: {len(train_data)} | Test samples: {len(test_data)}")
+		logger.info(f"Train samples: {len(train_data)} | Val samples: {len(val_data)} | Test samples: {len(test_data)}")
 		for epoch in range(1, self.args.train_epochs + 1):
 			t0 = time.time()
 			train_loss = self._run_one_epoch(train_loader, train=True)
-			val_loss = self._run_one_epoch(test_loader, train=False)
+			val_loss = self._run_one_epoch(val_loader, train=False)
 
 			logger.info(
 				f"Epoch {epoch}/{self.args.train_epochs} | "

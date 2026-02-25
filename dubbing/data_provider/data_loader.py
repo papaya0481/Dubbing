@@ -11,8 +11,8 @@ import torch
 import torchaudio
 from torch.utils.data import Dataset
 
-from dubbing.modules.mel_strech.meldataset import get_mel_spectrogram
-from dubbing.modules.mel_strech.mel_transform import GlobalWarpTransformer
+from modules.mel_strech.meldataset import get_mel_spectrogram
+from modules.mel_strech.mel_transform import GlobalWarpTransformer
 
 
 @dataclass
@@ -158,17 +158,39 @@ class Dataset_CFM_Phase1(Dataset):
 
     @staticmethod
     def _split_samples(samples: List[PairSample], split: str, split_ratio: float, seed: int) -> List[PairSample]:
-        if split not in {"train", "test"}:
+        if split not in {"train", "val", "test"}:
+            return samples
+
+        n_total = len(samples)
+        if n_total == 0:
             return samples
 
         rng = torch.Generator().manual_seed(seed)
-        perm = torch.randperm(len(samples), generator=rng).tolist()
+        perm = torch.randperm(n_total, generator=rng).tolist()
         samples = [samples[i] for i in perm]
 
-        cut = max(1, int(len(samples) * split_ratio))
+        train_count = int(n_total * split_ratio)
+        train_count = max(1, min(train_count, n_total))
+
+        remaining = n_total - train_count
+        val_test_count = remaining // 2
+
+        if val_test_count == 0:
+            if n_total >= 3:
+                val_test_count = 1
+            else:
+                if split == "train":
+                    return samples
+                return samples[-1:]
+
+        train_end = n_total - 2 * val_test_count
+        val_end = train_end + val_test_count
+
         if split == "train":
-            return samples[:cut]
-        return samples[cut:] if cut < len(samples) else samples[-1:]
+            return samples[:train_end]
+        if split == "val":
+            return samples[train_end:val_end]
+        return samples[val_end:]
 
     def _load_wav(self, wav_path: Path) -> torch.Tensor:
         wav, sr = torchaudio.load(str(wav_path))

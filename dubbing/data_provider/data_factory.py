@@ -14,7 +14,7 @@ data_dict = {
 def data_provider(args, flag: str):
     Data = data_dict[args.data]
 
-    if flag == 'test':
+    if flag in {'val', 'test'}:
         shuffle_flag = False
         drop_last = False
         batch_size = 1  # bsz=1 for evaluation
