@@ -5,6 +5,10 @@ import torch
 from exp.basic import Exp_Basic
 from data_provider.data_factory import data_provider
 from modules.cfm.flow_matching import LipSyncCFM
+from logger import get_logger
+
+
+logger = get_logger("dubbing.exp.cfm")
 
 
 class Exp_CFM_Phase1(Exp_Basic):
@@ -75,13 +79,13 @@ class Exp_CFM_Phase1(Exp_Basic):
 		best_val = float("inf")
 		stale_epochs = 0
 
-		print(f"Train samples: {len(train_data)}, Test samples: {len(test_data)}")
+		logger.info(f"Train samples: {len(train_data)} | Test samples: {len(test_data)}")
 		for epoch in range(1, self.args.train_epochs + 1):
 			t0 = time.time()
 			train_loss = self._run_one_epoch(train_loader, train=True)
 			val_loss = self._run_one_epoch(test_loader, train=False)
 
-			print(
+			logger.info(
 				f"Epoch {epoch}/{self.args.train_epochs} | "
 				f"train_loss={train_loss:.6f} | val_loss={val_loss:.6f} | "
 				f"time={time.time()-t0:.1f}s"
@@ -91,12 +95,12 @@ class Exp_CFM_Phase1(Exp_Basic):
 				best_val = val_loss
 				stale_epochs = 0
 				torch.save({"model": self.model.state_dict(), "args": vars(self.args)}, self.best_ckpt_path)
-				print(f"Saved best checkpoint to {self.best_ckpt_path}")
+				logger.info(f"Saved best checkpoint: {self.best_ckpt_path}")
 			else:
 				stale_epochs += 1
 
 			if stale_epochs >= self.args.patience:
-				print(f"Early stopping triggered at epoch {epoch}")
+				logger.warning(f"Early stopping triggered at epoch {epoch}")
 				break
 
 		return self.model
@@ -109,8 +113,8 @@ class Exp_CFM_Phase1(Exp_Basic):
 		if os.path.exists(best_ckpt_path):
 			state = torch.load(best_ckpt_path, map_location=self.device)
 			self.model.load_state_dict(state["model"], strict=False)
-			print(f"Loaded checkpoint: {best_ckpt_path}")
+			logger.info(f"Loaded checkpoint: {best_ckpt_path}")
 
 		test_loss = self._run_one_epoch(test_loader, train=False)
-		print(f"Test loss: {test_loss:.6f}")
+		logger.info(f"Test loss: {test_loss:.6f}")
 		return test_loss

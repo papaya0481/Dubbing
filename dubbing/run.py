@@ -6,6 +6,10 @@ import numpy as np
 import torch
 
 from exp.cfm.phase1 import Exp_CFM_Phase1
+from logger import get_logger, show_setting
+
+
+logger = get_logger("dubbing.run")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -106,23 +110,27 @@ if __name__ == "__main__":
 
 	args = inject_nested_cfg(args)
 
-	print("Args in experiment:")
-	print(args)
+	logger.info("Args in experiment:")
+	logger.info(str(args))
 
 	Exp = Exp_CFM_Phase1
 
 	if args.is_training:
 		for ii in range(args.itr):
-			setting = f"{args.model_id}_{args.model}_{args.exp_name}_{ii}"
+			setting_parts = [args.model_id, args.model, args.exp_name, ii]
+			show_setting("Training Setting", setting_parts)
+			setting = "_".join([str(x) for x in setting_parts])
 			exp = Exp(args)
-			print(f">>>>>>>start training : {setting}>>>>>>>>>>>>>>>>>>>>>>>>>>")
+			logger.info(f"Start training: {setting}")
 			exp.train(setting)
-			print(f">>>>>>>testing : {setting}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
+			logger.info(f"Testing: {setting}")
 			exp.test(setting)
 			torch.cuda.empty_cache()
 	else:
-		setting = f"{args.model_id}_{args.model}_{args.exp_name}_0"
+		setting_parts = [args.model_id, args.model, args.exp_name, 0]
+		show_setting("Testing Setting", setting_parts)
+		setting = "_".join([str(x) for x in setting_parts])
 		exp = Exp(args)
-		print(f">>>>>>>testing : {setting}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<")
+		logger.info(f"Testing: {setting}")
 		exp.test(setting, test=1)
 		torch.cuda.empty_cache()

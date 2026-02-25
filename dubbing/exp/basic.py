@@ -1,5 +1,9 @@
 import os
 import torch
+from logger import get_logger
+
+
+logger = get_logger("dubbing.exp")
 
 class Exp_Basic(object):
     def __init__(self, args):
@@ -16,10 +20,10 @@ class Exp_Basic(object):
             os.environ["CUDA_VISIBLE_DEVICES"] = str(
                 self.args.gpu) if not self.args.use_multi_gpu else self.args.devices
             device = torch.device('cuda:{}'.format(self.args.gpu))
-            print('Use GPU: cuda:{}'.format(self.args.gpu))
+            logger.info(f"Use GPU: cuda:{self.args.gpu}")
         else:
             device = torch.device('cpu')
-            print('Use CPU')
+            logger.info("Use CPU")
         return device
 
     def _get_data(self):
