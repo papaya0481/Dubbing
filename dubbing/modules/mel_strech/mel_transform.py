@@ -1,6 +1,7 @@
 import tgt
 import torch
 import torchaudio
+from torchcodec.
 import torch.nn.functional as F
 import numpy as np
 from scipy.interpolate import PchipInterpolator
@@ -21,6 +22,9 @@ try:
     import bigvgan
 except ImportError:
     bigvgan = None
+    
+from logger import get_logger
+logger = get_logger("dubbing.mel_transform")
 
 # ==========================================
 # 1. 基类定义
@@ -110,7 +114,7 @@ class GlobalWarpTransformer(BaseAudioTransformer):
             self.h = _default_hparams_from_model_id(model_id)
             self.sample_rate = self.h.sampling_rate
             if self.verbose:
-                print(f"Vocoder disabled. Use model_id params only. SR: {self.sample_rate}, Hop: {self.h.hop_size}")
+                logger.warning(f"Vocoder disabled. Use model_id params only. SR: {self.sample_rate}, Hop: {self.h.hop_size}")
             return
 
         if bigvgan is None:

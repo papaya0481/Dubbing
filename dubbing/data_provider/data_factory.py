@@ -31,7 +31,6 @@ def data_provider(args, flag: str):
         filter_enabled=args.filter_by_mse,
         mse_threshold=args.mse_threshold,
         tier_name=args.tier_name,
-        phone_tier_name=args.phone_tier_name,
         phoneme_map_path=args.phoneme_map_path,
     )
     data_loader = DataLoader(

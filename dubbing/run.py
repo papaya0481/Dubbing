@@ -24,12 +24,9 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--data_root", type=str, required=True, help="root dir containing ost/ and aligned/")
 	parser.add_argument("--filter_by_mse", action="store_true", default=True, help="filter by mse in metadata csv")
 	parser.add_argument("--mse_threshold", type=float, default=8, help="mse threshold for filtering")
-	parser.add_argument("--train_split_ratio", type=float, default=0.95, help="train/test split ratio")
-	parser.add_argument("--tier_name", type=str, default="words", help="TextGrid tier used for alignment")
-	parser.add_argument("--phone_tier_name", type=str, default="phones", help="TextGrid tier used for phoneme IDs")
+	parser.add_argument("--train_split_ratio", type=float, default=0.9, help="train/test split ratio")
+	parser.add_argument("--tier_name", type=str, default="phones", help="TextGrid tier used for alignment")
 	parser.add_argument("--phoneme_map_path", type=str, default="dubbing/modules/english_us_arpa_300.json", help="phoneme id mapping json")
-
-	# parser.add_argument("--sample_rate", type=int, default=22050)
 
 	parser.add_argument("--hidden_dim", type=int, default=512)
 	parser.add_argument("--num_heads", type=int, default=8)

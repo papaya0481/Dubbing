@@ -15,6 +15,10 @@ from torch.utils.data import Dataset
 from modules.mel_strech.meldataset import get_mel_spectrogram
 from modules.mel_strech.mel_transform import GlobalWarpTransformer
 
+from logger import get_logger
+
+logger = get_logger("dubbing.data_loader")
+
 
 @dataclass
 class PairSample:
@@ -41,17 +45,14 @@ class Dataset_CFM_Phase1(Dataset):
         seed: int = 2026,
         filter_enabled: bool = True,
         mse_threshold: float = 0.08,
-        tier_name: str = "words",
-        phone_tier_name: str = "phones",
+        tier_name: str = "phones",
         phoneme_map_path: str = "dubbing/modules/english_us_arpa_300.json",
     ):
         super().__init__()
         self.root_dir = Path(root_dir)
-        self.ost_dir = self.root_dir / "ost"
-        self.aligned_dir = self.root_dir / "aligned"
+        self.ost_dirs = self._discover_ost_dirs(self.root_dir)
         self.split = split
         self.tier_name = tier_name
-        self.phone_tier_name = phone_tier_name
         self.filter_enabled = filter_enabled
         self.mse_threshold = mse_threshold
         self.device = torch.device("cpu")
@@ -62,6 +63,7 @@ class Dataset_CFM_Phase1(Dataset):
             verbose=False,
         )
         self.mel_h = SimpleNamespace(**vars(self._warper.h))
+        self.sample_rate = int(self.mel_h.sampling_rate)
         self.pad_phoneme_id = int(self._warper.phoneme_mapping.get("<eps>", 0))
 
         all_pairs = self._discover_pairs()
@@ -71,37 +73,56 @@ class Dataset_CFM_Phase1(Dataset):
         if len(self.samples) == 0:
             raise RuntimeError(f"No samples found for split={split} in {root_dir}")
 
+    @staticmethod
+    def _discover_ost_dirs(root_dir: Path) -> List[Path]:
+        ost_dirs = sorted([p for p in root_dir.rglob("ost") if p.is_dir()])
+        if not ost_dirs:
+            raise FileNotFoundError(f"No 'ost' directories found under: {root_dir}")
+        return ost_dirs
+
+    def _resolve_aligned_dir(self, ost_dir: Path) -> Optional[Path]:
+        candidates = [
+            ost_dir.parent / "aligned",
+            self.root_dir / "aligned",
+        ]
+        for aligned_dir in candidates:
+            if aligned_dir.exists():
+                return aligned_dir
+        return None
+
     def _discover_pairs(self) -> List[PairSample]:
-        if not self.ost_dir.exists():
-            raise FileNotFoundError(f"ost folder not found: {self.ost_dir}")
-        if not self.aligned_dir.exists():
-            raise FileNotFoundError(f"aligned folder not found: {self.aligned_dir}")
-
-        pair_map: Dict[str, Dict[str, Path]] = {}
-        for wav_path in self.ost_dir.rglob("*.wav"):
-            key, role = _pair_key_and_role(wav_path.stem)
-            if key is None or role is None:
-                continue
-            if key not in pair_map:
-                pair_map[key] = {}
-            pair_map[key][role] = wav_path
-
         samples: List[PairSample] = []
-        for key, pair in pair_map.items():
-            if "r1" not in pair or "r2" not in pair:
-                continue
-            r1_wav = pair["r1"]
-            r2_wav = pair["r2"]
 
-            rel_r1 = r1_wav.relative_to(self.ost_dir)
-            rel_r2 = r2_wav.relative_to(self.ost_dir)
-
-            r1_tg = (self.aligned_dir / rel_r1).with_suffix(".TextGrid")
-            r2_tg = (self.aligned_dir / rel_r2).with_suffix(".TextGrid")
-            if not r1_tg.exists() or not r2_tg.exists():
+        for ost_dir in self.ost_dirs:
+            aligned_dir = self._resolve_aligned_dir(ost_dir)
+            if aligned_dir is None:
+                logger.warning(f"Skip ost dir without aligned dir: {ost_dir}")
                 continue
 
-            samples.append(PairSample(key, r1_wav, r2_wav, r1_tg, r2_tg))
+            pair_map: Dict[str, Dict[str, Path]] = {}
+            for wav_path in ost_dir.rglob("*.wav"):
+                key, role = _pair_key_and_role(wav_path.stem)
+                if key is None or role is None:
+                    continue
+                if key not in pair_map:
+                    pair_map[key] = {}
+                pair_map[key][role] = wav_path
+
+            for key, pair in pair_map.items():
+                if "r1" not in pair or "r2" not in pair:
+                    continue
+                r1_wav = pair["r1"]
+                r2_wav = pair["r2"]
+
+                rel_r1 = r1_wav.relative_to(ost_dir)
+                rel_r2 = r2_wav.relative_to(ost_dir)
+
+                r1_tg = (aligned_dir / rel_r1).with_suffix(".TextGrid")
+                r2_tg = (aligned_dir / rel_r2).with_suffix(".TextGrid")
+                if not r1_tg.exists() or not r2_tg.exists():
+                    continue
+
+                samples.append(PairSample(key, r1_wav, r2_wav, r1_tg, r2_tg))
 
         samples.sort(key=lambda x: x.pair_key)
         return samples
@@ -111,19 +132,23 @@ class Dataset_CFM_Phase1(Dataset):
         if not self.filter_enabled:
             return None
 
-        candidates = [
-            self.ost_dir / "generated_metada.csv",
-            self.ost_dir / "generation_metadata.csv",
-            self.ost_dir / "generated_metadata.csv",
-        ]
-        csv_path = next((p for p in candidates if p.exists()), None)
-        if csv_path is None:
-            return None
+        frames: List[pd.DataFrame] = []
+        for ost_dir in self.ost_dirs:
+            candidates = [
+                ost_dir / "generated_metada.csv",
+                ost_dir / "generation_metadata.csv",
+                ost_dir / "generated_metadata.csv",
+            ]
+            csv_path = next((p for p in candidates if p.exists()), None)
+            if csv_path is None:
+                continue
+            df = pd.read_csv(csv_path)
+            if "mse" in df.columns:
+                frames.append(df)
 
-        df = pd.read_csv(csv_path)
-        if "mse" not in df.columns:
+        if not frames:
             return None
-        return df
+        return pd.concat(frames, ignore_index=True)
 
     def _apply_filter(self, samples: List[PairSample]) -> List[PairSample]:
         df = self._load_filter_table()
@@ -231,7 +256,7 @@ class Dataset_CFM_Phase1(Dataset):
             source_mel=r1_mel,
             source_textgrid=sample.r1_tg,
             target_textgrid=sample.r2_tg,
-            phone_tier_name=self.phone_tier_name,
+            tier_name=self.tier_name,
         )
 
         target_frames = min(stretched_r1_mel.shape[-1], r2_mel.shape[-1])

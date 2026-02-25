@@ -22,8 +22,9 @@ def get_logger(name: str = "dubbing", level: int = logging.INFO) -> logging.Logg
 		show_level=True,
 		show_path=False,
 		markup=False,
+  		log_time_format="%H:%M:%S",
 	)
-	formatter = logging.Formatter("%(message)s")
+	formatter = logging.Formatter("[%(name)s] %(message)s")
 	handler.setFormatter(formatter)
 
 	logger.addHandler(handler)
