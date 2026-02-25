@@ -43,3 +43,5 @@ ESD/
 mel_convert/test/
 **/__pycache__/
 **/cuda/
+
+!dubbing/modules/meta.json
