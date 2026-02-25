@@ -7,7 +7,10 @@ from scipy.interpolate import PchipInterpolator
 from pathlib import Path
 from typing import Any, Optional, List, Tuple
 from abc import ABC, abstractmethod
-from meldataset import get_mel_spectrogram
+try:
+    from .meldataset import get_mel_spectrogram
+except Exception:
+    from meldataset import get_mel_spectrogram
 
 try:
     import bigvgan
