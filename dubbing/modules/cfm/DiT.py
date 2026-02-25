@@ -176,7 +176,7 @@ class LipSyncDiT(nn.Module):
         long_skip_connection=False,
         
         # New added arguments for lip-sync specific settings
-        phoneme_vocab_size=8194,
+        phoneme_vocab_size=72,
         lip_dim=512,
         
         # other arguments for API compatibility, not used in current implementation

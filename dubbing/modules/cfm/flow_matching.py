@@ -45,12 +45,12 @@ class LipSyncCFMConfig:
             hidden_dim=dit_args.hidden_dim,
             num_heads=dit_args.num_heads,
             depth=dit_args.depth,
-            cond_dim=getattr(dit_args, "cond_dim", None),
+            cond_dim=getattr(dit_args, "cond_dim", dit_args.hidden_dim),
             mu_dim=getattr(dit_args, "mu_dim", None),
             dropout=getattr(dit_args, "dropout", 0.1),
             ff_mult=getattr(dit_args, "ff_mult", 4),
             long_skip_connection=getattr(dit_args, "long_skip_connection", False),
-            phoneme_vocab_size=getattr(dit_args, "phoneme_vocab_size", 8194),
+            phoneme_vocab_size=getattr(dit_args, "phoneme_vocab_size", 72),
             lip_dim=getattr(dit_args, "lip_dim", 512),
             spk_dim=getattr(dit_args, "spk_dim", None),
             out_channels=getattr(dit_args, "out_channels", None),
@@ -75,11 +75,11 @@ class LipSyncCFM(nn.Module):
         self.sigma_min = 1e-6
         dit_cfg = cfg.DiT
 
-        cond_dim = getattr(dit_cfg, "cond_dim", dit_cfg.in_channels)
+        cond_dim = getattr(dit_cfg, "cond_dim", dit_cfg.hidden_dim)
         self.estimator = LipSyncDiT(args=dit_cfg)
 
         # Used only for temporary fallback cond construction (phoneme+lip -> cond_dim).
-        self.cond_adapter = nn.Conv1d(2 * dit_cfg.hidden_dim, cond_dim, kernel_size=1)
+        self.cond_adapter = nn.Conv1d(2 * dit_cfg.hidden_dim, dit_cfg.hidden_dim, kernel_size=1)
 
         cfm_cfg = cfg.CFM
         self.t_scheduler = cfm_cfg.t_scheduler
@@ -98,12 +98,6 @@ class LipSyncCFM(nn.Module):
         
         phoneme_feat = self.estimator.phoneme_embed(phoneme_ids)  # [B, T, D]
         B, T, D = phoneme_feat.shape
-
-        if hasattr(self.estimator, "phoneme_embed") and hasattr(self.estimator, "lip_proj"):
-            phoneme_feat = self.estimator.phoneme_embed(phoneme_ids)  # [B, T, D]
-            lip_feat = self.estimator.lip_proj(lip_embedding)  # [B, T, D]
-            fused_cond = torch.cat([phoneme_feat, lip_feat], dim=-1).transpose(1, 2)  # [B, 2D, T]
-            return self.cond_adapter(fused_cond)
         
         if lip_embedding is not None:
             lip_feat = self.estimator.lip_proj(lip_embedding)  # [B, T, D]
@@ -112,7 +106,7 @@ class LipSyncCFM(nn.Module):
             
         fused_cond = torch.cat(
             [phoneme_feat, lip_feat], dim=-1
-        )   # [B, T, 2D]
+        )   # [B, T, D1+D2]
         
         fused_cond = fused_cond.transpose(1, 2)  # [B, 2D, T]
         cond_out = self.cond_adapter(fused_cond)  # [B, cond_dim, T]
