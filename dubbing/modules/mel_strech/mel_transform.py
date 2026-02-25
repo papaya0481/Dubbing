@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Any, Optional, List, Tuple, Union
 from abc import ABC, abstractmethod
 from types import SimpleNamespace
+
+import json
+from typing import Dict
+
 try:
     from .meldataset import get_mel_spectrogram
 except Exception:
@@ -69,6 +73,7 @@ class GlobalWarpTransformer(BaseAudioTransformer):
                  model_id: str = "nvidia/bigvgan_v2_22khz_80band_256x",
                  vocoder_model: Optional[Any] = None,
                  device: str = "cuda", 
+                 phoneme_mapping_path: Optional[dict] = "dubbing/modules/english_us_arpa_300.json",
                  verbose: bool = True) -> None:
         """
         初始化全局时间扭曲变换器。/ Initialize global time-warp transformer.
@@ -83,6 +88,7 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         self.device = device
         self.model_id = model_id
         self.model = None
+        self.phoneme_mapping = self._load_phoneme_mapping(phoneme_mapping_path)
 
         def _default_hparams_from_model_id(mid: str) -> SimpleNamespace:
             from transformers import AutoConfig
@@ -206,11 +212,30 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         warped_mel = F.grid_sample(source_mel_4d, grid, mode='bicubic', padding_mode='border', align_corners=True)
 
         return warped_mel.squeeze(2) # (1, n_mels, tgt_len)
+    
+    @staticmethod
+    def _load_phoneme_mapping(path: str) -> Dict[str, int]:
+        p = Path(path)
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        if not p.exists():
+            raise FileNotFoundError(f"phoneme mapping json not found: {p}")
+
+        with p.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+
+        mapping = payload.get("phone_mapping", payload)
+        if not isinstance(mapping, dict):
+            raise ValueError(f"invalid phoneme mapping format: {p}")
+        return {str(k): int(v) for k, v in mapping.items()}
+    
+    def _reverse_phoneme_mapping(self, phoneme_sequence: torch.Tensor) -> np.ndarray:
+        id_to_phone = {v: k for k, v in self.phoneme_mapping.items()}
+        return np.array([id_to_phone.get(int(pid), "<unk>") for pid in phoneme_sequence])
 
     def length_regulate_phoneme_ids(
         self,
         source_phone_tier: tgt.IntervalTier,
-        phoneme_to_id: dict,
         source_total_frames: int,
         warping_path: torch.Tensor,
         pad_id: int = 0,
@@ -230,8 +255,8 @@ class GlobalWarpTransformer(BaseAudioTransformer):
             if token == "":
                 continue
 
-            token_norm = token if token in phoneme_to_id else token.upper()
-            token_id = int(phoneme_to_id.get(token_norm, pad_id))
+            token_norm = token if token in self.phoneme_mapping else token.upper()
+            token_id = int(self.phoneme_mapping.get(token_norm, pad_id))
 
             s = max(0, min(source_total_frames, sec2frame(interval.start_time)))
             e = max(s, min(source_total_frames, sec2frame(interval.end_time)))
@@ -343,7 +368,6 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         source_textgrid: Union[str, Path, tgt.TextGrid],
         target_textgrid: Union[str, Path, tgt.TextGrid],
         tier_name: str = "phones",
-        phoneme_to_id: Optional[dict] = None,
         pad_id: int = 0,
     ):
         """
@@ -353,12 +377,10 @@ class GlobalWarpTransformer(BaseAudioTransformer):
             source_mel (torch.Tensor): Input mel of shape (1, n_mels, src_len).
             source_textgrid (str | Path | tgt.TextGrid): Source TextGrid path or object.
             target_textgrid (str | Path | tgt.TextGrid): Target TextGrid path or object.
-            phoneme_to_id (Optional[dict]): Phone-to-id mapping used when return_phoneme_ids=True.
             pad_id (int): Fallback phone id for unknown/blank phones.
 
         Returns:
             torch.Tensor | Tuple[torch.Tensor, torch.Tensor]:
-                - warped mel, or
                 - (warped mel, frame-level phoneme ids).
         """
         def _as_textgrid(x: Union[str, Path, tgt.TextGrid]) -> tgt.TextGrid:
@@ -389,13 +411,9 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         warping_path = self.calculate_warping_path(src_anchors, tgt_anchors, total_target_frames)
         final_mel = self.warp_mel(source_mel, warping_path)
 
-        if phoneme_to_id is None:
-            raise ValueError("phoneme_to_id is required when return_phoneme_ids=True")
-
         phone_tier = tg_src.get_tier_by_name(tier_name)
         phoneme_ids = self.length_regulate_phoneme_ids(
             source_phone_tier=phone_tier,
-            phoneme_to_id=phoneme_to_id,
             source_total_frames=source_mel.shape[-1],
             warping_path=warping_path,
             pad_id=pad_id,

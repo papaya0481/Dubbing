@@ -56,15 +56,13 @@ class Dataset_CFM_Phase1(Dataset):
         self.mse_threshold = mse_threshold
         self.device = torch.device("cpu")
 
-        self.phoneme_to_id = self._load_phoneme_mapping(phoneme_map_path)
-        self.pad_phoneme_id = int(self.phoneme_to_id.get("<eps>", 0))
-
         self._warper = GlobalWarpTransformer(
             use_vocoder=False,
             device=str(self.device),
             verbose=False,
         )
         self.mel_h = SimpleNamespace(**vars(self._warper.h))
+        self.pad_phoneme_id = int(self._warper.phoneme_mapping.get("<eps>", 0))
 
         all_pairs = self._discover_pairs()
         all_pairs = self._apply_filter(all_pairs)
@@ -108,21 +106,6 @@ class Dataset_CFM_Phase1(Dataset):
         samples.sort(key=lambda x: x.pair_key)
         return samples
 
-    @staticmethod
-    def _load_phoneme_mapping(path: str) -> Dict[str, int]:
-        p = Path(path)
-        if not p.is_absolute():
-            p = Path.cwd() / p
-        if not p.exists():
-            raise FileNotFoundError(f"phoneme mapping json not found: {p}")
-
-        with p.open("r", encoding="utf-8") as f:
-            payload = json.load(f)
-
-        mapping = payload.get("phone_mapping", payload)
-        if not isinstance(mapping, dict):
-            raise ValueError(f"invalid phoneme mapping format: {p}")
-        return {str(k): int(v) for k, v in mapping.items()}
 
     def _load_filter_table(self) -> Optional[pd.DataFrame]:
         if not self.filter_enabled:
@@ -248,11 +231,7 @@ class Dataset_CFM_Phase1(Dataset):
             source_mel=r1_mel,
             source_textgrid=sample.r1_tg,
             target_textgrid=sample.r2_tg,
-            align_tier_name=self.tier_name,
-            return_phoneme_ids=True,
             phone_tier_name=self.phone_tier_name,
-            phoneme_to_id=self.phoneme_to_id,
-            pad_id=self.pad_phoneme_id,
         )
 
         target_frames = min(stretched_r1_mel.shape[-1], r2_mel.shape[-1])

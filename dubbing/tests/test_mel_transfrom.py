@@ -25,11 +25,25 @@ if __name__ == "__main__":
     #     tier_name="phones"
     # )
     
-    from transformers import AutoConfig
-    print(AutoConfig.from_pretrained("nvidia/bigvgan_v2_22khz_80band_256x"))
-    
     # test for 
     
     import tgt
     source_tg = tgt.io.read_textgrid("mel_convert/test/aligned/test_short1_1.TextGrid")
     target_tg = tgt.io.read_textgrid("mel_convert/test/aligned/test_short_gt.TextGrid")
+    source_wav = "mel_convert/test/test_short1_1.wav"
+    transformer = GlobalWarpTransformer(use_vocoder=False, device="cpu", verbose=True)
+    
+    wav, sr = transformer.load_audio(source_wav)
+    from modules.mel_strech.meldataset import get_mel_spectrogram
+    mel_sorce = get_mel_spectrogram(wav, transformer.h)
+    
+    out = transformer.transform_mel_with_path(
+        source_mel=mel_sorce,
+        source_textgrid=source_tg,
+        target_textgrid=target_tg,
+    )
+    
+    print(out)
+    print(out[0].shape, out[1].shape)
+    print(transformer._reverse_phoneme_mapping(out[1]))
+    print(source_tg.get_tier_by_name("phones"))
