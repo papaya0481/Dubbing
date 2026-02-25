@@ -62,17 +62,29 @@ class GlobalWarpTransformer(BaseAudioTransformer):
     
     def __init__(self,
                  model_id: str = "nvidia/bigvgan_v2_22khz_80band_256x",
+                 vocoder_model: Optional[Any] = None,
                  device: str = "cuda", 
                  verbose: bool = True) -> None:
-        """初始化全局时间扭曲变换器。/ Initialize global time-warp transformer."""
-        super().__init__(0.001, 8.0, verbose)
-        self.device = device
-        
-        if verbose: print(f"加载 BigVGAN: {model_id} ...")
-        
-        try:
+        """
+        初始化全局时间扭曲变换器。/ Initialize global time-warp transformer.
+            vocoder_model (Optional[Any]): 可选的自定义声码器。提供后将强覆盖并忽略 model_id。
+        Args:
+            model_id (str): BigVGAN pretrained model ID.
+            vocoder_model (Optional[Any]): Vocoder model instance.
+        """
+
+        if vocoder_model is not None:
+            self.model = vocoder_model.to(self.device) if hasattr(vocoder_model, "to") else vocoder_model
+        else:
+            try:
+                self.model = bigvgan.BigVGAN.from_pretrained(model_id, use_cuda_kernel=False).to(self.device)
+            except:
+                print("Fallback load...")
+                self.model = bigvgan.BigVGAN.from_pretrained(model_id, use_cuda_kernel=False).to(self.device)
             self.model = bigvgan.BigVGAN.from_pretrained(model_id, use_cuda_kernel=False).to(self.device)
-        except:
+            
+        if hasattr(self.model, "remove_weight_norm"):
+            self.model.remove_weight_norm()
             print("Fallback load...")
             self.model = bigvgan.BigVGAN.from_pretrained(model_id, use_cuda_kernel=False).to(self.device)
 
@@ -256,6 +268,30 @@ class GlobalWarpTransformer(BaseAudioTransformer):
 
         if self.verbose: print(f"✅ Saved: {output_path}")
         return True
+    
+    
+    def transform_mel_with_path(
+        self,
+        source_mel: torch.Tensor,
+        src_anchors_path: Optional[str],
+        tgt_anchors_path: Optional[str]
+    ) -> torch.Tensor:
+        """
+        Directly warp mel given source/target anchors.
+        
+        Args:
+            source_mel (torch.Tensor): 输入 Mel，形状为 (1, n_mels, src_len)。/ Input mel of shape (1, n_mels, src_len).
+            src_anchors_path (Optional[str]): 源关键点文件路径，格式为每行 "src_time tgt_time"。/ Path to source anchors file, format: "src_time tgt_time" per line.
+            tgt_anchors_path (Optional[str]): 目标关键点文件路径，格式同 src_anchors。/ Path to target anchors file, same format as src_anchors.
+
+        """
+        src_anchors = self.load_anchors(src_anchors_path)
+        tgt_anchors = self.load_anchors(tgt_anchors_path)
+        total_target_frames = int(tgt_anchors[-1] * self.sample_rate / self.h.hop_size)
+        warping_path = self.calculate_warping_path(src_anchors, tgt_anchors, total_target_frames)
+        final_mel = self.warp_mel(source_mel, warping_path)
+        return final_mel
+    
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
