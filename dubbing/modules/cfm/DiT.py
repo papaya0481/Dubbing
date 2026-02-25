@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import math
+from typing import Any
 from .attn import (
     AdaLayerNormZero_Final,
     DiTBlock,
@@ -161,8 +162,9 @@ class LipSyncDiT(nn.Module):
 
     def __init__(
         self,
+        args: Any = None,
         *,
-        dim,
+        dim=None,
         depth=8,
         heads=8,
         dim_head=64,
@@ -205,6 +207,31 @@ class LipSyncDiT(nn.Module):
             num_decoding_left_chunks (int): Reserved left chunk count for decoding.
         """
         super().__init__()
+
+        if args is not None:
+            dim = getattr(args, "hidden_dim", getattr(args, "dim", dim))
+            depth = getattr(args, "depth", depth)
+            heads = getattr(args, "num_heads", getattr(args, "heads", heads))
+            dim_head = getattr(args, "dim_head", None)
+            if dim_head is None and dim is not None and heads is not None:
+                dim_head = dim // heads
+            dropout = getattr(args, "dropout", dropout)
+            ff_mult = getattr(args, "ff_mult", ff_mult)
+            mel_dim = getattr(args, "in_channels", getattr(args, "mel_dim", mel_dim))
+            cond_dim = getattr(args, "cond_dim", cond_dim)
+            mu_dim = getattr(args, "mu_dim", mu_dim)
+            long_skip_connection = getattr(args, "long_skip_connection", long_skip_connection)
+            phoneme_vocab_size = getattr(args, "phoneme_vocab_size", phoneme_vocab_size)
+            lip_dim = getattr(args, "lip_dim", lip_dim)
+            spk_dim = getattr(args, "spk_dim", spk_dim)
+            out_channels = getattr(args, "out_channels", out_channels)
+            static_chunk_size = getattr(args, "static_chunk_size", static_chunk_size)
+            num_decoding_left_chunks = getattr(args, "num_decoding_left_chunks", num_decoding_left_chunks)
+
+        if dim is None:
+            raise ValueError("`dim` is required for LipSyncDiT initialization")
+        if dim_head is None:
+            dim_head = dim // heads
 
         # -------------------------------------------------------
         # 1. Time and input condition encoders

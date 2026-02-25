@@ -76,24 +76,7 @@ class LipSyncCFM(nn.Module):
         dit_cfg = cfg.DiT
 
         cond_dim = getattr(dit_cfg, "cond_dim", dit_cfg.in_channels)
-        self.estimator = LipSyncDiT(
-            dim=dit_cfg.hidden_dim,
-            depth=dit_cfg.depth,
-            heads=dit_cfg.num_heads,
-            dim_head=dit_cfg.hidden_dim // dit_cfg.num_heads,
-            dropout=getattr(dit_cfg, "dropout", 0.1),
-            ff_mult=getattr(dit_cfg, "ff_mult", 4),
-            mel_dim=dit_cfg.in_channels,
-            cond_dim=cond_dim,
-            mu_dim=getattr(dit_cfg, "mu_dim", dit_cfg.in_channels),
-            long_skip_connection=getattr(dit_cfg, "long_skip_connection", False),
-            phoneme_vocab_size=getattr(dit_cfg, "phoneme_vocab_size", 8194),
-            lip_dim=getattr(dit_cfg, "lip_dim", 512),
-            spk_dim=getattr(dit_cfg, "spk_dim", None),
-            out_channels=getattr(dit_cfg, "out_channels", None),
-            static_chunk_size=getattr(dit_cfg, "static_chunk_size", 50),
-            num_decoding_left_chunks=getattr(dit_cfg, "num_decoding_left_chunks", 2),
-        )
+        self.estimator = LipSyncDiT(args=dit_cfg)
 
         # Used only for temporary fallback cond construction (phoneme+lip -> cond_dim).
         self.cond_adapter = nn.Conv1d(2 * dit_cfg.hidden_dim, cond_dim, kernel_size=1)
@@ -106,19 +89,35 @@ class LipSyncCFM(nn.Module):
         self.criterion = nn.MSELoss()
 
     def _build_condition(self, stretched_mel, phoneme_ids=None, lip_embedding=None, cond=None):
+        # TODO: 设计更合理的条件融合策略，而不是简单的优先级覆盖
         if cond is not None:
             return cond
-
-        if phoneme_ids is None or lip_embedding is None:
-            return stretched_mel
+        
+        if phoneme_ids is None:
+            raise ValueError("缺少条件输入: phoneme_ids")
+        
+        phoneme_feat = self.estimator.phoneme_embed(phoneme_ids)  # [B, T, D]
+        B, T, D = phoneme_feat.shape
 
         if hasattr(self.estimator, "phoneme_embed") and hasattr(self.estimator, "lip_proj"):
             phoneme_feat = self.estimator.phoneme_embed(phoneme_ids)  # [B, T, D]
             lip_feat = self.estimator.lip_proj(lip_embedding)  # [B, T, D]
             fused_cond = torch.cat([phoneme_feat, lip_feat], dim=-1).transpose(1, 2)  # [B, 2D, T]
             return self.cond_adapter(fused_cond)
+        
+        if lip_embedding is not None:
+            lip_feat = self.estimator.lip_proj(lip_embedding)  # [B, T, D]
+        else:
+            lip_feat = torch.zeros_like(phoneme_feat)
+            
+        fused_cond = torch.cat(
+            [phoneme_feat, lip_feat], dim=-1
+        )   # [B, T, 2D]
+        
+        fused_cond = fused_cond.transpose(1, 2)  # [B, 2D, T]
+        cond_out = self.cond_adapter(fused_cond)  # [B, cond_dim, T]
 
-        return stretched_mel
+        return cond_out
 
     def forward_estimator(self, x, mask, mu, t, spks=None, cond=None, streaming=False):
         return self.estimator(x=x, mask=mask, mu=mu, t=t, spks=spks, cond=cond, streaming=streaming)
