@@ -26,6 +26,8 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--mse_threshold", type=float, default=8, help="mse threshold for filtering")
 	parser.add_argument("--train_split_ratio", type=float, default=0.95, help="train/test split ratio")
 	parser.add_argument("--tier_name", type=str, default="words", help="TextGrid tier used for alignment")
+	parser.add_argument("--phone_tier_name", type=str, default="phones", help="TextGrid tier used for phoneme IDs")
+	parser.add_argument("--phoneme_map_path", type=str, default="dubbing/modules/english_us_arpa_300.json", help="phoneme id mapping json")
 
 	parser.add_argument("--sample_rate", type=int, default=22050)
 	parser.add_argument("--n_fft", type=int, default=1024)

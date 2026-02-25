@@ -1,5 +1,6 @@
 import os
 import re
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -48,6 +49,8 @@ class Dataset_CFM_Phase1(Dataset):
         fmin: int = 0,
         fmax: Optional[int] = None,
         tier_name: str = "words",
+        phone_tier_name: str = "phones",
+        phoneme_map_path: str = "dubbing/modules/english_us_arpa_300.json",
     ):
         super().__init__()
         self.root_dir = Path(root_dir)
@@ -55,10 +58,14 @@ class Dataset_CFM_Phase1(Dataset):
         self.aligned_dir = self.root_dir / "aligned"
         self.split = split
         self.tier_name = tier_name
+        self.phone_tier_name = phone_tier_name
         self.filter_enabled = filter_enabled
         self.mse_threshold = mse_threshold
         self.sample_rate = sample_rate
         self.device = torch.device("cpu")
+
+        self.phoneme_to_id = self._load_phoneme_mapping(phoneme_map_path)
+        self.pad_phoneme_id = int(self.phoneme_to_id.get("<eps>", 0))
 
         self.mel_h = SimpleNamespace(
             n_fft=n_fft,
@@ -116,6 +123,22 @@ class Dataset_CFM_Phase1(Dataset):
 
         samples.sort(key=lambda x: x.pair_key)
         return samples
+
+    @staticmethod
+    def _load_phoneme_mapping(path: str) -> Dict[str, int]:
+        p = Path(path)
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        if not p.exists():
+            raise FileNotFoundError(f"phoneme mapping json not found: {p}")
+
+        with p.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+
+        mapping = payload.get("phone_mapping", payload)
+        if not isinstance(mapping, dict):
+            raise ValueError(f"invalid phoneme mapping format: {p}")
+        return {str(k): int(v) for k, v in mapping.items()}
 
     def _load_filter_table(self) -> Optional[pd.DataFrame]:
         if not self.filter_enabled:
@@ -205,7 +228,7 @@ class Dataset_CFM_Phase1(Dataset):
             mel = get_mel_spectrogram(wav, self.mel_h)
         return mel
 
-    def _stretch_r1_to_r2(self, r1_mel: torch.Tensor, r1_tg: Path, r2_tg: Path, r1_wav: torch.Tensor, r2_wav: torch.Tensor) -> torch.Tensor:
+    def _build_warping_path(self, r1_tg: Path, r2_tg: Path, r1_wav: torch.Tensor, r2_wav: torch.Tensor) -> torch.Tensor:
         tg_src = tgt.io.read_textgrid(str(r1_tg))
         tg_tgt = tgt.io.read_textgrid(str(r2_tg))
 
@@ -223,8 +246,7 @@ class Dataset_CFM_Phase1(Dataset):
         total_target_frames = max(1, int(tgt_duration * self.sample_rate / self.mel_h.hop_size))
 
         warping_path = self._warper.calculate_warping_path(src_anchors, tgt_anchors, total_target_frames)
-        stretched_mel = self._warper.warp_mel(r1_mel, warping_path)
-        return stretched_mel
+        return warping_path
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -238,16 +260,29 @@ class Dataset_CFM_Phase1(Dataset):
         r1_mel = self._wav_to_mel(r1_wav)
         r2_mel = self._wav_to_mel(r2_wav)
 
-        stretched_r1_mel = self._stretch_r1_to_r2(r1_mel, sample.r1_tg, sample.r2_tg, r1_wav, r2_wav)
+        warping_path = self._build_warping_path(sample.r1_tg, sample.r2_tg, r1_wav, r2_wav)
+        stretched_r1_mel = self._warper.warp_mel(r1_mel, warping_path)
+
+        tg_src = tgt.io.read_textgrid(str(sample.r1_tg))
+        phone_tier = tg_src.get_tier_by_name(self.phone_tier_name)
+        phoneme_ids = self._warper.length_regulate_phoneme_ids(
+            source_phone_tier=phone_tier,
+            phoneme_to_id=self.phoneme_to_id,
+            source_total_frames=r1_mel.shape[-1],
+            warping_path=warping_path,
+            pad_id=self.pad_phoneme_id,
+        )
 
         target_frames = min(stretched_r1_mel.shape[-1], r2_mel.shape[-1])
         stretched_r1_mel = stretched_r1_mel[:, :, :target_frames]
         r2_mel = r2_mel[:, :, :target_frames]
+        phoneme_ids = phoneme_ids[:target_frames]
 
         return {
             "pair_key": sample.pair_key,
             "x0": stretched_r1_mel.squeeze(0),
             "x1": r2_mel.squeeze(0),
+            "phoneme_ids": phoneme_ids,
             "x_len": torch.tensor(target_frames, dtype=torch.long),
         }
 
@@ -259,17 +294,20 @@ def collate_cfm_phase1(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.
 
     x0 = torch.zeros(len(batch), n_mels, max_len, dtype=batch[0]["x0"].dtype)
     x1 = torch.zeros(len(batch), n_mels, max_len, dtype=batch[0]["x1"].dtype)
+    phoneme_ids = torch.zeros(len(batch), max_len, dtype=torch.long)
 
     pair_keys = []
     for i, item in enumerate(batch):
         t = int(item["x_len"].item())
         x0[i, :, :t] = item["x0"][:, :t]
         x1[i, :, :t] = item["x1"][:, :t]
+        phoneme_ids[i, :t] = item["phoneme_ids"][:t]
         pair_keys.append(item["pair_key"])
 
     return {
         "pair_key": pair_keys,
         "x0": x0,
         "x1": x1,
+        "phoneme_ids": phoneme_ids,
         "x_lens": lengths,
     }

@@ -179,6 +179,42 @@ class GlobalWarpTransformer(BaseAudioTransformer):
 
         return warped_mel.squeeze(2) # (1, n_mels, tgt_len)
 
+    def length_regulate_phoneme_ids(
+        self,
+        source_phone_tier: tgt.IntervalTier,
+        phoneme_to_id: dict,
+        source_total_frames: int,
+        warping_path: torch.Tensor,
+        pad_id: int = 0,
+    ) -> torch.Tensor:
+        """Build frame-level phoneme IDs on warped timeline.
+
+        1) Convert source phone intervals to source frame IDs.
+        2) Sample source frame IDs by warping path to get target frame IDs.
+        """
+        src_ids = torch.full((source_total_frames,), int(pad_id), dtype=torch.long)
+
+        def sec2frame(sec: float) -> int:
+            return int(round(sec * self.sample_rate / self.h.hop_size))
+
+        for interval in source_phone_tier:
+            token = (interval.text or "").strip()
+            if token == "":
+                continue
+
+            token_norm = token if token in phoneme_to_id else token.upper()
+            token_id = int(phoneme_to_id.get(token_norm, pad_id))
+
+            s = max(0, min(source_total_frames, sec2frame(interval.start_time)))
+            e = max(s, min(source_total_frames, sec2frame(interval.end_time)))
+            if e > s:
+                src_ids[s:e] = token_id
+
+        src_idx = torch.round(warping_path).long()
+        src_idx = torch.clamp(src_idx, min=0, max=max(0, source_total_frames - 1))
+        tgt_ids = src_ids[src_idx]
+        return tgt_ids
+
     def _append_monotonic_anchor(
         self,
         src_anchors: List[float],

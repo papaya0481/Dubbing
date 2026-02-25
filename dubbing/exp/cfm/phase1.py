@@ -40,6 +40,7 @@ class Exp_CFM_Phase1(Exp_Basic):
 			for batch in loader:
 				x0 = batch["x0"].to(self.device)
 				x1 = batch["x1"].to(self.device)
+				phoneme_ids = batch["phoneme_ids"].to(self.device)
 				x_lens = batch["x_lens"].to(self.device)
 
 				if train:
@@ -48,10 +49,10 @@ class Exp_CFM_Phase1(Exp_Basic):
 				loss = self.model(
 					clean_mel=x1,
 					stretched_mel=x0,
-					phoneme_ids=None,
+					phoneme_ids=phoneme_ids,
 					lip_embedding=None,
 					x_lens=x_lens,
-					cond=x0,
+					cond=None,
 					spks=None,
 				)
 
