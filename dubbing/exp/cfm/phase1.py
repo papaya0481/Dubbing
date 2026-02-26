@@ -168,6 +168,7 @@ class Exp_CFM_Phase1(Exp_Basic):
 					x_lens=x_lens,
 					steps=getattr(self.args, 'inference_steps', 32),
 					cfg_scale=getattr(self.args, 'inference_cfg_rate', 0.5),
+     				temperature=getattr(self.args, 'training_temperature', 0.2),
 				)
 
 				# Denormalize: bring mels back to original log-mel scale for vocoder

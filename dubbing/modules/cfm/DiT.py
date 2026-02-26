@@ -15,11 +15,8 @@ class InputEmbedding(nn.Module):
     """
     Early fusion layer for DiT inputs.
 
-    This module concatenates current state `x`, condition feature `cond`, prior feature `mu`,
-    and optional speaker embedding `spks` on the channel dimension, then projects to `dim`.
-    
-    Here, `cond` is decided by phoneme embedding and lips embedding.
-    `mu` is the stretched prior mel-spectrogram feature.
+    Concatenates: x (noisy mel) + cond (phoneme) + mu (stretched mel prior)
+    + lips (projected lip embedding) + optional spks, then projects to `dim`.
     """
 
     def __init__(
@@ -28,22 +25,23 @@ class InputEmbedding(nn.Module):
         cond_dim: int,
         mu_dim: int,
         dim: int,
+        lip_feat_dim: int = 0,
         spk_dim: int | None = None,
     ):
         """
         Args:
             mel_dim (int): Number of mel channels.
-            cond_dim (int): Number of condition channels.
-            mu_dim (int): Number of prior feature channels.
+            cond_dim (int): Number of condition (phoneme) channels.
+            mu_dim (int): Number of prior feature (stretched mel) channels.
             dim (int): Hidden size of the DiT backbone.
-            spk_dim (int | None): Speaker embedding dimension. If None, speaker condition is disabled.
+            lip_feat_dim (int): Projected lip feature dimension. 0 = disabled.
+            spk_dim (int | None): Speaker embedding dimension. If None, disabled.
         """
         super().__init__()
-        # Whether to append speaker embedding during fusion.
         self.spk_dim = spk_dim
-        # Total concatenated channels: x + cond + mu + optional speaker embedding.
-        in_dim = mel_dim + cond_dim + mu_dim + (spk_dim or 0)
-        # Project concatenated features to DiT hidden dimension.
+        self.lip_feat_dim = lip_feat_dim
+        # Total: x + cond + mu + lips (optional) + spks (optional)
+        in_dim = mel_dim + cond_dim + mu_dim + lip_feat_dim + (spk_dim or 0)
         self.proj = nn.Linear(in_dim, dim)
 
     def forward(
@@ -52,25 +50,28 @@ class InputEmbedding(nn.Module):
         cond: torch.Tensor,
         mu: torch.Tensor,
         spks: torch.Tensor | None = None,
+        lips: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
-            x (torch.Tensor): Current state tensor with shape [B, T, mel_dim].
-            cond (torch.Tensor): Condition tensor with shape [B, T, mel_dim].
-            mu (torch.Tensor): Prior tensor with shape [B, T, mu_dim].
-            spks (torch.Tensor | None): Optional speaker embedding with shape [B, spk_dim].
+            x (torch.Tensor): Current state [B, T, mel_dim].
+            cond (torch.Tensor): Phoneme condition [B, T, cond_dim].
+            mu (torch.Tensor): Stretched mel prior [B, T, mu_dim].
+            spks (torch.Tensor | None): Speaker embedding [B, spk_dim].
+            lips (torch.Tensor | None): Projected lip feature [B, T, lip_feat_dim].
 
         Returns:
-            torch.Tensor: Fused hidden states with shape [B, T, dim].
+            torch.Tensor: [B, T, dim].
         """
-        # Base branches: current state + condition + prior.
         feats = [x, cond, mu]
-        # Optional speaker branch: expand to time dimension before concatenation.
+        if self.lip_feat_dim > 0:
+            if lips is not None:
+                feats.append(lips)
+            else:
+                feats.append(torch.zeros(*x.shape[:-1], self.lip_feat_dim, device=x.device, dtype=x.dtype))
         if self.spk_dim is not None and spks is not None:
-            # [B, spk_dim] -> [B, T, spk_dim]
             spk_feat = spks[:, None, :].expand(-1, x.size(1), -1)
             feats.append(spk_feat)
-        # [B, T, *] -> [B, T, dim]
         return self.proj(torch.cat(feats, dim=-1))
 
 
@@ -254,8 +255,8 @@ class LipSyncDiT(nn.Module):
         self.mu_dim = mu_dim
         self.cond_dim = cond_dim
 
-        # Input fusion: x/cond/mu/(spk) -> [B, T, dim]
-        self.input_embed = InputEmbedding(mel_dim, cond_dim, mu_dim, dim, spk_dim)
+        # Input fusion: x/cond/mu/lips/(spk) -> [B, T, dim]
+        self.input_embed = InputEmbedding(mel_dim, cond_dim, mu_dim, dim, lip_feat_dim=dim, spk_dim=spk_dim)
 
         # RoPE generator from sequence length.
         self.rotary_embed = RotaryEmbedding(dim_head)
@@ -288,24 +289,20 @@ class LipSyncDiT(nn.Module):
         self.static_chunk_size = static_chunk_size
         self.num_decoding_left_chunks = num_decoding_left_chunks
 
-    def forward(self, x, mask, mu, t, spks=None, cond=None, streaming=False):
+    def forward(self, x, mask, mu, t, spks=None, cond=None, lips=None, streaming=False):
         """
-        
-        
         Args:
-            x (torch.Tensor): 
-                Noisy input state, shape [B, mel_dim, T].
-            mask (torch.Tensor): 
-                Length tensor [B] or boolean mask [B, T].
-            mu (torch.Tensor): P
-                Prior feature tensor, shape [B, mu_dim, T]. Here `mu` is the stretched prior mel-spectrogram feature.
-            t (torch.Tensor): Diffusion timestep tensor [B] or scalar.
-            spks (torch.Tensor | None): Optional speaker embedding [B, spk_dim].
-            cond (torch.Tensor | None): Optional condition tensor [B, cond_dim, T]. If None, use `mu`.
-            streaming (bool): Whether to use the streaming mask branch.
+            x (torch.Tensor): Noisy input state [B, mel_dim, T].
+            mask (torch.Tensor): Length tensor [B] or boolean mask [B, T].
+            mu (torch.Tensor): Stretched prior mel [B, mu_dim, T].
+            t (torch.Tensor): Diffusion timestep [B] or scalar.
+            spks (torch.Tensor | None): Speaker embedding [B, spk_dim].
+            cond (torch.Tensor | None): Phoneme condition [B, cond_dim, T].
+            lips (torch.Tensor | None): Lip embedding [B, T, lip_dim] (time-first).
+            streaming (bool): Whether to use streaming mask.
 
         Returns:
-            torch.Tensor: Output mel prediction with shape [B, mel_dim, T].
+            torch.Tensor: Output mel prediction [B, mel_dim, T].
         """
         # 1) Convert to Transformer-friendly layout: [B, C, T] -> [B, T, C].
         x = x.transpose(1, 2)
@@ -337,8 +334,15 @@ class LipSyncDiT(nn.Module):
 
         # 3) Encode time and fuse conditional features.
         t = self.time_embed(t)
-        # x/cond/mu/(spk) -> [B, T, dim]
-        x = self.input_embed(x, cond, mu, spks)
+
+        # Project lip embedding [B, T, lip_dim] -> [B, T, dim] (time-first, no transpose needed).
+        if lips is not None:
+            lips_feat = self.lip_proj(lips)   # [B, T, dim]
+        else:
+            lips_feat = None
+
+        # x/cond/mu/lips/(spk) -> [B, T, dim]
+        x = self.input_embed(x, cond, mu, spks, lips_feat)
 
         # 4) Build RoPE for current sequence length.
         rope = self.rotary_embed.forward_from_seq_len(seq_len, device=x.device)

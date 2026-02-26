@@ -30,6 +30,7 @@ class CFMConfig:
     t_scheduler: str = "linear"
     training_cfg_rate: float = 0.1
     inference_cfg_rate: float = 0.5
+    training_temperature: float = 0.2
 
 
 @dataclass
@@ -63,6 +64,7 @@ class LipSyncCFMConfig:
             t_scheduler=getattr(cfm_args, "t_scheduler", "linear"),
             training_cfg_rate=getattr(cfm_args, "training_cfg_rate", 0.1),
             inference_cfg_rate=getattr(cfm_args, "inference_cfg_rate", 0.5),
+            training_temperature=getattr(cfm_args, "training_temperature", 0.2),
         )
 
         return cls(DiT=dit_cfg, CFM=cfm_cfg)
@@ -78,44 +80,25 @@ class LipSyncCFM(nn.Module):
         cond_dim = getattr(dit_cfg, "cond_dim", dit_cfg.hidden_dim)
         self.estimator = LipSyncDiT(args=dit_cfg)
 
-        # Used only for temporary fallback cond construction (phoneme+lip -> cond_dim).
-        # Output must match cond_dim (not necessarily hidden_dim).
-        self.cond_adapter = nn.Conv1d(2 * dit_cfg.hidden_dim, cond_dim, kernel_size=1)
-
         cfm_cfg = cfg.CFM
         self.t_scheduler = cfm_cfg.t_scheduler
         self.training_cfg_rate = cfm_cfg.training_cfg_rate
         self.inference_cfg_rate = cfm_cfg.inference_cfg_rate
+        self.training_temperature = cfm_cfg.training_temperature
 
         self.criterion = nn.MSELoss()
 
-    def _build_condition(self, stretched_mel, phoneme_ids=None, lip_embedding=None, cond=None):
-        # TODO: 设计更合理的条件融合策略，而不是简单的优先级覆盖
+    def _build_condition(self, phoneme_ids=None, cond=None):
+        """Build phoneme-only condition tensor [B, hidden_dim, T]."""
         if cond is not None:
             return cond
-        
         if phoneme_ids is None:
             raise ValueError("缺少条件输入: phoneme_ids")
-        
         phoneme_feat = self.estimator.phoneme_embed(phoneme_ids)  # [B, T, D]
-        B, T, D = phoneme_feat.shape
-        
-        if lip_embedding is not None:
-            lip_feat = self.estimator.lip_proj(lip_embedding)  # [B, T, D]
-        else:
-            lip_feat = torch.zeros_like(phoneme_feat)
-            
-        fused_cond = torch.cat(
-            [phoneme_feat, lip_feat], dim=-1
-        )   # [B, T, D1+D2]
-        
-        fused_cond = fused_cond.transpose(1, 2)  # [B, 2D, T]
-        cond_out = self.cond_adapter(fused_cond)  # [B, cond_dim, T]
+        return phoneme_feat.transpose(1, 2)  # [B, D, T]
 
-        return cond_out
-
-    def forward_estimator(self, x, mask, mu, t, spks=None, cond=None, streaming=False):
-        return self.estimator(x=x, mask=mask, mu=mu, t=t, spks=spks, cond=cond, streaming=streaming)
+    def forward_estimator(self, x, mask, mu, t, spks=None, cond=None, lips=None, streaming=False):
+        return self.estimator(x=x, mask=mask, mu=mu, t=t, spks=spks, cond=cond, lips=lips, streaming=streaming)
         
     def forward(self, clean_mel, stretched_mel, phoneme_ids, lip_embedding, x_lens, cond=None, spks=None):
         """
@@ -128,9 +111,8 @@ class LipSyncCFM(nn.Module):
         # -------------------------------------------------------
         # 1. 定义流的起点 x0 (Source Distribution)
         # -------------------------------------------------------
-        # IndexTTS2 策略：起点不是纯噪声，而是 "拉伸Mel + 噪声"
-        # 这样模型是从一个“大概正确”的地方开始修，而不是从虚无开始
-        epsilon = torch.randn_like(clean_mel)
+        # 起点 = 拉伸Mel + 带温度的噪声
+        epsilon = torch.randn_like(clean_mel) * self.training_temperature
         x0 = stretched_mel + epsilon 
         
         # 目标 x1 就是 clean_mel
@@ -174,9 +156,7 @@ class LipSyncCFM(nn.Module):
         input_stretched_mel = stretched_mel
 
         cond_input = self._build_condition(
-            stretched_mel=input_stretched_mel,
             phoneme_ids=phoneme_ids,
-            lip_embedding=lip_embedding,
             cond=cond,
         )
 
@@ -247,9 +227,7 @@ class LipSyncCFM(nn.Module):
         x = stretched_mel + noise
         
         cond_input = self._build_condition(
-            stretched_mel=stretched_mel,
             phoneme_ids=phoneme_ids,
-            lip_embedding=lip_embedding,
             cond=cond,
         )
 
@@ -265,16 +243,16 @@ class LipSyncCFM(nn.Module):
             mu=stretched_mel,
             mask=x_lens,
             cond=cond_input,
+            lips=lip_embedding,
             spks=spks,
             cfg_scale=cfg_scale,
             streaming=streaming,
         )
 
-    def solve_euler(self, x, t_span, mu, mask, cond, spks=None, cfg_scale=1.5, streaming=False):
+    def solve_euler(self, x, t_span, mu, mask, cond, lips=None, spks=None, cfg_scale=1.5, streaming=False):
         B = x.size(0)
 
         for step in range(1, len(t_span)):
-            # 直接从预计算的 t_span 读取当前评估点和步长，避免浮点累积误差
             t_val = t_span[step - 1]
             dt = t_span[step] - t_val
             t_batch = t_val.unsqueeze(0).repeat(B)
@@ -289,7 +267,9 @@ class LipSyncCFM(nn.Module):
                     mask_in = torch.cat([mask, mask], dim=0)
 
                 mu_in = torch.cat([mu, mu], dim=0)
+                # unconditional branch: zero cond, zero lips
                 cond_in = torch.cat([cond, torch.zeros_like(cond)], dim=0)
+                lips_in = torch.cat([lips, torch.zeros_like(lips)], dim=0) if lips is not None else None
 
                 if spks is not None:
                     spks_in = torch.cat([spks, torch.zeros_like(spks)], dim=0)
@@ -303,6 +283,7 @@ class LipSyncCFM(nn.Module):
                     t=t_in,
                     spks=spks_in,
                     cond=cond_in,
+                    lips=lips_in,
                     streaming=streaming,
                 )
                 dphi_dt, cfg_dphi_dt = dphi_dt.chunk(2, dim=0)
@@ -315,6 +296,7 @@ class LipSyncCFM(nn.Module):
                     t=t_batch,
                     spks=spks,
                     cond=cond,
+                    lips=lips,
                     streaming=streaming,
                 )
 

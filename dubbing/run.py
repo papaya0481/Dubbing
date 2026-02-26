@@ -42,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--t_scheduler", type=str, default="linear", choices=["linear", "cosine"])
 	parser.add_argument("--training_cfg_rate", type=float, default=0.1)
 	parser.add_argument("--inference_cfg_rate", type=float, default=0.5)
+	parser.add_argument("--training_temperature", type=float, default=0.2, help="noise scale added to stretched mel during training")
 	parser.add_argument("--inference_steps", type=int, default=32, help="number of Euler steps for inference")
 
 	parser.add_argument("--checkpoints", type=str, default="./checkpoints")
@@ -84,6 +85,7 @@ def inject_nested_cfg(args: argparse.Namespace) -> argparse.Namespace:
 		t_scheduler=args.t_scheduler,
 		training_cfg_rate=args.training_cfg_rate,
 		inference_cfg_rate=args.inference_cfg_rate,
+		training_temperature=args.training_temperature,
 	)
 	return args
 

@@ -1,8 +1,8 @@
 export CUDA_VISIBLE_DEVICES=3
 
-python dubbing/run.py \
+python -m pdb dubbing/run.py \
     --is_training 1 \
-    --train_epochs 10 \
+    --train_epochs 100 \
     --model_id cfm_phase1 \
     --model LipSyncCFM \
     --lr_end_factor 0.5 \
