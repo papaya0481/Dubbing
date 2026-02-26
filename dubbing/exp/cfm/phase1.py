@@ -86,12 +86,15 @@ class Exp_CFM_Phase1(Exp_Basic):
 		self.best_ckpt_path = os.path.join(ckpt_dir, "best.pth")
 
 		self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.args.learning_rate, weight_decay=self.args.weight_decay)
-		self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+		lr_min = getattr(self.args, 'lr_min', 1e-5)
+		end_factor = lr_min
+  
+		logger.info(f"Using LinearLR scheduler with end_factor={end_factor:.2e} over {self.args.train_epochs} epochs")
+		self.scheduler = torch.optim.lr_scheduler.LinearLR(
 			self.optimizer,
-			mode='min',
-			factor=getattr(self.args, 'lr_reduce_factor', 0.5),
-			patience=getattr(self.args, 'lr_reduce_patience', 3),
-			min_lr=getattr(self.args, 'lr_min', 1e-6),
+			start_factor=1.0,
+			end_factor=end_factor,
+			total_iters=self.args.train_epochs,
 		)
 
 		best_val = float("inf")
@@ -105,9 +108,9 @@ class Exp_CFM_Phase1(Exp_Basic):
 			val_loss = self._run_one_epoch(val_loader, train=False, stage=f"Val {epoch}/{self.args.train_epochs}")
 
 			cur_lr = self.optimizer.param_groups[0]['lr']
-			self.scheduler.step(val_loss)
+			self.scheduler.step()
 			new_lr = self.optimizer.param_groups[0]['lr']
-			lr_tag = f" [LR {cur_lr:.2e} -> {new_lr:.2e}]" if new_lr != cur_lr else f" [LR {cur_lr:.2e}]"
+			lr_tag = f" LR={cur_lr:.2e} -> {new_lr:.2e}" if new_lr != cur_lr else f" LR={cur_lr:.2e}]"
 			logger.info(
 				f"Epoch {epoch}/{self.args.train_epochs} | "
 				f"train_loss={train_loss:.6f} | val_loss={val_loss:.6f} |"

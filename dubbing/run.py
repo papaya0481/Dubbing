@@ -38,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--phoneme_vocab_size", type=int, default=72)
 	parser.add_argument("--lip_dim", type=int, default=512)
 	parser.add_argument("--long_skip_connection", action="store_true", default=False)
+	parser.add_argument("--generate_from_noise", action="store_true", default=False, help="whether to generate from pure noise instead of stretched mel + noise")
 
 	parser.add_argument("--t_scheduler", type=str, default="linear", choices=["linear", "cosine"])
 	parser.add_argument("--training_cfg_rate", type=float, default=0.1)
@@ -57,9 +58,9 @@ def build_parser() -> argparse.ArgumentParser:
 		help="ReduceLROnPlateau: factor to multiply lr by on plateau")
 	parser.add_argument("--lr_reduce_patience", type=int, default=3,
 		help="ReduceLROnPlateau: epochs with no improvement before reducing lr")
-	parser.add_argument("--lr_min", type=float, default=1e-6,
+	parser.add_argument("--lr_min", type=float, default=1e-5,
 		help="ReduceLROnPlateau: minimum lr")
-	parser.add_argument("--early_stop_patience", type=int, default=6,
+	parser.add_argument("--early_stop_patience", type=int, default=10,
 		help="stop training after this many epochs with no val improvement")
 
 	parser.add_argument("--seed", type=int, default=2026)
@@ -95,6 +96,7 @@ def inject_nested_cfg(args: argparse.Namespace) -> argparse.Namespace:
 		training_cfg_rate=args.training_cfg_rate,
 		inference_cfg_rate=args.inference_cfg_rate,
 		training_temperature=args.training_temperature,
+		generate_from_noise=args.generate_from_noise,
 	)
 	return args
 

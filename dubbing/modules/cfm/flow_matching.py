@@ -31,6 +31,7 @@ class CFMConfig:
     training_cfg_rate: float = 0.1
     inference_cfg_rate: float = 0.5
     training_temperature: float = 0.2
+    generate_from_noise: bool = False  # 是否从纯噪声开始生成（而不是拉伸Mel + 噪声）
 
 
 @dataclass
@@ -85,17 +86,9 @@ class LipSyncCFM(nn.Module):
         self.training_cfg_rate = cfm_cfg.training_cfg_rate
         self.inference_cfg_rate = cfm_cfg.inference_cfg_rate
         self.training_temperature = cfm_cfg.training_temperature
+        self.generate_from_noise = cfm_cfg.generate_from_noise
 
         self.criterion = nn.MSELoss()
-
-    def _build_condition(self, phoneme_ids=None, cond=None):
-        """Build phoneme-only condition tensor [B, hidden_dim, T]."""
-        if cond is not None:
-            return cond
-        if phoneme_ids is None:
-            raise ValueError("缺少条件输入: phoneme_ids")
-        phoneme_feat = self.estimator.phoneme_embed(phoneme_ids)  # [B, T, D]
-        return phoneme_feat.transpose(1, 2)  # [B, D, T]
 
     def forward_estimator(self, x, mask, mu, t, spks=None, cond=None, lips=None, streaming=False):
         return self.estimator(x=x, mask=mask, mu=mu, t=t, spks=spks, cond=cond, lips=lips, streaming=streaming)
@@ -113,7 +106,10 @@ class LipSyncCFM(nn.Module):
         # -------------------------------------------------------
         # 起点 = 拉伸Mel + 带温度的噪声
         epsilon = torch.randn_like(clean_mel) * self.training_temperature
-        x0 = stretched_mel + epsilon 
+        if self.generate_from_noise:
+            x0 = epsilon  # 直接从纯噪声开始
+        else:
+            x0 = stretched_mel + epsilon 
         
         # 目标 x1 就是 clean_mel
         x1 = clean_mel
@@ -155,10 +151,8 @@ class LipSyncCFM(nn.Module):
         # input_stretched_mel = stretched_mel * (1.0 - drop_mel)
         input_stretched_mel = stretched_mel
 
-        cond_input = self._build_condition(
-            phoneme_ids=phoneme_ids,
-            cond=cond,
-        )
+        # Build phoneme condition [B, T, cond_dim]; use external cond when provided.
+        cond_input = self.estimator.phoneme_embed(phoneme_ids) if cond is None else cond
 
         # CFG: also drop cond for the same samples (match inference unconditional branch)
         if drop_mask is not None:
@@ -224,12 +218,13 @@ class LipSyncCFM(nn.Module):
         # 同样从 "拉伸Mel + 噪声" 开始
         # temperature 控制随机性：越小越接近原始拉伸Mel，越大越自由
         noise = torch.randn_like(stretched_mel) * temperature
-        x = stretched_mel + noise
+        if self.generate_from_noise:
+            x = noise  # 直接从纯噪声开始
+        else:
+            x = stretched_mel + noise
         
-        cond_input = self._build_condition(
-            phoneme_ids=phoneme_ids,
-            cond=cond,
-        )
+        # Build phoneme condition [B, T, cond_dim]; use external cond when provided.
+        cond_input = self.estimator.phoneme_embed(phoneme_ids) if cond is None else cond
 
         # 时间步列表 (0 -> 1)
         t_span = torch.linspace(0, 1, steps + 1, device=device, dtype=stretched_mel.dtype)

@@ -5,10 +5,41 @@ from typing import Any
 from .attn import (
     AdaLayerNormZero_Final,
     DiTBlock,
+    ConvPositionEmbedding,
     TimestepEmbedding,
     precompute_freqs_cis,
     sequence_mask,
 )
+
+
+class PhonemeEmbedding(nn.Module):
+    """
+    Phoneme id -> dense embedding + convolutional positional encoding.
+
+    A simple nn.Embedding projects each phoneme id to `dim`, then
+    ConvPositionEmbedding adds positional information via a depthwise conv.
+    """
+
+    def __init__(self, vocab_size: int, dim: int):
+        """
+        Args:
+            vocab_size (int): Phoneme vocabulary size.
+            dim (int): Output embedding dimension.
+        """
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, dim)
+        self.pos_embed = ConvPositionEmbedding(dim)
+
+    def forward(self, phoneme_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            phoneme_ids (torch.Tensor): [B, T] long tensor of phoneme indices.
+
+        Returns:
+            torch.Tensor: [B, T, dim] embedding with positional encoding.
+        """
+        x = self.embed(phoneme_ids)   # [B, T, dim]
+        return self.pos_embed(x)      # [B, T, dim]
 
 
 class InputEmbedding(nn.Module):
@@ -43,6 +74,7 @@ class InputEmbedding(nn.Module):
         # Total: x + cond + mu + lips (optional) + spks (optional)
         in_dim = mel_dim + cond_dim + mu_dim + lip_feat_dim + (spk_dim or 0)
         self.proj = nn.Linear(in_dim, dim)
+        self.pos_embed = ConvPositionEmbedding(dim)
 
     def forward(
         self,
@@ -72,7 +104,8 @@ class InputEmbedding(nn.Module):
         if self.spk_dim is not None and spks is not None:
             spk_feat = spks[:, None, :].expand(-1, x.size(1), -1)
             feats.append(spk_feat)
-        return self.proj(torch.cat(feats, dim=-1))
+        out = self.proj(torch.cat(feats, dim=-1))
+        return self.pos_embed(out)
 
 
 class RotaryEmbedding(nn.Module):
@@ -239,8 +272,8 @@ class LipSyncDiT(nn.Module):
         # 1. Time and input condition encoders
         # -------------------------------------------------------
         
-        # Phoneme embedding (kept for compatibility; you may remove it when external cond is ready).
-        self.phoneme_embed = nn.Embedding(phoneme_vocab_size, cond_dim)
+        # Phoneme embedding: token lookup + positional encoding -> [B, T, cond_dim].
+        self.phoneme_embed = PhonemeEmbedding(phoneme_vocab_size, cond_dim)
         # Lip embedding projection (kept for compatibility; you may remove it when external cond is ready).
         self.lip_proj = nn.Linear(lip_dim, dim)
 
@@ -313,15 +346,14 @@ class LipSyncDiT(nn.Module):
         if mu.size(-1) != self.mu_dim:
             raise ValueError(f"Expected mu channel dim {self.mu_dim}, but got {mu.size(-1)}")
 
-        # Use mu branch when cond is not provided.
+        # cond is expected as [B, T, cond_dim] (built externally via PhonemeEmbedding).
+        # Fallback: use mu when cond is absent and dimensions match.
         if cond is None:
             if self.cond_dim != self.mu_dim:
                 raise ValueError(
                     f"cond is required when cond_dim ({self.cond_dim}) != mu_dim ({self.mu_dim})"
                 )
-            cond = mu
-        else:
-            cond = cond.transpose(1, 2)
+            cond = mu  # already [B, T, D]
 
         if cond.size(-1) != self.cond_dim:
             raise ValueError(f"Expected cond channel dim {self.cond_dim}, but got {cond.size(-1)}")
