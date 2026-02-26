@@ -34,7 +34,9 @@ def get_logger(name: str = "dubbing", level: int = logging.INFO) -> logging.Logg
 
 
 def set_log_level(level: int) -> None:
-	logging.getLogger("dubbing").setLevel(level)
+	for name, lgr in logging.Logger.manager.loggerDict.items():
+		if (name == "dubbing" or name.startswith("dubbing.")) and isinstance(lgr, logging.Logger):
+			lgr.setLevel(level)
 
 
 def show_setting(title: str, setting: Mapping[str, object] | Sequence[object]) -> None:

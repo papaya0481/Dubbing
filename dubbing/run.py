@@ -33,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--depth", type=int, default=8)
 	parser.add_argument("--dropout", type=float, default=0.1)
 	parser.add_argument("--ff_mult", type=int, default=4)
-	parser.add_argument("--cond_dim", type=int, default=None)
+	parser.add_argument("--cond_dim", type=int, default=128)
 	parser.add_argument("--mu_dim", type=int, default=80)
 	parser.add_argument("--phoneme_vocab_size", type=int, default=72)
 	parser.add_argument("--lip_dim", type=int, default=512)
@@ -41,8 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 	parser.add_argument("--t_scheduler", type=str, default="linear", choices=["linear", "cosine"])
 	parser.add_argument("--training_cfg_rate", type=float, default=0.1)
-	parser.add_argument("--inference_cfg_rate", type=float, default=0.5)
-	parser.add_argument("--training_temperature", type=float, default=0.05, help="noise scale added to stretched mel during training")
+	parser.add_argument("--inference_cfg_rate", type=float, default=0.7)
+	parser.add_argument("--training_temperature", type=float, default=0.1, help="noise scale added to stretched mel during training")
 	parser.add_argument("--inference_steps", type=int, default=25, help="number of Euler steps for inference")
 
 	parser.add_argument("--checkpoints", type=str, default="./checkpoints")
@@ -50,16 +50,17 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--itr", type=int, default=1)
 	parser.add_argument("--train_epochs", type=int, default=20)
 	parser.add_argument("--batch_size", type=int, default=8)
-	parser.add_argument("--patience", type=int, default=5)
 	parser.add_argument("--learning_rate", type=float, default=1e-4)
 	parser.add_argument("--weight_decay", type=float, default=1e-4)
 	parser.add_argument("--max_grad_norm", type=float, default=1.0)
-	parser.add_argument("--lr_reduce_factor", type=float, default=0.7,
+	parser.add_argument("--lr_reduce_factor", type=float, default=0.6,
 		help="ReduceLROnPlateau: factor to multiply lr by on plateau")
 	parser.add_argument("--lr_reduce_patience", type=int, default=3,
 		help="ReduceLROnPlateau: epochs with no improvement before reducing lr")
 	parser.add_argument("--lr_min", type=float, default=1e-6,
 		help="ReduceLROnPlateau: minimum lr")
+	parser.add_argument("--early_stop_patience", type=int, default=6,
+		help="stop training after this many epochs with no val improvement")
 
 	parser.add_argument("--seed", type=int, default=2026)
 	parser.add_argument("--log_level", type=str, default="INFO",

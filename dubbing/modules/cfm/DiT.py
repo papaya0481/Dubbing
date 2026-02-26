@@ -240,7 +240,7 @@ class LipSyncDiT(nn.Module):
         # -------------------------------------------------------
         
         # Phoneme embedding (kept for compatibility; you may remove it when external cond is ready).
-        self.phoneme_embed = nn.Embedding(phoneme_vocab_size, dim)
+        self.phoneme_embed = nn.Embedding(phoneme_vocab_size, cond_dim)
         # Lip embedding projection (kept for compatibility; you may remove it when external cond is ready).
         self.lip_proj = nn.Linear(lip_dim, dim)
 

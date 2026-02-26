@@ -23,6 +23,9 @@ class Exp_CFM_Phase1(Exp_Basic):
 		if self.args.use_multi_gpu and self.args.use_gpu:
 			model = torch.nn.DataParallel(model, device_ids=self.args.device_ids)
 		logger.debug(f"Model structure:\n{model}")
+		# print number of parameters
+		num_params = sum(p.numel() for p in model.parameters())
+		logger.info(f"Number of model parameters: {num_params:,}")
 		return model
 
 	def _get_data(self, flag: str):
@@ -89,10 +92,11 @@ class Exp_CFM_Phase1(Exp_Basic):
 			factor=getattr(self.args, 'lr_reduce_factor', 0.5),
 			patience=getattr(self.args, 'lr_reduce_patience', 3),
 			min_lr=getattr(self.args, 'lr_min', 1e-6),
-			verbose=False,
 		)
 
 		best_val = float("inf")
+		stale_epochs = 0
+		early_stop_patience = getattr(self.args, 'early_stop_patience', 8)
 
 		logger.info(f"Train samples: {len(train_data)} | Val samples: {len(val_data)} | Test samples: {len(test_data)}")
 		for epoch in range(1, self.args.train_epochs + 1):
@@ -112,8 +116,19 @@ class Exp_CFM_Phase1(Exp_Basic):
 
 			if val_loss < best_val:
 				best_val = val_loss
+				stale_epochs = 0
 				torch.save({"model": self.model.state_dict(), "args": vars(self.args)}, self.best_ckpt_path)
 				logger.info(f"Saved best checkpoint: {self.best_ckpt_path}")
+			else:
+				stale_epochs += 1
+
+			if stale_epochs >= early_stop_patience:
+				logger.warning(f"Early stopping triggered at epoch {epoch} (no improvement for {early_stop_patience} epochs)")
+				break
+
+			if epoch % 5 == 0 and os.path.exists(self.best_ckpt_path):
+				logger.info(f"Periodic test at epoch {epoch} ...")
+				self.test(setting, epoch=epoch)
 
 		return self.model
 
@@ -128,7 +143,7 @@ class Exp_CFM_Phase1(Exp_Basic):
 			)
 		return self._vocoder
 
-	def test(self, setting: str, test: int = 0):
+	def test(self, setting: str, test: int = 0, epoch: int = 0):
 		_, test_loader = self._get_data("test")
 
 		ckpt_dir = os.path.join(self.args.checkpoints, setting)
@@ -144,7 +159,7 @@ class Exp_CFM_Phase1(Exp_Basic):
 		logger.info(f"Test loss: {test_loss:.6f}")
 
 		# --- Inference + audio output ---
-		output_dir = os.path.join(ckpt_dir, "test_outputs")
+		output_dir = os.path.join(ckpt_dir, f"test_outputs@test{test}_{epoch}")
 		os.makedirs(output_dir, exist_ok=True)
 		vocoder = self._get_vocoder()
 
