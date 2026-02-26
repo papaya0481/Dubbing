@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,19 @@ import tgt
 import torch
 import torchaudio
 from torch.utils.data import Dataset
+
+warnings.filterwarnings(
+    "ignore",
+    message=r".*StreamingMediaDecoder has been deprecated.*",
+    category=UserWarning,
+    module=r"torchaudio\._backend\.ffmpeg",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r".*implementation will be changed to use torchaudio\.load_with_torchcodec.*",
+    category=UserWarning,
+    module=r"torchaudio\._backend\.utils",
+)
 
 from modules.mel_strech.meldataset import get_mel_spectrogram
 from modules.mel_strech.mel_transform import GlobalWarpTransformer

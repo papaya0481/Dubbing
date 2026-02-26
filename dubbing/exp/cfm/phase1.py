@@ -1,6 +1,7 @@
 import os
 import time
 import torch
+from tqdm.auto import tqdm
 
 from exp.basic import Exp_Basic
 from data_provider.data_factory import data_provider
@@ -26,7 +27,7 @@ class Exp_CFM_Phase1(Exp_Basic):
 		data_set, data_loader = data_provider(self.args, flag)
 		return data_set, data_loader
 
-	def _run_one_epoch(self, loader, train: bool):
+	def _run_one_epoch(self, loader, train: bool, stage: str):
 		total_loss = 0.0
 		count = 0
 
@@ -37,7 +38,8 @@ class Exp_CFM_Phase1(Exp_Basic):
 
 		ctx = torch.enable_grad() if train else torch.no_grad()
 		with ctx:
-			for batch in loader:
+			progress = tqdm(loader, desc=stage, leave=False, dynamic_ncols=True)
+			for batch in progress:
 				x0 = batch["x0"].to(self.device)
 				x1 = batch["x1"].to(self.device)
 				phoneme_ids = batch["phoneme_ids"].to(self.device)
@@ -63,6 +65,8 @@ class Exp_CFM_Phase1(Exp_Basic):
 
 				total_loss += float(loss.item())
 				count += 1
+				avg_loss = total_loss / max(count, 1)
+				progress.set_postfix(loss=f"{float(loss.item()):.6f}", avg_loss=f"{avg_loss:.6f}")
 
 		return total_loss / max(count, 1)
 
@@ -84,8 +88,8 @@ class Exp_CFM_Phase1(Exp_Basic):
 		logger.info(f"Train samples: {len(train_data)} | Val samples: {len(val_data)} | Test samples: {len(test_data)}")
 		for epoch in range(1, self.args.train_epochs + 1):
 			t0 = time.time()
-			train_loss = self._run_one_epoch(train_loader, train=True)
-			val_loss = self._run_one_epoch(val_loader, train=False)
+			train_loss = self._run_one_epoch(train_loader, train=True, stage=f"Train {epoch}/{self.args.train_epochs}")
+			val_loss = self._run_one_epoch(val_loader, train=False, stage=f"Val {epoch}/{self.args.train_epochs}")
 
 			logger.info(
 				f"Epoch {epoch}/{self.args.train_epochs} | "
@@ -117,6 +121,6 @@ class Exp_CFM_Phase1(Exp_Basic):
 			self.model.load_state_dict(state["model"], strict=False)
 			logger.info(f"Loaded checkpoint: {best_ckpt_path}")
 
-		test_loss = self._run_one_epoch(test_loader, train=False)
+		test_loss = self._run_one_epoch(test_loader, train=False, stage="Test")
 		logger.info(f"Test loss: {test_loss:.6f}")
 		return test_loss
