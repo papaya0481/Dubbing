@@ -42,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--t_scheduler", type=str, default="linear", choices=["linear", "cosine"])
 	parser.add_argument("--training_cfg_rate", type=float, default=0.1)
 	parser.add_argument("--inference_cfg_rate", type=float, default=0.5)
+	parser.add_argument("--inference_steps", type=int, default=32, help="number of Euler steps for inference")
 
 	parser.add_argument("--checkpoints", type=str, default="./checkpoints")
 	parser.add_argument("--num_workers", type=int, default=4)
@@ -52,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--learning_rate", type=float, default=1e-4)
 	parser.add_argument("--weight_decay", type=float, default=1e-4)
 	parser.add_argument("--max_grad_norm", type=float, default=1.0)
+	parser.add_argument("--lr_end_factor", type=float, default=0.1, help="linear LR decay end factor (lr_end = lr * lr_end_factor)")
 
 	parser.add_argument("--seed", type=int, default=2026)
 	parser.add_argument("--use_gpu", type=bool, default=True)

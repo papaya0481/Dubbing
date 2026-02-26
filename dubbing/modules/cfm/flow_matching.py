@@ -162,11 +162,12 @@ class LipSyncCFM(nn.Module):
         # 随机丢弃 stretched_mel 条件，强迫模型学会看音素和唇形
         # 否则模型可能会学会恒等映射 (Identity Mapping)
         drop_prob = self.training_cfg_rate
-        if self.training and torch.rand(1) < drop_prob:
-            # 这里的 mask 只是把作为 condition 输入的那份 stretched_mel 置零
-            # 不影响 x_t 里的构造
-            input_stretched_mel = torch.zeros_like(stretched_mel)
+        if self.training:
+            drop_mask = (torch.rand(B, device=clean_mel.device) < drop_prob)
+            drop_mel = drop_mask[:, None, None].float()   # [B,1,1] for [B,C,T]
+            input_stretched_mel = stretched_mel * (1.0 - drop_mel)
         else:
+            drop_mask = None
             input_stretched_mel = stretched_mel
 
         cond_input = self._build_condition(
@@ -175,6 +176,11 @@ class LipSyncCFM(nn.Module):
             lip_embedding=lip_embedding,
             cond=cond,
         )
+
+        # CFG: also drop cond for the same samples (match inference unconditional branch)
+        if drop_mask is not None:
+            drop_cond = drop_mask[:, None, None].float()  # [B,1,1]
+            cond_input = cond_input * (1.0 - drop_cond)
 
         # -------------------------------------------------------
         # 5. 模型预测

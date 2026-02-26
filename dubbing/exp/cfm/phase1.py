@@ -82,6 +82,12 @@ class Exp_CFM_Phase1(Exp_Basic):
 		self.best_ckpt_path = os.path.join(ckpt_dir, "best.pth")
 
 		self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.args.learning_rate, weight_decay=self.args.weight_decay)
+		self.scheduler = torch.optim.lr_scheduler.LinearLR(
+			self.optimizer,
+			start_factor=1.0,
+			end_factor=getattr(self.args, 'lr_end_factor', 0.1),
+			total_iters=self.args.train_epochs,
+		)
 
 		best_val = float("inf")
 		stale_epochs = 0
@@ -92,10 +98,12 @@ class Exp_CFM_Phase1(Exp_Basic):
 			train_loss = self._run_one_epoch(train_loader, train=True, stage=f"Train {epoch}/{self.args.train_epochs}")
 			val_loss = self._run_one_epoch(val_loader, train=False, stage=f"Val {epoch}/{self.args.train_epochs}")
 
+			cur_lr = self.optimizer.param_groups[0]['lr']
+			self.scheduler.step()
 			logger.info(
 				f"Epoch {epoch}/{self.args.train_epochs} | "
 				f"train_loss={train_loss:.6f} | val_loss={val_loss:.6f} | "
-				f"time={time.time()-t0:.1f}s"
+				f"lr={cur_lr:.2e} | time={time.time()-t0:.1f}s"
 			)
 
 			if val_loss < best_val:
@@ -156,7 +164,8 @@ class Exp_CFM_Phase1(Exp_Basic):
 					phoneme_ids=phoneme_ids,
 					lip_embedding=None,
 					x_lens=x_lens,
-					steps=25,
+					steps=getattr(self.args, 'inference_steps', 32),
+					cfg_scale=getattr(self.args, 'inference_cfg_rate', 0.5),
 				)
 
 				for i, key in enumerate(pair_keys):
