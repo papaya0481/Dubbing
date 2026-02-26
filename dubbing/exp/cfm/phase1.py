@@ -22,6 +22,7 @@ class Exp_CFM_Phase1(Exp_Basic):
 		model = LipSyncCFM(self.args)
 		if self.args.use_multi_gpu and self.args.use_gpu:
 			model = torch.nn.DataParallel(model, device_ids=self.args.device_ids)
+		logger.debug(f"Model structure:\n{model}")
 		return model
 
 	def _get_data(self, flag: str):
@@ -82,15 +83,16 @@ class Exp_CFM_Phase1(Exp_Basic):
 		self.best_ckpt_path = os.path.join(ckpt_dir, "best.pth")
 
 		self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.args.learning_rate, weight_decay=self.args.weight_decay)
-		self.scheduler = torch.optim.lr_scheduler.LinearLR(
+		self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
 			self.optimizer,
-			start_factor=1.0,
-			end_factor=getattr(self.args, 'lr_end_factor', 0.1),
-			total_iters=self.args.train_epochs,
+			mode='min',
+			factor=getattr(self.args, 'lr_reduce_factor', 0.5),
+			patience=getattr(self.args, 'lr_reduce_patience', 3),
+			min_lr=getattr(self.args, 'lr_min', 1e-6),
+			verbose=False,
 		)
 
 		best_val = float("inf")
-		stale_epochs = 0
 
 		logger.info(f"Train samples: {len(train_data)} | Val samples: {len(val_data)} | Test samples: {len(test_data)}")
 		for epoch in range(1, self.args.train_epochs + 1):
@@ -99,24 +101,19 @@ class Exp_CFM_Phase1(Exp_Basic):
 			val_loss = self._run_one_epoch(val_loader, train=False, stage=f"Val {epoch}/{self.args.train_epochs}")
 
 			cur_lr = self.optimizer.param_groups[0]['lr']
-			self.scheduler.step()
+			self.scheduler.step(val_loss)
+			new_lr = self.optimizer.param_groups[0]['lr']
+			lr_tag = f" [LR {cur_lr:.2e} -> {new_lr:.2e}]" if new_lr != cur_lr else f" [LR {cur_lr:.2e}]"
 			logger.info(
 				f"Epoch {epoch}/{self.args.train_epochs} | "
-				f"train_loss={train_loss:.6f} | val_loss={val_loss:.6f} | "
-				f"lr={cur_lr:.2e} | time={time.time()-t0:.1f}s"
+				f"train_loss={train_loss:.6f} | val_loss={val_loss:.6f} |"
+				f"{lr_tag} | time={time.time()-t0:.1f}s"
 			)
 
 			if val_loss < best_val:
 				best_val = val_loss
-				stale_epochs = 0
 				torch.save({"model": self.model.state_dict(), "args": vars(self.args)}, self.best_ckpt_path)
 				logger.info(f"Saved best checkpoint: {self.best_ckpt_path}")
-			else:
-				stale_epochs += 1
-
-			if stale_epochs >= self.args.patience:
-				logger.warning(f"Early stopping triggered at epoch {epoch}")
-				break
 
 		return self.model
 
@@ -140,6 +137,8 @@ class Exp_CFM_Phase1(Exp_Basic):
 			state = torch.load(best_ckpt_path, map_location=self.device, weights_only=False)
 			self.model.load_state_dict(state["model"], strict=False)
 			logger.info(f"Loaded checkpoint: {best_ckpt_path}")
+
+		logger.debug(f"Model structure:\n{self.model}")
 
 		test_loss = self._run_one_epoch(test_loader, train=False, stage="Test")
 		logger.info(f"Test loss: {test_loss:.6f}")

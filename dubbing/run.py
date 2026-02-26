@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from exp.cfm.phase1 import Exp_CFM_Phase1
-from logger import get_logger, show_setting
+from logger import get_logger, set_log_level, show_setting
 
 
 logger = get_logger("dubbing.run")
@@ -54,9 +54,17 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--learning_rate", type=float, default=1e-4)
 	parser.add_argument("--weight_decay", type=float, default=1e-4)
 	parser.add_argument("--max_grad_norm", type=float, default=1.0)
-	parser.add_argument("--lr_end_factor", type=float, default=0.1, help="linear LR decay end factor (lr_end = lr * lr_end_factor)")
+	parser.add_argument("--lr_reduce_factor", type=float, default=0.7,
+		help="ReduceLROnPlateau: factor to multiply lr by on plateau")
+	parser.add_argument("--lr_reduce_patience", type=int, default=3,
+		help="ReduceLROnPlateau: epochs with no improvement before reducing lr")
+	parser.add_argument("--lr_min", type=float, default=1e-6,
+		help="ReduceLROnPlateau: minimum lr")
 
 	parser.add_argument("--seed", type=int, default=2026)
+	parser.add_argument("--log_level", type=str, default="INFO",
+		choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+		help="logging verbosity; DEBUG also prints full model structure")
 	parser.add_argument("--use_gpu", type=bool, default=True)
 	parser.add_argument("--gpu", type=int, default=0)
 	parser.add_argument("--use_multi_gpu", action="store_true", default=False)
@@ -97,6 +105,9 @@ if __name__ == "__main__":
 	random.seed(args.seed)
 	np.random.seed(args.seed)
 	torch.manual_seed(args.seed)
+
+	import logging
+	set_log_level(getattr(logging, args.log_level.upper(), logging.INFO))
 
 	args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
 	if args.use_gpu and args.use_multi_gpu:
