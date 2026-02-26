@@ -446,12 +446,10 @@ class AttnProcessor:
         # dropout
         x = attn.to_out[1](x)
 
-        if mask is not None:
-            if mask.dim() == 2:
-                mask = mask.unsqueeze(-1)
-            else:
-                mask = mask[:, 0, -1].unsqueeze(-1)
-            x = x.masked_fill(~mask, 0.0)
+        # Output zero-fill for padding positions is handled by
+        # LipSyncDiT.forward after the full transformer backbone, so we don't
+        # replicate it here (previous code extracted query validity from the
+        # wrong dimension of the 4-D attention mask, zeroing valid outputs).
 
         return x
 

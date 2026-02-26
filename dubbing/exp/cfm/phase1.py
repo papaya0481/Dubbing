@@ -144,10 +144,11 @@ class Exp_CFM_Phase1(Exp_Basic):
 		self.model.eval()
 		progress = tqdm(test_loader, desc="Infer+Save", dynamic_ncols=True)
 		with torch.no_grad():
-			for batch in progress:
+			for j, batch in enumerate(progress):
 				x0 = batch["x0"].to(self.device)
 				phoneme_ids = batch["phoneme_ids"].to(self.device)
 				x_lens = batch["x_lens"].to(self.device)
+				x1 = batch["x1"].to(self.device)
 				pair_keys = batch["pair_key"]
 
 				pred_mel = self.model.inference(
@@ -155,12 +156,17 @@ class Exp_CFM_Phase1(Exp_Basic):
 					phoneme_ids=phoneme_ids,
 					lip_embedding=None,
 					x_lens=x_lens,
+					steps=25,
 				)
 
 				for i, key in enumerate(pair_keys):
 					safe_key = str(key).replace("/", "_").replace(" ", "_")
 					vocoder.save_audio(x0[i : i + 1], os.path.join(output_dir, f"{safe_key}_x0.wav"))
 					vocoder.save_audio(pred_mel[i : i + 1], os.path.join(output_dir, f"{safe_key}_pred.wav"))
+					vocoder.save_audio(x1[i : i + 1], os.path.join(output_dir, f"{safe_key}_x1.wav"))
+				
+				if j > 6:
+					break
 
 		logger.info(f"Test outputs saved to: {output_dir}")
 		return test_loss

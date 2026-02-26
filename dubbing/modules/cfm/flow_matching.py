@@ -45,7 +45,7 @@ class LipSyncCFMConfig:
             hidden_dim=dit_args.hidden_dim,
             num_heads=dit_args.num_heads,
             depth=dit_args.depth,
-            cond_dim=getattr(dit_args, "cond_dim", dit_args.hidden_dim),
+            cond_dim=getattr(dit_args, "cond_dim", None) or dit_args.hidden_dim,
             mu_dim=getattr(dit_args, "mu_dim", None),
             dropout=getattr(dit_args, "dropout", 0.1),
             ff_mult=getattr(dit_args, "ff_mult", 4),
@@ -79,7 +79,8 @@ class LipSyncCFM(nn.Module):
         self.estimator = LipSyncDiT(args=dit_cfg)
 
         # Used only for temporary fallback cond construction (phoneme+lip -> cond_dim).
-        self.cond_adapter = nn.Conv1d(2 * dit_cfg.hidden_dim, dit_cfg.hidden_dim, kernel_size=1)
+        # Output must match cond_dim (not necessarily hidden_dim).
+        self.cond_adapter = nn.Conv1d(2 * dit_cfg.hidden_dim, cond_dim, kernel_size=1)
 
         cfm_cfg = cfg.CFM
         self.t_scheduler = cfm_cfg.t_scheduler
@@ -139,6 +140,9 @@ class LipSyncCFM(nn.Module):
         # 2. 随机采样时间步 t
         # -------------------------------------------------------
         t = torch.rand(B, 1, 1, device=clean_mel.device)
+        # 训练时同步 t_scheduler，避免 train/infer 分布不一致
+        if self.t_scheduler == "cosine":
+            t = 1 - torch.cos(t * 0.5 * torch.pi)
         
         # -------------------------------------------------------
         # 3. 构建中间状态 x_t (Interpolation)
@@ -181,7 +185,7 @@ class LipSyncCFM(nn.Module):
             x=x_t,
             mask=x_lens,
             mu=input_stretched_mel,
-            t=t.squeeze(),
+            t=t.view(clean_mel.shape[0]),  # (B,) – squeeze is fragile for B=1
             spks=spks,
             cond=cond_input,
         )
@@ -259,11 +263,12 @@ class LipSyncCFM(nn.Module):
 
     def solve_euler(self, x, t_span, mu, mask, cond, spks=None, cfg_scale=1.5, streaming=False):
         B = x.size(0)
-        t = t_span[0].unsqueeze(0)
-        dt = t_span[1] - t_span[0]
 
         for step in range(1, len(t_span)):
-            t_batch = t.repeat(B)
+            # 直接从预计算的 t_span 读取当前评估点和步长，避免浮点累积误差
+            t_val = t_span[step - 1]
+            dt = t_span[step] - t_val
+            t_batch = t_val.unsqueeze(0).repeat(B)
 
             if cfg_scale > 0:
                 x_in = torch.cat([x, x], dim=0)
@@ -305,9 +310,5 @@ class LipSyncCFM(nn.Module):
                 )
 
             x = x + dt * dphi_dt
-            t = t + dt
-
-            if step < len(t_span) - 1:
-                dt = t_span[step + 1] - t
 
         return x

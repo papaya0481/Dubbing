@@ -142,10 +142,11 @@ def add_optional_chunk_mask(
     del x, use_dynamic_chunk, use_dynamic_left_chunk, decoding_chunk_size, static_chunk_size, num_decoding_left_chunks
     # B: batch size, T: sequence length.
     batch, seq_len = padding_mask.shape
-    # Valid positions on key axis.
+    # Only mask invalid KEY positions.  Do NOT include query validity here:
+    # cross-product masking (valid_q AND valid_k) produces all-False rows for
+    # padding queries, causing softmax(-inf,...) → NaN in SDPA.
+    # Padding query outputs are zeroed in LipSyncDiT.forward after the backbone.
     attn_mask = padding_mask[:, None, :].expand(batch, seq_len, seq_len)
-    # Combine with valid positions on query axis.
-    attn_mask = attn_mask & padding_mask[:, :, None].expand(batch, seq_len, seq_len)
     return attn_mask
 
 
@@ -370,6 +371,10 @@ class LipSyncDiT(nn.Module):
         # 6) Transformer backbone forward.
         for block in self.transformer_blocks:
             x = block(x, t, mask=attn_mask.bool(), rope=rope)
+
+        # Zero out padding positions so they don't leak into the loss or output.
+        # mask is [B, T] boolean (True = valid); x is [B, T, dim].
+        x = x * mask[:, :, None].float()
 
         # 7) Apply optional long skip fusion.
         if self.long_skip_connection is not None:
