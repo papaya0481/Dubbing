@@ -257,6 +257,17 @@ class Dataset_CFM_Phase1(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
+    @staticmethod
+    def _extract_text(tg_path: Path, tier_name: str) -> str:
+        """Read word-level text from a TextGrid tier."""
+        try:
+            tg = tgt.io.read_textgrid(str(tg_path))
+            tier = tg.get_tier_by_name(tier_name)
+            words = [iv.text for iv in tier if iv.text.strip() not in ("", "sp", "sil", "<eps>")]
+            return " ".join(words)
+        except Exception:
+            return ""
+
     def __getitem__(self, index: int):
         sample = self.samples[index]
 
@@ -278,12 +289,18 @@ class Dataset_CFM_Phase1(Dataset):
         r2_mel = r2_mel[:, :, :target_frames]
         phoneme_ids = phoneme_ids[:target_frames]
 
+        mse = float(torch.mean((stretched_r1_mel - r2_mel) ** 2).item())
+
+        text_r1 = self._extract_text(sample.r1_tg, "words")
+
         return {
             "pair_key": sample.pair_key,
             "x0": stretched_r1_mel.squeeze(0),
             "x1": r2_mel.squeeze(0),
             "phoneme_ids": phoneme_ids,
             "x_len": torch.tensor(target_frames, dtype=torch.long),
+            "mse": mse,
+            "text_r1": text_r1,
         }
 
 
@@ -297,12 +314,17 @@ def collate_cfm_phase1(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.
     phoneme_ids = torch.zeros(len(batch), max_len, dtype=torch.long)
 
     pair_keys = []
+    mse_list = []
+    text_r1_list = []
+    text_r2_list = []
     for i, item in enumerate(batch):
         t = int(item["x_len"].item())
         x0[i, :, :t] = item["x0"][:, :t]
         x1[i, :, :t] = item["x1"][:, :t]
         phoneme_ids[i, :t] = item["phoneme_ids"][:t]
         pair_keys.append(item["pair_key"])
+        mse_list.append(item["mse"])
+        text_r1_list.append(item["text_r1"])
 
     return {
         "pair_key": pair_keys,
@@ -310,4 +332,6 @@ def collate_cfm_phase1(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.
         "x1": x1,
         "phoneme_ids": phoneme_ids,
         "x_lens": lengths,
+        "mse": mse_list,
+        "text_r1": text_r1_list,
     }

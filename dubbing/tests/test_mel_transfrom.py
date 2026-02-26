@@ -31,7 +31,7 @@ if __name__ == "__main__":
     source_tg = tgt.io.read_textgrid("mel_convert/test/aligned/test_short1_1.TextGrid")
     target_tg = tgt.io.read_textgrid("mel_convert/test/aligned/test_short_gt.TextGrid")
     source_wav = "mel_convert/test/test_short1_1.wav"
-    transformer = GlobalWarpTransformer(use_vocoder=False, device="cpu", verbose=True)
+    transformer = GlobalWarpTransformer(use_vocoder=True, device="cpu", verbose=True)
     
     wav, sr = transformer.load_audio(source_wav)
     from modules.mel_strech.meldataset import get_mel_spectrogram
@@ -47,3 +47,14 @@ if __name__ == "__main__":
     print(out[0].shape, out[1].shape)
     print(transformer._reverse_phoneme_mapping(out[1]))
     print(source_tg.get_tier_by_name("phones"))
+    print(target_tg.get_tier_by_name("phones"))
+    
+    # 使用 vocoder 将 out[0] 转成音频，保存到文件   
+    wav_out = transformer.model(out[0]).cpu().squeeze(0)
+    import torchaudio
+    torchaudio.save("test_out.wav", wav_out, sr)
+    
+    # 检查时长是否和 target_tg 的 phones tier 对齐
+    print(target_tg.get_tier_by_name("phones").end_time)
+    wav_out_len = wav_out.shape[-1]
+    print(f"Output wav length (samples): {wav_out_len}, duration (s): {wav_out_len/sr:.2f}s")
