@@ -166,7 +166,6 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         """将 Mel 通过声码器保存为音频。/ Vocode mel and save waveform to file."""
         if not self.use_vocoder or self.model is None:
             raise RuntimeError("Vocoder is disabled (use_vocoder=False); cannot save waveform from mel.")
-        if self.verbose: print(f"Vocoding...")
         with torch.no_grad():
             wav_gen = self.model(audio_mel)
         wav_cpu = wav_gen.cpu().squeeze(0)

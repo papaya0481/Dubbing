@@ -6,6 +6,7 @@ from tqdm.auto import tqdm
 from exp.basic import Exp_Basic
 from data_provider.data_factory import data_provider
 from modules.cfm.flow_matching import LipSyncCFM
+from modules.mel_strech.mel_transform import GlobalWarpTransformer
 from logger import get_logger
 
 
@@ -111,16 +112,55 @@ class Exp_CFM_Phase1(Exp_Basic):
 
 		return self.model
 
+	def _get_vocoder(self) -> GlobalWarpTransformer:
+		"""Lazily build a vocoder-enabled warper for mel-to-wav conversion."""
+		if not hasattr(self, "_vocoder") or self._vocoder is None:
+			device = "cuda" if self.args.use_gpu else "cpu"
+			self._vocoder = GlobalWarpTransformer(
+				use_vocoder=True,
+				device=device,
+				verbose=False,
+			)
+		return self._vocoder
+
 	def test(self, setting: str, test: int = 0):
 		_, test_loader = self._get_data("test")
 
 		ckpt_dir = os.path.join(self.args.checkpoints, setting)
 		best_ckpt_path = os.path.join(ckpt_dir, "best.pth")
 		if os.path.exists(best_ckpt_path):
-			state = torch.load(best_ckpt_path, map_location=self.device)
+			state = torch.load(best_ckpt_path, map_location=self.device, weights_only=False)
 			self.model.load_state_dict(state["model"], strict=False)
 			logger.info(f"Loaded checkpoint: {best_ckpt_path}")
 
 		test_loss = self._run_one_epoch(test_loader, train=False, stage="Test")
 		logger.info(f"Test loss: {test_loss:.6f}")
+
+		# --- Inference + audio output ---
+		output_dir = os.path.join(ckpt_dir, "test_outputs")
+		os.makedirs(output_dir, exist_ok=True)
+		vocoder = self._get_vocoder()
+
+		self.model.eval()
+		progress = tqdm(test_loader, desc="Infer+Save", dynamic_ncols=True)
+		with torch.no_grad():
+			for batch in progress:
+				x0 = batch["x0"].to(self.device)
+				phoneme_ids = batch["phoneme_ids"].to(self.device)
+				x_lens = batch["x_lens"].to(self.device)
+				pair_keys = batch["pair_key"]
+
+				pred_mel = self.model.inference(
+					stretched_mel=x0,
+					phoneme_ids=phoneme_ids,
+					lip_embedding=None,
+					x_lens=x_lens,
+				)
+
+				for i, key in enumerate(pair_keys):
+					safe_key = str(key).replace("/", "_").replace(" ", "_")
+					vocoder.save_audio(x0[i : i + 1], os.path.join(output_dir, f"{safe_key}_x0.wav"))
+					vocoder.save_audio(pred_mel[i : i + 1], os.path.join(output_dir, f"{safe_key}_pred.wav"))
+
+		logger.info(f"Test outputs saved to: {output_dir}")
 		return test_loss
