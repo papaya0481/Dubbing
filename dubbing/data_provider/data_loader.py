@@ -289,16 +289,27 @@ class Dataset_CFM_Phase1(Dataset):
         r2_mel = r2_mel[:, :, :target_frames]
         phoneme_ids = phoneme_ids[:target_frames]
 
-        mse = float(torch.mean((stretched_r1_mel - r2_mel) ** 2).item())
+        # Normalize x0 and x1 with the SAME scale derived from x0,
+        # so the model learns in a stable space and we can invert at inference.
+        x0 = stretched_r1_mel.squeeze(0)   # [n_mels, T]
+        x1 = r2_mel.squeeze(0)             # [n_mels, T]
+        x_mean = x0.mean()
+        x_std  = x0.std().clamp(min=1e-5)
+        x0 = (x0 - x_mean) / x_std
+        x1 = (x1 - x_mean) / x_std
+
+        mse = float(torch.mean((x0 - x1) ** 2).item())
 
         text_r1 = self._extract_text(sample.r1_tg, "words")
 
         return {
             "pair_key": sample.pair_key,
-            "x0": stretched_r1_mel.squeeze(0),
-            "x1": r2_mel.squeeze(0),
+            "x0": x0,
+            "x1": x1,
             "phoneme_ids": phoneme_ids,
             "x_len": torch.tensor(target_frames, dtype=torch.long),
+            "x_mean": x_mean,
+            "x_std": x_std,
             "mse": mse,
             "text_r1": text_r1,
         }
@@ -312,6 +323,8 @@ def collate_cfm_phase1(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.
     x0 = torch.zeros(len(batch), n_mels, max_len, dtype=batch[0]["x0"].dtype)
     x1 = torch.zeros(len(batch), n_mels, max_len, dtype=batch[0]["x1"].dtype)
     phoneme_ids = torch.zeros(len(batch), max_len, dtype=torch.long)
+    x_mean = torch.stack([item["x_mean"] for item in batch], dim=0)  # [B]
+    x_std  = torch.stack([item["x_std"]  for item in batch], dim=0)  # [B]
 
     pair_keys = []
     mse_list = []
@@ -332,6 +345,8 @@ def collate_cfm_phase1(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.
         "x1": x1,
         "phoneme_ids": phoneme_ids,
         "x_lens": lengths,
+        "x_mean": x_mean,
+        "x_std": x_std,
         "mse": mse_list,
         "text_r1": text_r1_list,
     }

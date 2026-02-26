@@ -163,12 +163,15 @@ class LipSyncCFM(nn.Module):
         # 否则模型可能会学会恒等映射 (Identity Mapping)
         drop_prob = self.training_cfg_rate
         if self.training:
-            drop_mask = (torch.rand(B, device=clean_mel.device) < drop_prob)
-            drop_mel = drop_mask[:, None, None].float()   # [B,1,1] for [B,C,T]
-            input_stretched_mel = stretched_mel * (1.0 - drop_mel)
+            drop_mask = (torch.rand(B, device=clean_mel.device) < drop_prob)    # [B] bool
+            drop_mask = drop_mask[:, None, None]  # [B,1,1] for broadcasting
         else:
-            drop_mask = None
-            input_stretched_mel = stretched_mel
+            drop_mask = torch.zeros(B, device=clean_mel.device).bool()  # 推理阶段不丢条件
+            drop_mask = drop_mask[:, None, None]
+            
+        # drop_mel = drop_mask.float()   # [B,1,1] for [B,C,T]
+        # input_stretched_mel = stretched_mel * (1.0 - drop_mel)
+        input_stretched_mel = stretched_mel
 
         cond_input = self._build_condition(
             stretched_mel=input_stretched_mel,
@@ -179,7 +182,7 @@ class LipSyncCFM(nn.Module):
 
         # CFG: also drop cond for the same samples (match inference unconditional branch)
         if drop_mask is not None:
-            drop_cond = drop_mask[:, None, None].float()  # [B,1,1]
+            drop_cond = drop_mask.float()  # [B,1,1]
             cond_input = cond_input * (1.0 - drop_cond)
 
         # -------------------------------------------------------
@@ -285,7 +288,7 @@ class LipSyncCFM(nn.Module):
                 else:
                     mask_in = torch.cat([mask, mask], dim=0)
 
-                mu_in = torch.cat([mu, torch.zeros_like(mu)], dim=0)
+                mu_in = torch.cat([mu, mu], dim=0)
                 cond_in = torch.cat([cond, torch.zeros_like(cond)], dim=0)
 
                 if spks is not None:
