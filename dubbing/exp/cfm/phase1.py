@@ -166,7 +166,7 @@ class Exp_CFM_Phase1(Exp_Basic):
 					phoneme_ids=phoneme_ids,
 					lip_embedding=None,
 					x_lens=x_lens,
-					steps=getattr(self.args, 'inference_steps', 32),
+					steps=getattr(self.args, 'inference_steps', 25),
 					cfg_scale=getattr(self.args, 'inference_cfg_rate', 0.5),
      				temperature=getattr(self.args, 'training_temperature', 0.2),
 				)

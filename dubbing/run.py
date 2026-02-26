@@ -18,7 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--is_training", type=int, required=True, default=1, help="1 for train+test, 0 for test only")
 	parser.add_argument("--model_id", type=str, required=True, default="cfm_phase1", help="experiment model id")
 	parser.add_argument("--model", type=str, required=True, default="LipSyncCFM", help="model name")
-	parser.add_argument("--exp_name", type=str, default="cfm_phase1", help="experiment entry name")
+	parser.add_argument("--exp_name", type=str, help="experiment entry name")
 
 	parser.add_argument("--data", type=str, default="cfm_phase1", help="dataset key in data_factory")
 	parser.add_argument("--data_root", type=str, required=True, help="root dir containing ost/ and aligned/")
@@ -42,8 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--t_scheduler", type=str, default="linear", choices=["linear", "cosine"])
 	parser.add_argument("--training_cfg_rate", type=float, default=0.1)
 	parser.add_argument("--inference_cfg_rate", type=float, default=0.5)
-	parser.add_argument("--training_temperature", type=float, default=0.2, help="noise scale added to stretched mel during training")
-	parser.add_argument("--inference_steps", type=int, default=32, help="number of Euler steps for inference")
+	parser.add_argument("--training_temperature", type=float, default=0.05, help="noise scale added to stretched mel during training")
+	parser.add_argument("--inference_steps", type=int, default=25, help="number of Euler steps for inference")
 
 	parser.add_argument("--checkpoints", type=str, default="./checkpoints")
 	parser.add_argument("--num_workers", type=int, default=4)
@@ -111,6 +111,12 @@ if __name__ == "__main__":
 	logger.info(str(args))
 
 	Exp = Exp_CFM_Phase1
+ 
+	if args.exp_name is None:
+		# use date + hash as default exp_name to avoid overwriting previous results
+		import datetime
+		import hashlib
+		args.exp_name = datetime.datetime.now().strftime("%m%d%H") + "_" + hashlib.md5(str(args).encode()).hexdigest()[:4]
 
 	if args.is_training:
 		for ii in range(args.itr):
