@@ -139,30 +139,29 @@ class LipSyncCFM(nn.Module):
         # -------------------------------------------------------
         # 随机丢弃 stretched_mel 条件，强迫模型学会看音素和唇形
         # 否则模型可能会学会恒等映射 (Identity Mapping)
-        drop_prob = self.training_cfg_rate
         if self.training:
-            drop_mask = (torch.rand(B, device=clean_mel.device) < drop_prob)    # [B] bool
-            drop_mask = drop_mask[:, None, None]  # [B,1,1] for broadcasting
+            cfg_mask = (torch.rand(B, device=clean_mel.device) > self.training_cfg_rate)    # [B] bool
         else:
-            drop_mask = torch.zeros(B, device=clean_mel.device).bool()  # 推理阶段不丢条件
-            drop_mask = drop_mask[:, None, None]
+            cfg_mask = torch.ones(B, device=clean_mel.device).bool()  # 推理阶段不丢条件
+        
+        cfg_mask = cfg_mask[:, None, None]  # [B,1,1] for broadcasting
+        cfg_mask = cfg_mask.float()  # 转为 float 以便后续乘法
             
         # drop_mel = drop_mask.float()   # [B,1,1] for [B,C,T]
         # input_stretched_mel = stretched_mel * (1.0 - drop_mel)
-        input_stretched_mel = stretched_mel
+        input_stretched_mel = stretched_mel * cfg_mask
 
         # Build phoneme condition [B, T, cond_dim]; zero padding positions via mask.
+        position_bool_mask = torch.arange(T, device=x_lens.device).unsqueeze(0) < x_lens.unsqueeze(1)  # [B, T]
         if cond is None:
             T = clean_mel.size(2)
-            bool_mask = torch.arange(T, device=x_lens.device).unsqueeze(0) < x_lens.unsqueeze(1)  # [B, T]
-            cond_input = self.estimator.phoneme_embed(phoneme_ids, mask=bool_mask)
+            cond_input = self.estimator.phoneme_embed(phoneme_ids, mask=position_bool_mask)
         else:
             cond_input = cond
 
         # CFG: also drop cond for the same samples (match inference unconditional branch)
-        if drop_mask is not None:
-            drop_cond = drop_mask.float()  # [B,1,1]
-            cond_input = cond_input * (1.0 - drop_cond)
+        if cfg_mask is not None:
+            cond_input = cond_input * cfg_mask
 
         # -------------------------------------------------------
         # 5. 模型预测
@@ -181,15 +180,9 @@ class LipSyncCFM(nn.Module):
         # -------------------------------------------------------
         # 6. 计算 Loss
         # -------------------------------------------------------
-        # 只在有效长度内计算 loss
-        loss = 0
-        for i in range(B):
-            length = x_lens[i]
-            loss += self.criterion(
-                pred_velocity[i, :, :length], 
-                target_velocity[i, :, :length]
-            )
-        loss /= B
+        # 只在有效长度内计算 loss（向量化，无 for 循环）
+        position_bool_mask = position_bool_mask.unsqueeze(1).expand_as(pred_velocity)  # [B, C, T]
+        loss = self.criterion(pred_velocity[position_bool_mask], target_velocity[position_bool_mask])
         
         return loss
 
@@ -269,7 +262,7 @@ class LipSyncCFM(nn.Module):
                 else:
                     mask_in = torch.cat([mask, mask], dim=0)
 
-                mu_in = torch.cat([mu, mu], dim=0)
+                mu_in = torch.cat([mu, torch.zeros_like(mu)], dim=0)
                 # unconditional branch: zero cond, zero lips
                 cond_in = torch.cat([cond, torch.zeros_like(cond)], dim=0)
                 lips_in = torch.cat([lips, torch.zeros_like(lips)], dim=0) if lips is not None else None
