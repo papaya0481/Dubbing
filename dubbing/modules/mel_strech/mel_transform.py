@@ -172,29 +172,94 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         wav_cpu = torch.tanh(wav_cpu) # Soft clip
         torchaudio.save(output_path, wav_cpu, self.sample_rate)
 
+    def _detect_silence_mask(
+        self,
+        src_anchors: List[float],
+        tgt_anchors: List[float],
+        total_tgt_frames: int,
+        src_eps: float = 1e-4,
+    ) -> torch.Tensor:
+        """Build a boolean mask marking target frames that should be silence.
+
+        A silence segment is defined by a consecutive anchor pair where the
+        source span is zero (src_anchors[i] ≈ src_anchors[i+1]) but the
+        target span is non-zero (tgt_anchors[i] < tgt_anchors[i+1]).
+        Those target frames have no corresponding source content and must be
+        filled with silence rather than repeated frames.
+
+        Args:
+            src_anchors: Source time anchors (seconds).
+            tgt_anchors: Target time anchors (seconds).
+            total_tgt_frames: Total number of target mel frames.
+            src_eps: Threshold below which src duration is treated as zero.
+
+        Returns:
+            torch.BoolTensor of shape (total_tgt_frames,), True = silence.
+        """
+        def sec2frame(sec: float) -> int:
+            return int(round(sec * self.sample_rate / self.h.hop_size))
+
+        mask = torch.zeros(total_tgt_frames, dtype=torch.bool)
+        for i in range(len(src_anchors) - 1):
+            src_span = abs(src_anchors[i + 1] - src_anchors[i])
+            tgt_span = tgt_anchors[i + 1] - tgt_anchors[i]
+            if src_span < src_eps and tgt_span > src_eps:
+                f_start = max(0, sec2frame(tgt_anchors[i]))
+                f_end = min(total_tgt_frames, sec2frame(tgt_anchors[i + 1]))
+                if f_end > f_start:
+                    mask[f_start:f_end] = True
+        return mask
+
     def calculate_warping_path(self, src_anchors: List[float], tgt_anchors: List[float], total_tgt_frames: int) -> torch.Tensor:
-        """计算时间映射路径。/ Compute smooth source-time mapping for target frames."""
+        """计算时间映射路径。/ Compute smooth source-time mapping for target frames.
+        
+        Degenerate anchor pairs (src_anchors[i] == src_anchors[i+1]) are
+        deduplicated before building the interpolator so that PCHIP does not
+        produce oscillation artifacts at those points.
+        """
         def sec2frame(sec: float) -> float:
             return sec * self.sample_rate / self.h.hop_size
-        
-        src_frames = np.array([sec2frame(t) for t in src_anchors])
-        tgt_frames = np.array([sec2frame(t) for t in tgt_anchors])
-        
+
+        src_frames_raw = np.array([sec2frame(t) for t in src_anchors])
+        tgt_frames_raw = np.array([sec2frame(t) for t in tgt_anchors])
+
+        # Remove degenerate src anchor pairs (zero src span) to keep PCHIP
+        # well-conditioned.  For the corresponding tgt range, the silence mask
+        # (computed separately) will override the output of warp_mel.
+        keep = np.ones(len(tgt_frames_raw), dtype=bool)
+        for i in range(len(src_frames_raw) - 1):
+            if abs(src_frames_raw[i + 1] - src_frames_raw[i]) < 0.5:  # ~0 src frames
+                # Keep the first point of the pair, drop the second duplicate
+                keep[i + 1] = False
+        src_frames = src_frames_raw[keep]
+        tgt_frames = tgt_frames_raw[keep]
+
+        # Ensure strict monotonicity in tgt dimension for PCHIP.
+        _, unique_idx = np.unique(tgt_frames, return_index=True)
+        src_frames = src_frames[unique_idx]
+        tgt_frames = tgt_frames[unique_idx]
+
         # PCHIP keeps monotonicity and avoids time-reversal artifacts.
         interpolator = PchipInterpolator(tgt_frames, src_frames)
-        
+
         grid_tgt = np.arange(total_tgt_frames)
         grid_src = interpolator(grid_tgt)
-        
+
         return torch.from_numpy(grid_src).float().to(self.device)
 
-    def warp_mel(self, source_mel: torch.Tensor, warping_path: torch.Tensor) -> torch.Tensor:
+    def warp_mel(
+        self,
+        source_mel: torch.Tensor,
+        warping_path: torch.Tensor,
+        silence_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
         使用 grid_sample 沿时间轴扭曲 Mel。/ Warp mel on time axis with grid_sample.
 
         Args:
             source_mel: 输入 Mel，形状为 (1, n_mels, src_len)。/ Input mel of shape (1, n_mels, src_len).
             warping_path: 目标帧对应源帧索引，形状为 (tgt_len,)。/ Source-frame index per target frame, shape (tgt_len,).
+            silence_mask: 可选布尔张量 (tgt_len,)，True 的帧强制置为静音。
 
         Returns:
             torch.Tensor: 扭曲后的 Mel，形状为 (1, n_mels, tgt_len)。/ Warped mel of shape (1, n_mels, tgt_len).
@@ -212,8 +277,14 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         grid = torch.cat([grid_x, grid_y], dim=-1)
 
         warped_mel = F.grid_sample(source_mel_4d, grid, mode='bicubic', padding_mode='border', align_corners=True)
+        warped_mel = warped_mel.squeeze(2)  # (1, n_mels, tgt_len)
 
-        return warped_mel.squeeze(2) # (1, n_mels, tgt_len)
+        # Zero out frames that have no source content (inserted silence).
+        if silence_mask is not None and silence_mask.any():
+            sil_val = source_mel.min().detach()  # use the quietest value as silence floor
+            warped_mel[:, :, silence_mask] = sil_val
+
+        return warped_mel
     
     @staticmethod
     def _load_phoneme_mapping(path: str) -> Dict[str, int]:
@@ -531,7 +602,8 @@ class GlobalWarpTransformer(BaseAudioTransformer):
 
         total_target_frames = max(1, int(tgt_duration * self.sample_rate / self.h.hop_size))
         warping_path = self.calculate_warping_path(src_anchors, tgt_anchors, total_target_frames)
-        final_mel = self.warp_mel(source_mel, warping_path)
+        silence_mask = self._detect_silence_mask(src_anchors, tgt_anchors, total_target_frames)
+        final_mel = self.warp_mel(source_mel, warping_path, silence_mask=silence_mask)
 
         phone_tier = tg_src.get_tier_by_name(tier_name)
         phoneme_ids = self.length_regulate_phoneme_ids(

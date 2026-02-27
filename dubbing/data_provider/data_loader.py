@@ -148,16 +148,14 @@ class Dataset_CFM_Phase1(Dataset):
 
         frames: List[pd.DataFrame] = []
         for ost_dir in self.ost_dirs:
-            candidates = [
-                ost_dir / "generated_metada.csv",
-                ost_dir / "generation_metadata.csv",
-                ost_dir / "generated_metadata.csv",
-            ]
-            csv_path = next((p for p in candidates if p.exists()), None)
-            if csv_path is None:
+            aligned_dir = self._resolve_aligned_dir(ost_dir)
+            if aligned_dir is None:
+                continue
+            csv_path = aligned_dir / "alignment_analysis.csv"
+            if not csv_path.exists():
                 continue
             df = pd.read_csv(csv_path)
-            if "mse" in df.columns:
+            if "phone_duration_deviation" in df.columns:
                 frames.append(df)
 
         if not frames:
@@ -169,19 +167,13 @@ class Dataset_CFM_Phase1(Dataset):
         if df is None:
             return samples
 
-        allowed_keys = set()
-        if "pair_key" in df.columns:
-            allowed_keys = set(df.loc[df["mse"] <= self.mse_threshold, "pair_key"].astype(str).tolist())
+        if "pair_key" in df.columns and "phone_duration_deviation" in df.columns:
+            allowed_keys = set(
+                df.loc[df["phone_duration_deviation"] <= self.mse_threshold, "pair_key"]
+                .astype(str)
+                .tolist()
+            )
             return [s for s in samples if s.pair_key in allowed_keys]
-
-        if "r1" in df.columns and "r2" in df.columns:
-            valid = df[df["mse"] <= self.mse_threshold]
-            valid_pairs = set(zip(valid["r1"].astype(str), valid["r2"].astype(str)))
-            return [
-                s
-                for s in samples
-                if (s.r1_audio.name in {p[0] for p in valid_pairs}) and (s.r2_audio.name in {p[1] for p in valid_pairs})
-            ]
 
         return samples
 
