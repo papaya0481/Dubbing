@@ -18,7 +18,7 @@ class DiTConfig:
     ff_mult: int = 4
     long_skip_connection: bool = False
     phoneme_vocab_size: int = 8194
-    lip_dim: int = 512
+    lip_dim: int = 0
     spk_dim: int | None = None
     out_channels: int | None = None
     static_chunk_size: int = 50
@@ -53,7 +53,7 @@ class LipSyncCFMConfig:
             ff_mult=getattr(dit_args, "ff_mult", 4),
             long_skip_connection=getattr(dit_args, "long_skip_connection", False),
             phoneme_vocab_size=getattr(dit_args, "phoneme_vocab_size", 72),
-            lip_dim=getattr(dit_args, "lip_dim", 512),
+            lip_dim=getattr(dit_args, "lip_dim", 0),
             spk_dim=getattr(dit_args, "spk_dim", None),
             out_channels=getattr(dit_args, "out_channels", None),
             static_chunk_size=getattr(dit_args, "static_chunk_size", 50),
@@ -151,8 +151,13 @@ class LipSyncCFM(nn.Module):
         # input_stretched_mel = stretched_mel * (1.0 - drop_mel)
         input_stretched_mel = stretched_mel
 
-        # Build phoneme condition [B, T, cond_dim]; use external cond when provided.
-        cond_input = self.estimator.phoneme_embed(phoneme_ids) if cond is None else cond
+        # Build phoneme condition [B, T, cond_dim]; zero padding positions via mask.
+        if cond is None:
+            T = clean_mel.size(2)
+            bool_mask = torch.arange(T, device=x_lens.device).unsqueeze(0) < x_lens.unsqueeze(1)  # [B, T]
+            cond_input = self.estimator.phoneme_embed(phoneme_ids, mask=bool_mask)
+        else:
+            cond_input = cond
 
         # CFG: also drop cond for the same samples (match inference unconditional branch)
         if drop_mask is not None:
@@ -223,10 +228,13 @@ class LipSyncCFM(nn.Module):
         else:
             x = stretched_mel + noise
         
-        # Build phoneme condition [B, T, cond_dim]; use external cond when provided.
-        cond_input = self.estimator.phoneme_embed(phoneme_ids) if cond is None else cond
-
-        # 时间步列表 (0 -> 1)
+        # Build phoneme condition [B, T, cond_dim]; zero padding positions via mask.
+        if cond is None:
+            T = stretched_mel.size(2)
+            bool_mask = torch.arange(T, device=x_lens.device).unsqueeze(0) < x_lens.unsqueeze(1)  # [B, T]
+            cond_input = self.estimator.phoneme_embed(phoneme_ids, mask=bool_mask)
+        else:
+            cond_input = cond
         t_span = torch.linspace(0, 1, steps + 1, device=device, dtype=stretched_mel.dtype)
         if self.t_scheduler == "cosine":
             t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)

@@ -36,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--cond_dim", type=int, default=128)
 	parser.add_argument("--mu_dim", type=int, default=80)
 	parser.add_argument("--phoneme_vocab_size", type=int, default=72)
-	parser.add_argument("--lip_dim", type=int, default=512)
+	parser.add_argument("--lip_dim", type=int, default=0)
 	parser.add_argument("--long_skip_connection", action="store_true", default=False)
 	parser.add_argument("--generate_from_noise", action="store_true", default=False, help="whether to generate from pure noise instead of stretched mel + noise")
 

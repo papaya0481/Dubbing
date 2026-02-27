@@ -30,16 +30,22 @@ class PhonemeEmbedding(nn.Module):
         self.embed = nn.Embedding(vocab_size, dim)
         self.pos_embed = ConvPositionEmbedding(dim)
 
-    def forward(self, phoneme_ids: torch.Tensor) -> torch.Tensor:
+    def forward(self, phoneme_ids: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         """
         Args:
             phoneme_ids (torch.Tensor): [B, T] long tensor of phoneme indices.
+            mask (torch.Tensor | None): [B, T] bool mask, True = valid position.
 
         Returns:
             torch.Tensor: [B, T, dim] embedding with positional encoding.
         """
         x = self.embed(phoneme_ids)   # [B, T, dim]
-        return self.pos_embed(x)      # [B, T, dim]
+        out = x + self.pos_embed(x, mask)  # [B, T, dim]
+        
+        # fill mask on out
+        if mask is not None:
+            out = out.masked_fill(~mask[:, :, None], 0.0)
+        return out
 
 
 class InputEmbedding(nn.Module):
@@ -72,7 +78,7 @@ class InputEmbedding(nn.Module):
         self.spk_dim = spk_dim
         self.lip_feat_dim = lip_feat_dim
         # Total: x + cond + mu + lips (optional) + spks (optional)
-        in_dim = mel_dim + cond_dim + mu_dim + lip_feat_dim + (spk_dim or 0)
+        in_dim = mel_dim + cond_dim + mu_dim + (spk_dim or 0)
         self.proj = nn.Linear(in_dim, dim)
         self.pos_embed = ConvPositionEmbedding(dim)
 
@@ -83,6 +89,7 @@ class InputEmbedding(nn.Module):
         mu: torch.Tensor,
         spks: torch.Tensor | None = None,
         lips: torch.Tensor | None = None,
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -91,21 +98,25 @@ class InputEmbedding(nn.Module):
             mu (torch.Tensor): Stretched mel prior [B, T, mu_dim].
             spks (torch.Tensor | None): Speaker embedding [B, spk_dim].
             lips (torch.Tensor | None): Projected lip feature [B, T, lip_feat_dim].
+            mask (torch.Tensor | None): [B, T] bool mask, True = valid position.
 
         Returns:
             torch.Tensor: [B, T, dim].
         """
         feats = [x, cond, mu]
-        if self.lip_feat_dim > 0:
-            if lips is not None:
-                feats.append(lips)
-            else:
-                feats.append(torch.zeros(*x.shape[:-1], self.lip_feat_dim, device=x.device, dtype=x.dtype))
         if self.spk_dim is not None and spks is not None:
             spk_feat = spks[:, None, :].expand(-1, x.size(1), -1)
             feats.append(spk_feat)
+            
         out = self.proj(torch.cat(feats, dim=-1))
-        return self.pos_embed(out)
+        
+        if self.lip_feat_dim > 0:
+            if lips is not None:
+                out = out + lips
+        
+        out = out.masked_fill(~mask[:, :, None], 0.0)
+        out = out + self.pos_embed(out, mask)
+        return out
 
 
 class RotaryEmbedding(nn.Module):
@@ -212,7 +223,7 @@ class LipSyncDiT(nn.Module):
         
         # New added arguments for lip-sync specific settings
         phoneme_vocab_size=72,
-        lip_dim=512,
+        lip_dim=0,
         
         # other arguments for API compatibility, not used in current implementation
         spk_dim=None,
@@ -275,7 +286,10 @@ class LipSyncDiT(nn.Module):
         # Phoneme embedding: token lookup + positional encoding -> [B, T, cond_dim].
         self.phoneme_embed = PhonemeEmbedding(phoneme_vocab_size, cond_dim)
         # Lip embedding projection (kept for compatibility; you may remove it when external cond is ready).
-        self.lip_proj = nn.Linear(lip_dim, dim)
+        if lip_dim > 0:
+            self.lip_proj = nn.Linear(lip_dim, dim)
+            nn.init.zeros_(self.lip_proj.weight)
+            nn.init.zeros_(self.lip_proj.bias)
 
         # Time-step embedding: t [B] -> [B, dim]
         self.time_embed = TimestepEmbedding(dim)
@@ -364,7 +378,13 @@ class LipSyncDiT(nn.Module):
         if t.ndim == 0:
             t = t.repeat(batch)
 
-        # 3) Encode time and fuse conditional features.
+        # 3) Normalize mask early so it can be passed to input_embed / pos_embed.
+        if mask.dim() == 1:
+            mask_bool = sequence_mask(mask, max_len=seq_len).to(x.device)
+        else:
+            mask_bool = mask.to(x.device).bool()
+
+        # 4) Encode time and fuse conditional features.
         t = self.time_embed(t)
 
         # Project lip embedding [B, T, lip_dim] -> [B, T, dim] (time-first, no transpose needed).
@@ -374,21 +394,17 @@ class LipSyncDiT(nn.Module):
             lips_feat = None
 
         # x/cond/mu/lips/(spk) -> [B, T, dim]
-        x = self.input_embed(x, cond, mu, spks, lips_feat)
+        x = self.input_embed(x, cond, mu, spks, lips_feat, mask=mask_bool)
 
-        # 4) Build RoPE for current sequence length.
+        # 5) Build RoPE for current sequence length.
         rope = self.rotary_embed.forward_from_seq_len(seq_len, device=x.device)
 
         # Cache residual for optional long skip.
         if self.long_skip_connection is not None:
             residual = x
 
-        # 5) Normalize mask format.
-        if mask.dim() == 1:
-            # Length vector -> boolean validity mask.
-            mask = sequence_mask(mask, max_len=seq_len).to(x.device)
-        else:
-            mask = mask.to(x.device).bool()
+        # 6) Attention mask (mask_bool already computed above).
+        mask = mask_bool
 
         # Build attention mask for DiT blocks.
         if streaming is True:
