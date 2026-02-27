@@ -612,9 +612,13 @@ class GlobalWarpTransformer(BaseAudioTransformer):
 
         # Try to load the words tier for word-guided phone grouping.
         # This resolves the phone-count mismatch when src/tgt differ per word.
-        words_for_anchor_src, words_for_anchor_tgt, phone_groups_src, phone_groups_tgt = (
-            self._build_phone_groups(tg_src, tg_tgt, phones_src, phones_tgt)
-        )
+        if tier_name == "phones":
+            words_for_anchor_src, words_for_anchor_tgt, phone_groups_src, phone_groups_tgt = (
+                self._build_phone_groups(tg_src, tg_tgt, phones_src, phones_tgt)
+            )
+        else:
+            words_for_anchor_src, words_for_anchor_tgt = phones_src, phones_tgt
+            phone_groups_src = phone_groups_tgt = None
 
         src_anchors, tgt_anchors = self.build_anchors(
             words_for_anchor_src, words_for_anchor_tgt,

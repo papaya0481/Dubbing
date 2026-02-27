@@ -234,26 +234,6 @@ class Dataset_CFM_Phase1(Dataset):
             mel = get_mel_spectrogram(wav, self.mel_h)
         return mel
 
-    def _build_warping_path(self, r1_tg: Path, r2_tg: Path, r1_wav: torch.Tensor, r2_wav: torch.Tensor) -> torch.Tensor:
-        tg_src = tgt.io.read_textgrid(str(r1_tg))
-        tg_tgt = tgt.io.read_textgrid(str(r2_tg))
-
-        words_src = self._warper.get_real_words(tg_src.get_tier_by_name(self.tier_name))
-        words_tgt = self._warper.get_real_words(tg_tgt.get_tier_by_name(self.tier_name))
-
-        src_duration = r1_wav.shape[-1] / self.sample_rate
-        tgt_duration = r2_wav.shape[-1] / self.sample_rate
-
-        if len(words_src) > 0 and len(words_src) == len(words_tgt):
-            src_anchors, tgt_anchors = self._warper.build_anchors(words_src, words_tgt, src_duration, tgt_duration)
-        else:
-            src_anchors, tgt_anchors = [0.0, src_duration], [0.0, tgt_duration]
-
-        total_target_frames = max(1, int(tgt_duration * self.sample_rate / self.mel_h.hop_size))
-
-        warping_path = self._warper.calculate_warping_path(src_anchors, tgt_anchors, total_target_frames)
-        return warping_path
-
     def __len__(self) -> int:
         return len(self.samples)
 
