@@ -28,9 +28,9 @@ if __name__ == "__main__":
     # test for 
     
     import tgt
-    source_tg = tgt.io.read_textgrid("/data2/ruixin/datasets/MELD_gen_pairs/sent_emo/aligned/train_dia184_utt11_r1.TextGrid")
-    target_tg = tgt.io.read_textgrid("/data2/ruixin/datasets/MELD_gen_pairs/sent_emo/aligned/train_dia184_utt11_r2.TextGrid")
-    source_wav = "/data2/ruixin/datasets/MELD_gen_pairs/sent_emo/ost/train_dia184_utt11_r1.wav"
+    source_tg = tgt.io.read_textgrid("/data2/ruixin/datasets/MELD_gen_pairs/dialog/aligned/test_dia37_row46_r1.TextGrid")
+    target_tg = tgt.io.read_textgrid("/data2/ruixin/datasets/MELD_gen_pairs/dialog/aligned/test_dia37_row46_r2.TextGrid")
+    source_wav = "/data2/ruixin/datasets/MELD_gen_pairs/dialog/ost/test_dia37_row46_r1.wav"
     transformer = GlobalWarpTransformer(use_vocoder=True, device="cpu", verbose=True)
     
     wav, sr = transformer.load_audio(source_wav)
@@ -41,6 +41,7 @@ if __name__ == "__main__":
         source_mel=mel_sorce,
         source_textgrid=source_tg,
         target_textgrid=target_tg,
+        tier_name="words",
     )
     
     print(out)
@@ -48,6 +49,11 @@ if __name__ == "__main__":
     print(transformer._reverse_phoneme_mapping(out[1]))
     print(source_tg.get_tier_by_name("phones"))
     print(target_tg.get_tier_by_name("phones"))
+    print(source_tg.get_tier_by_name("words"))
+    print(target_tg.get_tier_by_name("words"))
+    
+    # 计算对齐之间的mse
+    
     
     # 使用 vocoder 将 out[0] 转成音频，保存到文件   
     wav_out = transformer.model(out[0]).cpu().squeeze(0)
