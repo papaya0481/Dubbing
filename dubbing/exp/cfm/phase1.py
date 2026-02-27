@@ -156,7 +156,7 @@ class Exp_CFM_Phase1(Exp_Basic):
 			self.model.load_state_dict(state["model"], strict=False)
 			logger.info(f"Loaded checkpoint: {best_ckpt_path}")
 
-		logger.debug(f"Model structure:\n{self.model}")
+		# logger.debug(f"Model structure:\n{self.model}")
 
 		test_loss = self._run_one_epoch(test_loader, train=False, stage="Test")
 		logger.info(f"Test loss: {test_loss:.6f}")

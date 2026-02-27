@@ -173,7 +173,15 @@ class Dataset_CFM_Phase1(Dataset):
                 .astype(str)
                 .tolist()
             )
-            return [s for s in samples if s.pair_key in allowed_keys]
+            before = len(samples)
+            filtered = [s for s in samples if s.pair_key in allowed_keys]
+            after = len(filtered)
+            logger.info(
+                f"Filter (phone_duration_deviation <= {self.mse_threshold}): "
+                f"{before} -> {after} samples "
+                f"(removed {before - after}, kept {after / before * 100:.1f}%)"
+            )
+            return filtered
 
         return samples
 

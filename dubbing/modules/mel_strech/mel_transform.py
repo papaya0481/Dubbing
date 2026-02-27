@@ -591,7 +591,7 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         def _as_textgrid(x: Union[str, Path, tgt.TextGrid]) -> tgt.TextGrid:
             if isinstance(x, tgt.TextGrid):
                 return x
-            return tgt.io.read_textgrid(str(x), include_empty_intervals=True)
+            return tgt.io.read_textgrid(str(x))
 
         def _duration_from_tier(tier: tgt.IntervalTier) -> float:
             if len(tier) == 0:
