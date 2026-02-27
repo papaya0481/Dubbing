@@ -9,6 +9,4 @@ accelerate launch dubbing/run.py \
     --batch_size 8 \
     --learning_rate 2e-4 \
     --log_level DEBUG \
-    --generate_from_noise \
-    --training_temperature 1.0 \
     --data_root /data2/ruixin/datasets/MELD_gen_pairs
