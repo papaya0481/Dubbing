@@ -46,16 +46,34 @@ def test_with_args():
     vocoder = bigvgan.BigVGAN.from_pretrained("nvidia/bigvgan_v2_22khz_80band_256x")
     # 测试 vocoder 将x0, x1 转成音频
     x0 = batch["x0"]  # (B, 80, T)
-    x1 = batch["x1"]  # (B, 80, T)
+    x1 = batch["x1"] # (B, 80, T)
+    xmean = batch["x_mean"][:, None, None]  # (B, 1, 1)
+    xstd = batch["x_std"][:, None, None]   # (B, 1, 1
+    # 测试中间态，模拟 CFM 可能对 x0 进行的处理，例如加噪声、时间拉伸等，看看对音质的影响
+    xz = x0 + 0.1 * torch.randn_like(x0)  # 模拟加噪声
+    t = 0.2
+    xt = (1-t) * x0 + t * x1  # 模拟时间拉伸后的特征
+    
+    # 做 reverse 归一化
+    x0 = x0 * xstd + xmean
+    x1 = x1 * xstd + xmean
+    xz = xz * xstd + xmean
+    xt = xt * xstd + xmean
     with torch.no_grad():
         wav_x0 = vocoder(x0[max_mse_index:max_mse_index+1].cpu())  # input: (1, 80, T) -> output: (1, 1, T)
         wav_x1 = vocoder(x1[max_mse_index:max_mse_index+1].cpu())
+        wav_xz = vocoder(xz[max_mse_index:max_mse_index+1].cpu())
+        wav_xt = vocoder(xt[max_mse_index:max_mse_index+1].cpu())
     print(wav_x0.shape)
     print(wav_x1.shape)
+    print(wav_xz.shape)
+    print(wav_xt.shape) 
     # 可以使用 torchaudio 保存 wav_x0, wav_x1 到文件，检查音质
     import torchaudio
     torchaudio.save("test_x0.wav", wav_x0.squeeze(0), 22050)
     torchaudio.save("test_x1.wav", wav_x1.squeeze(0), 22050)
+    torchaudio.save("test_xz.wav", wav_xz.squeeze(0), 22050)
+    torchaudio.save("test_xt.wav", wav_xt.squeeze(0), 22050)
     
     
 

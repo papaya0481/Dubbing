@@ -28,9 +28,9 @@ if __name__ == "__main__":
     # test for 
     
     import tgt
-    source_tg = tgt.io.read_textgrid("mel_convert/test/aligned/test_short1_1.TextGrid")
-    target_tg = tgt.io.read_textgrid("mel_convert/test/aligned/test_short_gt.TextGrid")
-    source_wav = "mel_convert/test/test_short1_1.wav"
+    source_tg = tgt.io.read_textgrid("/data2/ruixin/datasets/MELD_gen_pairs/sent_emo/aligned/train_dia184_utt11_r1.TextGrid")
+    target_tg = tgt.io.read_textgrid("/data2/ruixin/datasets/MELD_gen_pairs/sent_emo/aligned/train_dia184_utt11_r2.TextGrid")
+    source_wav = "/data2/ruixin/datasets/MELD_gen_pairs/sent_emo/ost/train_dia184_utt11_r1.wav"
     transformer = GlobalWarpTransformer(use_vocoder=True, device="cpu", verbose=True)
     
     wav, sr = transformer.load_audio(source_wav)

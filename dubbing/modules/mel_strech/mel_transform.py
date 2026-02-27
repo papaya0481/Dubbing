@@ -289,6 +289,74 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         tgt_anchors.append(tgt_time)
         src_anchors.append(src_time)
 
+    def _group_phones_by_words(
+        self,
+        phones: List[tgt.Interval],
+        words: List[tgt.Interval],
+    ) -> List[List[tgt.Interval]]:
+        """将音素列表按照单词边界分组。/ Group phone intervals into per-word buckets.
+        
+        Args:
+            phones: 音素区间列表（phoneme tier 中的有效区间）。
+            words:  单词区间列表（words tier 中的有效区间）。
+
+        Returns:
+            与 words 等长的列表，每个元素是属于该单词的音素区间列表。
+        """
+        groups: List[List[tgt.Interval]] = [[] for _ in words]
+        for phone in phones:
+            p_mid = (phone.start_time + phone.end_time) / 2.0
+            for i, word in enumerate(words):
+                if word.start_time - 1e-6 <= p_mid <= word.end_time + 1e-6:
+                    groups[i].append(phone)
+                    break
+        return groups
+
+    def _build_phone_groups(
+        self,
+        tg_src: tgt.TextGrid,
+        tg_tgt: tgt.TextGrid,
+        phones_src: List[tgt.Interval],
+        phones_tgt: List[tgt.Interval],
+    ) -> Tuple[
+        List[tgt.Interval],          # words_for_anchor_src
+        List[tgt.Interval],          # words_for_anchor_tgt
+        Optional[List[List[tgt.Interval]]],  # phone_groups_src
+        Optional[List[List[tgt.Interval]]],  # phone_groups_tgt
+    ]:
+        """尝试从 words tier 构建 word-guided phone groups。
+
+        成功时返回按 word 分组的 phone groups；
+        失败（tier 不存在或 word 数不匹配）时退回到直接以 phone interval 作为 anchor 列表。
+
+        Returns:
+            (words_for_anchor_src, words_for_anchor_tgt,
+             phone_groups_src, phone_groups_tgt)
+        """
+        try:
+            words_tier_src = tg_src.get_tier_by_name("words")
+            words_tier_tgt = tg_tgt.get_tier_by_name("words")
+            real_words_src = self.get_real_words(words_tier_src)
+            real_words_tgt = self.get_real_words(words_tier_tgt)
+            if len(real_words_src) == len(real_words_tgt) and len(real_words_src) > 0:
+                pg_src = self._group_phones_by_words(phones_src, real_words_src)
+                pg_tgt = self._group_phones_by_words(phones_tgt, real_words_tgt)
+                logger.debug(
+                    f"Word-guided anchor mode: {len(real_words_src)} words, "
+                    f"src phones={len(phones_src)}, tgt phones={len(phones_tgt)}"
+                )
+                return real_words_src, real_words_tgt, pg_src, pg_tgt
+            else:
+                logger.warning(
+                    f"Words tier count mismatch (src={len(real_words_src)}, "
+                    f"tgt={len(real_words_tgt)}); falling back to direct phone zip."
+                )
+        except Exception:
+            logger.debug("'words' tier not found; using direct phoneme-level zip for anchors.")
+
+        # Fallback: treat individual phone intervals as anchor units
+        return phones_src, phones_tgt, None, None
+
     def build_anchors(
         self,
         words_src: List[tgt.Interval],
@@ -296,14 +364,55 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         src_duration: float,
         tgt_duration: float,
         eps: float = 1e-4,
+        phone_groups_src: Optional[List[List[tgt.Interval]]] = None,
+        phone_groups_tgt: Optional[List[List[tgt.Interval]]] = None,
     ) -> Tuple[List[float], List[float]]:
-        """构建单调关键点。/ Build monotonic source/target anchors from aligned words."""
+        """构建单调关键点。/ Build monotonic source/target anchors from aligned words.
+        
+        当 phone_groups_src / phone_groups_tgt 均不为 None 时，对每个 word pair 尝试
+        音素级对齐：
+          - 若该 word 内 src/tgt 音素数量相同 → 逐 phoneme 添加 anchor。
+          - 若数量不同                         → 退回到 word 边界 anchor，避免错位。
+        """
         src_anchors = [0.0]
         tgt_anchors = [0.0]
 
-        for w_src, w_tgt in zip(words_src, words_tgt):
-            self._append_monotonic_anchor(src_anchors, tgt_anchors, w_src.start_time, w_tgt.start_time, eps=eps)
-            self._append_monotonic_anchor(src_anchors, tgt_anchors, w_src.end_time, w_tgt.end_time, eps=eps)
+        use_phones = phone_groups_src is not None and phone_groups_tgt is not None
+
+        for idx, (w_src, w_tgt) in enumerate(zip(words_src, words_tgt)):
+            phones_aligned = False
+            if use_phones:
+                pg_src = phone_groups_src[idx]
+                pg_tgt = phone_groups_tgt[idx]
+                if len(pg_src) > 0 and len(pg_src) == len(pg_tgt):
+                    # 音素数目匹配 → phone-level anchors
+                    for p_src, p_tgt in zip(pg_src, pg_tgt):
+                        self._append_monotonic_anchor(
+                            src_anchors, tgt_anchors,
+                            p_src.start_time, p_tgt.start_time, eps=eps
+                        )
+                        self._append_monotonic_anchor(
+                            src_anchors, tgt_anchors,
+                            p_src.end_time, p_tgt.end_time, eps=eps
+                        )
+                    phones_aligned = True
+                else:
+                    logger.debug(
+                        f"Word '{w_src.text}': phone count mismatch "
+                        f"(src={len(pg_src)}, tgt={len(pg_tgt)}), "
+                        f"falling back to word-level anchor."
+                    )
+
+            if not phones_aligned:
+                # word-level boundary anchors
+                self._append_monotonic_anchor(
+                    src_anchors, tgt_anchors,
+                    w_src.start_time, w_tgt.start_time, eps=eps
+                )
+                self._append_monotonic_anchor(
+                    src_anchors, tgt_anchors,
+                    w_src.end_time, w_tgt.end_time, eps=eps
+                )
 
         if tgt_anchors[-1] < tgt_duration - eps:
             tgt_anchors.append(tgt_duration)
@@ -393,7 +502,7 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         def _duration_from_tier(tier: tgt.IntervalTier) -> float:
             if len(tier) == 0:
                 return 0.0
-            return max(iv.end_time for iv in tier)
+            return tier.end_time
 
         tg_src = _as_textgrid(source_textgrid)
         tg_tgt = _as_textgrid(target_textgrid)
@@ -401,13 +510,24 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         tier_src = tg_src.get_tier_by_name(tier_name)
         tier_tgt = tg_tgt.get_tier_by_name(tier_name)
 
-        words_src = self.get_real_words(tier_src)
-        words_tgt = self.get_real_words(tier_tgt)
+        phones_src = self.get_real_words(tier_src)  # valid phoneme intervals
+        phones_tgt = self.get_real_words(tier_tgt)
 
         src_duration = _duration_from_tier(tier_src)
         tgt_duration = _duration_from_tier(tier_tgt)
 
-        src_anchors, tgt_anchors = self.build_anchors(words_src, words_tgt, src_duration, tgt_duration)
+        # Try to load the words tier for word-guided phone grouping.
+        # This resolves the phone-count mismatch when src/tgt differ per word.
+        words_for_anchor_src, words_for_anchor_tgt, phone_groups_src, phone_groups_tgt = (
+            self._build_phone_groups(tg_src, tg_tgt, phones_src, phones_tgt)
+        )
+
+        src_anchors, tgt_anchors = self.build_anchors(
+            words_for_anchor_src, words_for_anchor_tgt,
+            src_duration, tgt_duration,
+            phone_groups_src=phone_groups_src,
+            phone_groups_tgt=phone_groups_tgt,
+        )
 
         total_target_frames = max(1, int(tgt_duration * self.sample_rate / self.h.hop_size))
         warping_path = self.calculate_warping_path(src_anchors, tgt_anchors, total_target_frames)
