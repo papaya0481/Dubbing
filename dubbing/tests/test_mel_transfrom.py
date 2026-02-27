@@ -28,9 +28,9 @@ if __name__ == "__main__":
     # test for 
     
     import tgt
-    source_tg = tgt.io.read_textgrid("/data2/ruixin/datasets/MELD_gen_pairs/dialog/aligned/test_dia37_row46_r1.TextGrid")
-    target_tg = tgt.io.read_textgrid("/data2/ruixin/datasets/MELD_gen_pairs/dialog/aligned/test_dia37_row46_r2.TextGrid")
-    source_wav = "/data2/ruixin/datasets/MELD_gen_pairs/dialog/ost/test_dia37_row46_r1.wav"
+    source_tg = tgt.io.read_textgrid("/home/ruixin/Dubbing/mel_convert/test/aligned/test_short1_1.TextGrid", include_empty_intervals=True)
+    target_tg = tgt.io.read_textgrid("/home/ruixin/Dubbing/mel_convert/test/aligned/test_short_gt.TextGrid", include_empty_intervals=True)
+    source_wav = "/home/ruixin/Dubbing/mel_convert/test/test_short1_1.wav"
     transformer = GlobalWarpTransformer(use_vocoder=True, device="cpu", verbose=True)
     
     wav, sr = transformer.load_audio(source_wav)
@@ -41,7 +41,7 @@ if __name__ == "__main__":
         source_mel=mel_sorce,
         source_textgrid=source_tg,
         target_textgrid=target_tg,
-        tier_name="words",
+        tier_name="phones",
     )
     
     print(out)
