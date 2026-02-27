@@ -1,5 +1,6 @@
 import os
 import torch
+import json
 from logger import get_logger
 
 
@@ -49,6 +50,14 @@ class Exp_Basic(object):
             )
         else:
             raise ValueError(f"Unknown lr_scheduler '{sched_type}'. Choose 'linear' or 'cosine'.")
+        
+    def _save_args(self, path):
+        # 保存训练配置
+        args_path = os.path.join(path, "args.json")
+        with open(args_path, "w", encoding="utf-8") as f:
+            json.dump(vars(self.args), f, indent=2, default=str)
+        logger.info(f"Args saved to: {args_path}")
+
 
     def _get_data(self):
         pass

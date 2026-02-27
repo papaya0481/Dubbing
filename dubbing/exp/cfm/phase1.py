@@ -84,7 +84,8 @@ class Exp_CFM_Phase1(Exp_Basic):
 		ckpt_dir = os.path.join(self.args.checkpoints, setting)
 		os.makedirs(ckpt_dir, exist_ok=True)
 		self.best_ckpt_path = os.path.join(ckpt_dir, "best.pth")
-
+		self._save_args(ckpt_dir)
+  
 		self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.args.learning_rate, weight_decay=self.args.weight_decay)
 		self.scheduler = self._build_scheduler(self.optimizer)
 
