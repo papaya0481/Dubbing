@@ -309,36 +309,57 @@ class GlobalWarpTransformer(BaseAudioTransformer):
     def length_regulate_phoneme_ids(
         self,
         source_phone_tier: tgt.IntervalTier,
-        source_total_frames: int,
-        warping_path: torch.Tensor,
+        total_tgt_frames: int,
+        src_anchors: List[float],
+        tgt_anchors: List[float],
         pad_id: int = 0,
     ) -> torch.Tensor:
-        """Build frame-level phoneme IDs on warped timeline.
+        """Build frame-level phoneme IDs on the TARGET timeline using SOURCE phone intervals.
 
-        1) Convert source phone intervals to source frame IDs.
-        2) Sample source frame IDs by warping path to get target frame IDs.
+        Each source phone interval is forward-mapped to target time via the
+        anchor-derived src→tgt interpolator, then the corresponding target
+        frame range is filled with that phone's id.
+
+        Args:
+            source_phone_tier: Phone intervals from the source TextGrid.
+            total_tgt_frames: Total number of target mel frames.
+            src_anchors: Source time anchor points (seconds).
+            tgt_anchors: Corresponding target time anchor points (seconds).
+            pad_id: Id to use for frames not covered by any phone interval.
+
+        Returns:
+            torch.LongTensor of shape (total_tgt_frames,).
         """
-        src_ids = torch.full((source_total_frames,), int(pad_id), dtype=torch.long)
+        tgt_ids = torch.full((total_tgt_frames,), int(pad_id), dtype=torch.long)
 
         def sec2frame(sec: float) -> int:
             return int(round(sec * self.sample_rate / self.h.hop_size))
 
+        # Build forward src→tgt interpolator from anchors.
+        src_times = np.array(src_anchors, dtype=float)
+        tgt_times = np.array(tgt_anchors, dtype=float)
+
+        # Deduplicate on the src axis so PchipInterpolator gets strictly increasing input.
+        _, unique_idx = np.unique(src_times, return_index=True)
+        src_u = src_times[unique_idx]
+        tgt_u = tgt_times[unique_idx]
+
+        src2tgt = PchipInterpolator(src_u, tgt_u)
+
         for interval in source_phone_tier:
             token = (interval.text or "").strip()
-            if token == "":
-                continue
-
             token_norm = token if token in self.phoneme_mapping else token.upper()
             token_id = int(self.phoneme_mapping.get(token_norm, pad_id))
 
-            s = max(0, min(source_total_frames, sec2frame(interval.start_time)))
-            e = max(s, min(source_total_frames, sec2frame(interval.end_time)))
-            if e > s:
-                src_ids[s:e] = token_id
+            # Map source interval boundaries to target time.
+            tgt_start = float(src2tgt(interval.start_time))
+            tgt_end   = float(src2tgt(interval.end_time))
 
-        src_idx = torch.round(warping_path).long()
-        src_idx = torch.clamp(src_idx, min=0, max=max(0, source_total_frames - 1))
-        tgt_ids = src_ids[src_idx]
+            f_start = max(0, min(total_tgt_frames, sec2frame(tgt_start)))
+            f_end   = max(f_start, min(total_tgt_frames, sec2frame(tgt_end)))
+            if f_end > f_start:
+                tgt_ids[f_start:f_end] = token_id
+
         return tgt_ids
 
     def _append_monotonic_anchor(
@@ -568,7 +589,7 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         def _as_textgrid(x: Union[str, Path, tgt.TextGrid]) -> tgt.TextGrid:
             if isinstance(x, tgt.TextGrid):
                 return x
-            return tgt.io.read_textgrid(str(x))
+            return tgt.io.read_textgrid(str(x), include_empty_intervals=True)
 
         def _duration_from_tier(tier: tgt.IntervalTier) -> float:
             if len(tier) == 0:
@@ -608,8 +629,9 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         phone_tier = tg_src.get_tier_by_name(tier_name)
         phoneme_ids = self.length_regulate_phoneme_ids(
             source_phone_tier=phone_tier,
-            source_total_frames=source_mel.shape[-1],
-            warping_path=warping_path,
+            total_tgt_frames=total_target_frames,
+            src_anchors=src_anchors,
+            tgt_anchors=tgt_anchors,
             pad_id=pad_id,
         )
         return final_mel, phoneme_ids
