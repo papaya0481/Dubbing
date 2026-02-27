@@ -433,16 +433,17 @@ class GlobalWarpTransformer(BaseAudioTransformer):
             if len(real_words_src) == len(real_words_tgt) and len(real_words_src) > 0:
                 pg_src = self._group_phones_by_words(phones_src, real_words_src)
                 pg_tgt = self._group_phones_by_words(phones_tgt, real_words_tgt)
-                logger.debug(
-                    f"Word-guided anchor mode: {len(real_words_src)} words, "
-                    f"src phones={len(phones_src)}, tgt phones={len(phones_tgt)}"
-                )
+                # logger.debug(
+                #     f"Word-guided anchor mode: {len(real_words_src)} words, "
+                #     f"src phones={len(phones_src)}, tgt phones={len(phones_tgt)}"
+                # )
                 return real_words_src, real_words_tgt, pg_src, pg_tgt
             else:
-                logger.warning(
-                    f"Words tier count mismatch (src={len(real_words_src)}, "
-                    f"tgt={len(real_words_tgt)}); falling back to direct phone zip."
-                )
+                # logger.warning(
+                #     f"Words tier count mismatch (src={len(real_words_src)}, "
+                #     f"tgt={len(real_words_tgt)}); falling back to direct phone zip."
+                # )
+                pass
         except Exception:
             logger.debug("'words' tier not found; using direct phoneme-level zip for anchors.")
 
@@ -489,11 +490,12 @@ class GlobalWarpTransformer(BaseAudioTransformer):
                         )
                     phones_aligned = True
                 else:
-                    logger.debug(
-                        f"Word '{w_src.text}': phone count mismatch "
-                        f"(src={len(pg_src)}, tgt={len(pg_tgt)}), "
-                        f"falling back to word-level anchor."
-                    )
+                    # logger.debug(
+                    #     f"Word '{w_src.text}': phone count mismatch "
+                    #     f"(src={len(pg_src)}, tgt={len(pg_tgt)}), "
+                    #     f"falling back to word-level anchor."
+                    # )
+                    pass
 
             if not phones_aligned:
                 # word-level boundary anchors
