@@ -60,6 +60,8 @@ def build_parser() -> argparse.ArgumentParser:
 		help="ReduceLROnPlateau: epochs with no improvement before reducing lr")
 	parser.add_argument("--lr_min", type=float, default=1e-5,
 		help="ReduceLROnPlateau: minimum lr")
+	parser.add_argument("--lr_scheduler", type=str, default="cosine", choices=["linear", "cosine"],
+		help="learning rate scheduler type (linear or cosine)")
 	parser.add_argument("--early_stop_patience", type=int, default=10,
 		help="stop training after this many epochs with no val improvement")
 

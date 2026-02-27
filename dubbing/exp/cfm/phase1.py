@@ -86,16 +86,7 @@ class Exp_CFM_Phase1(Exp_Basic):
 		self.best_ckpt_path = os.path.join(ckpt_dir, "best.pth")
 
 		self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.args.learning_rate, weight_decay=self.args.weight_decay)
-		lr_min = getattr(self.args, 'lr_min', 1e-5)
-		end_factor = lr_min
-  
-		logger.info(f"Using LinearLR scheduler with end_factor={end_factor:.2e} over {self.args.train_epochs} epochs")
-		self.scheduler = torch.optim.lr_scheduler.LinearLR(
-			self.optimizer,
-			start_factor=1.0,
-			end_factor=end_factor,
-			total_iters=self.args.train_epochs,
-		)
+		self.scheduler = self._build_scheduler(self.optimizer)
 
 		best_val = float("inf")
 		stale_epochs = 0
