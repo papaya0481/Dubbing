@@ -74,7 +74,7 @@ class PhonemeEmbedding(nn.Module):
             dim (int): Output embedding dimension.
         """
         super().__init__()
-        self.embed = nn.Embedding(vocab_size + 1, dim)  # will use 0 as padding (drop out token)  
+        self.embed = nn.Embedding(vocab_size, dim)  # will use 0 as padding (drop out token)  
         self.pos_embed = ConvPositionEmbedding(dim)
 
     def forward(self, phoneme_ids: torch.Tensor, mask: torch.Tensor | None = None, cfg_mask: torch.Tensor | None = None) -> torch.Tensor:
@@ -90,15 +90,8 @@ class PhonemeEmbedding(nn.Module):
             torch.Tensor: [B, T, dim] embedding with positional encoding.
         """
         B, T = phoneme_ids.shape
-        phoneme_ids = phoneme_ids + 1  # shift by 1 to reserve 0 for dropout
         # padding 0 for mask = False, 
         phoneme_ids = phoneme_ids.masked_fill(~mask, 0) if mask is not None else phoneme_ids
-        
-        if cfg_mask is not None:
-            if cfg_mask.dtype == torch.float:
-                phoneme_ids = phoneme_ids * cfg_mask
-            else:
-                raise ValueError("cfg_mask should be of type torch.float for proper masking of phoneme_ids.")
         
         phoneme_ids = phoneme_ids.long()
         x = self.embed(phoneme_ids)   # [B, T, dim]
@@ -107,6 +100,12 @@ class PhonemeEmbedding(nn.Module):
         # fill mask on out
         if mask is not None:
             out = out.masked_fill(~mask[:, :, None], 0.0)
+            
+        if cfg_mask is not None:
+            if cfg_mask.dtype == torch.float:
+                out = out * cfg_mask
+            else:
+                raise ValueError("cfg_mask should be of type torch.float for proper masking of phoneme_ids.")
         return out
 
 

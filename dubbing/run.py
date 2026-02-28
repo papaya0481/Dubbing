@@ -132,7 +132,8 @@ if __name__ == "__main__":
 		# use date + hash as default exp_name to avoid overwriting previous results
 		import datetime
 		import hashlib
-		args.exp_name = datetime.datetime.now().strftime("%m%d%H") + "_" + hashlib.md5(str(args).encode()).hexdigest()[:4]
+		time_now = datetime.datetime.now().strftime("%m%d%H")
+		args.exp_name = time_now + "_" + hashlib.md5((str(args) + str(time_now)).encode()).hexdigest()[:4]
 
 	if args.is_training:
 		for ii in range(args.itr):
@@ -143,7 +144,7 @@ if __name__ == "__main__":
 			logger.info(f"Start training: {setting}")
 			exp.train(setting)
 			logger.info(f"Testing: {setting}")
-			exp.test(setting)
+			exp.test(setting, test=1)
 			torch.cuda.empty_cache()
 	else:
 		setting_parts = [args.model_id, args.model, args.exp_name, 0]

@@ -32,6 +32,10 @@ class CFMConfig:
     inference_cfg_rate: float = 0.5
     training_temperature: float = 0.2
     generate_from_noise: bool = False  # 是否从纯噪声开始生成（而不是拉伸Mel + 噪声）
+    
+    # logit normal params
+    logit_loc: float = 0.0
+    logit_scale: float = 1.0
 
 
 @dataclass
@@ -66,6 +70,8 @@ class LipSyncCFMConfig:
             training_cfg_rate=getattr(cfm_args, "training_cfg_rate", 0.1),
             inference_cfg_rate=getattr(cfm_args, "inference_cfg_rate", 0.5),
             training_temperature=getattr(cfm_args, "training_temperature", 0.2),
+            logit_loc=getattr(cfm_args, "logit_loc", 0.0),
+            logit_scale=getattr(cfm_args, "logit_scale", 1.0),
         )
 
         return cls(DiT=dit_cfg, CFM=cfm_cfg)
@@ -87,6 +93,8 @@ class LipSyncCFM(nn.Module):
         self.inference_cfg_rate = cfm_cfg.inference_cfg_rate
         self.training_temperature = cfm_cfg.training_temperature
         self.generate_from_noise = cfm_cfg.generate_from_noise
+        self.logit_loc = cfm_cfg.logit_loc
+        self.logit_scale = cfm_cfg.logit_scale
 
         self.criterion = nn.MSELoss()
 
@@ -156,7 +164,7 @@ class LipSyncCFM(nn.Module):
         position_bool_mask = torch.arange(T, device=x_lens.device).unsqueeze(0) < x_lens.unsqueeze(1)  # [B, T]
         if cond is None:
             T = clean_mel.size(2)
-            cond_input = self.estimator.phoneme_embed(phoneme_ids, mask=position_bool_mask, cfg_mask=cfg_mask.view(-1, 1))
+            cond_input = self.estimator.phoneme_embed(phoneme_ids, mask=position_bool_mask, cfg_mask=cfg_mask)
         else:
             cond_input = cond
 
