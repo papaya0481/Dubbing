@@ -7,9 +7,56 @@ from .attn import (
     DiTBlock,
     ConvPositionEmbedding,
     TimestepEmbedding,
+    ConvNeXtV2Block,
     precompute_freqs_cis,
     sequence_mask,
+    get_pos_embed_indices,
 )
+
+class PhonemeEmbeddingForConvNet(nn.Module):
+    """
+    A wrapper around PhonemeEmbedding that applies dropout to the phoneme embeddings during training.
+
+    This is used to implement classifier-free guidance (CFG) by randomly dropping the phoneme condition.
+    """
+
+    def __init__(self, vocab_size: int, dim: int, dropout_rate: float = 0.1, conv_layers: int = 0, conv_mult: int = 2):
+        super().__init__()
+        self.phoneme_embed = nn.Embedding(vocab_size + 1, dim)  # will use 0 as padding (drop out token)
+        self.dropout_rate = dropout_rate
+        if conv_layers > 0:
+            self.extra_modeling = True
+            self.precompute_max_pos = 4096  # ~44s of 24khz audio
+            self.register_buffer("freqs_cis", precompute_freqs_cis(vocab_size, self.precompute_max_pos), persistent=False)
+            self.text_blocks = nn.Sequential(
+                *[ConvNeXtV2Block(vocab_size, vocab_size * conv_mult) for _ in range(conv_layers)]
+            )
+        else:
+            self.extra_modeling = False
+
+
+    def forward(self, phoneme_ids: torch.Tensor, mask: torch.Tensor | None = None, drop_mask: torch.Tensor | None = None) -> torch.Tensor:
+        B, T = phoneme_ids.shape
+        phoneme_ids = phoneme_ids + 1  # shift by 1 to reserve 0 for dropout
+        # padding 0 for mask = False, 
+        phoneme_ids = phoneme_ids.masked_fill(~mask, 0) if mask is not None else phoneme_ids
+        
+        if drop_mask is not None:
+            phoneme_ids = phoneme_ids.masked_fill(drop_mask.bool(), 0)
+            
+        phoneme_embeds = self.phoneme_embed(phoneme_ids, mask)  # [B, T, dim]
+        
+        # possible extra modeling
+        if self.extra_modeling:
+            # sinus pos emb
+            batch_start = torch.zeros((B,), dtype=torch.long)
+            pos_idx = get_pos_embed_indices(batch_start, T, max_pos=self.precompute_max_pos)
+            text_pos_embed = self.freqs_cis[pos_idx]
+            phoneme_embeds = phoneme_embeds + text_pos_embed
+
+            # convnextv2 blocks
+            phoneme_embeds = self.text_blocks(phoneme_embeds)
+        return phoneme_embeds
 
 
 class PhonemeEmbedding(nn.Module):
@@ -27,11 +74,14 @@ class PhonemeEmbedding(nn.Module):
             dim (int): Output embedding dimension.
         """
         super().__init__()
-        self.embed = nn.Embedding(vocab_size, dim)
+        self.embed = nn.Embedding(vocab_size + 1, dim)  # will use 0 as padding (drop out token)  
         self.pos_embed = ConvPositionEmbedding(dim)
 
-    def forward(self, phoneme_ids: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, phoneme_ids: torch.Tensor, mask: torch.Tensor | None = None, cfg_mask: torch.Tensor | None = None) -> torch.Tensor:
         """
+        Padding and dropout are applied to the input phoneme ids before embedding. Padding for 
+        dropout is done by setting the dropped positions to 0. 
+        
         Args:
             phoneme_ids (torch.Tensor): [B, T] long tensor of phoneme indices.
             mask (torch.Tensor | None): [B, T] bool mask, True = valid position.
@@ -39,6 +89,18 @@ class PhonemeEmbedding(nn.Module):
         Returns:
             torch.Tensor: [B, T, dim] embedding with positional encoding.
         """
+        B, T = phoneme_ids.shape
+        phoneme_ids = phoneme_ids + 1  # shift by 1 to reserve 0 for dropout
+        # padding 0 for mask = False, 
+        phoneme_ids = phoneme_ids.masked_fill(~mask, 0) if mask is not None else phoneme_ids
+        
+        if cfg_mask is not None:
+            if cfg_mask.dtype == torch.float:
+                phoneme_ids = phoneme_ids * cfg_mask
+            else:
+                raise ValueError("cfg_mask should be of type torch.float for proper masking of phoneme_ids.")
+        
+        phoneme_ids = phoneme_ids.long()
         x = self.embed(phoneme_ids)   # [B, T, dim]
         out = x + self.pos_embed(x, mask)  # [B, T, dim]
         

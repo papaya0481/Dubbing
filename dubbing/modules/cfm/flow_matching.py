@@ -152,16 +152,13 @@ class LipSyncCFM(nn.Module):
         input_stretched_mel = stretched_mel * cfg_mask
 
         # Build phoneme condition [B, T, cond_dim]; zero padding positions via mask.
+        # CFG: also drop cond for the same samples (match inference unconditional branch)
         position_bool_mask = torch.arange(T, device=x_lens.device).unsqueeze(0) < x_lens.unsqueeze(1)  # [B, T]
         if cond is None:
             T = clean_mel.size(2)
-            cond_input = self.estimator.phoneme_embed(phoneme_ids, mask=position_bool_mask)
+            cond_input = self.estimator.phoneme_embed(phoneme_ids, mask=position_bool_mask, cfg_mask=cfg_mask.view(-1, 1))
         else:
             cond_input = cond
-
-        # CFG: also drop cond for the same samples (match inference unconditional branch)
-        if cfg_mask is not None:
-            cond_input = cond_input * cfg_mask
 
         # -------------------------------------------------------
         # 5. 模型预测

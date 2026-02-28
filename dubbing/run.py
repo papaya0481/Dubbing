@@ -41,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--generate_from_noise", action="store_true", default=False, help="whether to generate from pure noise instead of stretched mel + noise")
 
 	parser.add_argument("--t_scheduler", type=str, default="linear", choices=["linear", "cosine"])
-	parser.add_argument("--training_cfg_rate", type=float, default=0.1)
+	parser.add_argument("--training_cfg_rate", type=float, default=0.2)
 	parser.add_argument("--inference_cfg_rate", type=float, default=0.7)
 	parser.add_argument("--training_temperature", type=float, default=0.1, help="noise scale added to stretched mel during training")
 	parser.add_argument("--inference_steps", type=int, default=25, help="number of Euler steps for inference")
