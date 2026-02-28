@@ -20,10 +20,9 @@ class PhonemeEmbeddingForConvNet(nn.Module):
     This is used to implement classifier-free guidance (CFG) by randomly dropping the phoneme condition.
     """
 
-    def __init__(self, vocab_size: int, dim: int, dropout_rate: float = 0.1, conv_layers: int = 0, conv_mult: int = 2):
+    def __init__(self, vocab_size: int, dim: int, conv_layers: int = 0, conv_mult: int = 2):
         super().__init__()
         self.phoneme_embed = nn.Embedding(vocab_size + 1, dim)  # will use 0 as padding (drop out token)
-        self.dropout_rate = dropout_rate
         if conv_layers > 0:
             self.extra_modeling = True
             self.precompute_max_pos = 4096  # ~44s of 24khz audio
@@ -35,14 +34,15 @@ class PhonemeEmbeddingForConvNet(nn.Module):
             self.extra_modeling = False
 
 
-    def forward(self, phoneme_ids: torch.Tensor, mask: torch.Tensor | None = None, drop_mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, phoneme_ids: torch.Tensor, mask: torch.Tensor | None = None, cfg_mask: torch.Tensor | None = None) -> torch.Tensor:
         B, T = phoneme_ids.shape
         phoneme_ids = phoneme_ids + 1  # shift by 1 to reserve 0 for dropout
         # padding 0 for mask = False, 
         phoneme_ids = phoneme_ids.masked_fill(~mask, 0) if mask is not None else phoneme_ids
         
-        if drop_mask is not None:
-            phoneme_ids = phoneme_ids.masked_fill(drop_mask.bool(), 0)
+        if cfg_mask is not None:
+            phoneme_ids = phoneme_ids * cfg_mask
+            phoneme_ids = phoneme_ids.long()
             
         phoneme_embeds = self.phoneme_embed(phoneme_ids, mask)  # [B, T, dim]
         
