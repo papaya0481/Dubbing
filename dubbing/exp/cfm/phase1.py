@@ -92,6 +92,7 @@ class Exp_CFM_Phase1(Exp_Basic):
 		best_val = float("inf")
 		stale_epochs = 0
 		early_stop_patience = getattr(self.args, 'early_stop_patience', 8)
+		self.epoch_logs = []
 
 		logger.info(f"Train samples: {len(train_data)} | Val samples: {len(val_data)} | Test samples: {len(test_data)}")
 		for epoch in range(1, self.args.train_epochs + 1):
@@ -108,6 +109,13 @@ class Exp_CFM_Phase1(Exp_Basic):
 				f"train_loss={train_loss:.6f} | val_loss={val_loss:.6f} |"
 				f"{lr_tag} | time={time.time()-t0:.1f}s"
 			)
+			self.epoch_logs.append({
+				"epoch": epoch,
+				"train_loss": train_loss,
+				"val_loss": val_loss,
+				"lr": cur_lr,
+				"time": round(time.time() - t0, 1),
+			})
 
 			if val_loss < best_val:
 				best_val = val_loss
@@ -153,6 +161,10 @@ class Exp_CFM_Phase1(Exp_Basic):
 		test_loss = self._run_one_epoch(test_loader, train=False, stage="Test")
 		logger.info(f"Test loss: {test_loss:.6f}")
 
+		# 保存所有 epoch 的训练指标
+		if hasattr(self, 'epoch_logs') and self.epoch_logs:
+			self._save_training_log(ckpt_dir, self.epoch_logs)
+
 		# --- Inference + audio output ---
 		output_dir = os.path.join(ckpt_dir, f"test_outputs@test{test}_{epoch}")
 		os.makedirs(output_dir, exist_ok=True)
@@ -193,7 +205,7 @@ class Exp_CFM_Phase1(Exp_Basic):
 					vocoder.save_audio(pred_mel_out[i : i + 1], os.path.join(output_dir, f"{safe_key}_pred.wav"))
 					vocoder.save_audio(x1_out[i : i + 1],   os.path.join(output_dir, f"{safe_key}_x1.wav"))
 				
-				if j > 6:
+				if j > 15:
 					break
 
 		logger.info(f"Test outputs saved to: {output_dir}")

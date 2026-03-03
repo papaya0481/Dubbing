@@ -57,6 +57,27 @@ class Exp_Basic(object):
         with open(args_path, "w", encoding="utf-8") as f:
             json.dump(vars(self.args), f, indent=2, default=str)
         logger.info(f"Args saved to: {args_path}")
+        
+    def _save_state(self, path, epoch, model_state, optimizer_state=None, scheduler_state=None):
+        # 保存模型和优化器状态
+        state = {
+            "epoch": epoch,
+            "model_state": model_state,
+        }
+        if optimizer_state is not None:
+            state["optimizer_state"] = optimizer_state
+        if scheduler_state is not None:
+            state["scheduler_state"] = scheduler_state
+        state_path = os.path.join(path, f"checkpoint_epoch_{epoch}.pth")
+        torch.save(state, state_path)
+        logger.info(f"Checkpoint saved to: {state_path}")
+
+    def _save_training_log(self, path, logs: list):
+        """将所有 epoch 的训练指标（loss、lr 等）以 JSON 列表形式保存到文件。"""
+        log_path = os.path.join(path, "training_log.json")
+        with open(log_path, "w", encoding="utf-8") as f:
+            json.dump(logs, f, indent=2, default=str)
+        logger.info(f"Training log saved to: {log_path}")
 
 
     def _get_data(self):
