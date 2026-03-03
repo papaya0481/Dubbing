@@ -38,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--phoneme_vocab_size", type=int, default=72)
 	parser.add_argument("--lip_dim", type=int, default=0)
 	parser.add_argument("--long_skip_connection", action="store_true", default=False)
-	parser.add_argument("--generate_from_noise", action="store_true", default=False, help="whether to generate from pure noise instead of stretched mel + noise")
+	parser.add_argument("--generate_from_noise", action="store_true", default=True, help="whether to generate from pure noise instead of stretched mel + noise")
 
 	parser.add_argument("--t_scheduler", type=str, default="linear", choices=["linear", "cosine"])
 	parser.add_argument("--training_cfg_rate", type=float, default=0.2)

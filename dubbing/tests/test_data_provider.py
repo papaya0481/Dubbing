@@ -18,7 +18,7 @@ def test_with_args():
         data_root = "/data2/ruixin/datasets/MELD_gen_pairs"
         train_split_ratio = 0.9
         filter_by_mse = True
-        mse_threshold = 8
+        mse_threshold = 4
         tier_name = "phones"
         phoneme_map_path = "dubbing/modules/english_us_arpa_300.json"
         num_workers = 4
@@ -85,7 +85,7 @@ def test_with_testset(output_dir):
         data_root = "/data2/ruixin/datasets/MELD_gen_pairs"
         train_split_ratio = 0.9
         filter_by_mse = True
-        mse_threshold = 8
+        mse_threshold = 4
         tier_name = "phones"
         phoneme_map_path = "dubbing/modules/english_us_arpa_300.json"
         num_workers = 4
