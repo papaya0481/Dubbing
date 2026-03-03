@@ -223,14 +223,25 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         src_frames_raw = np.array([sec2frame(t) for t in src_anchors])
         tgt_frames_raw = np.array([sec2frame(t) for t in tgt_anchors])
 
-        # Remove degenerate src anchor pairs (zero src span) to keep PCHIP
-        # well-conditioned.  For the corresponding tgt range, the silence mask
-        # (computed separately) will override the output of warp_mel.
-        keep = np.ones(len(tgt_frames_raw), dtype=bool)
-        for i in range(len(src_frames_raw) - 1):
-            if abs(src_frames_raw[i + 1] - src_frames_raw[i]) < 0.5:  # ~0 src frames
-                # Keep the first point of the pair, drop the second duplicate
-                keep[i + 1] = False
+        # Remove only the *interior* points of each zero-src-span run so that
+        # PCHIP still sees both the run-start anchor (= end of preceding speech)
+        # and the run-end anchor (= start of following speech).
+        # Both have the same src value, creating a flat plateau in the mapping
+        # that correctly freezes the source position across the inserted silence.
+        # (The silence frames themselves are overwritten by silence_mask later.)
+        keep = np.ones(len(src_frames_raw), dtype=bool)
+        i = 0
+        while i < len(src_frames_raw) - 1:
+            if abs(src_frames_raw[i + 1] - src_frames_raw[i]) < 0.5:
+                # Find the end of this zero-span run.
+                j = i + 1
+                while j < len(src_frames_raw) - 1 and abs(src_frames_raw[j + 1] - src_frames_raw[j]) < 0.5:
+                    keep[j] = False  # drop interior duplicate
+                    j += 1
+                # keep[i] = run start (kept), keep[j] = run end (kept)
+                i = j + 1
+            else:
+                i += 1
         src_frames = src_frames_raw[keep]
         tgt_frames = tgt_frames_raw[keep]
 
@@ -319,23 +330,18 @@ class GlobalWarpTransformer(BaseAudioTransformer):
 
     def length_regulate_phoneme_ids(
         self,
-        source_phone_tier: tgt.IntervalTier,
+        target_phone_tier: tgt.IntervalTier,
         total_tgt_frames: int,
-        src_anchors: List[float],
-        tgt_anchors: List[float],
         pad_id: int = 0,
     ) -> torch.Tensor:
-        """Build frame-level phoneme IDs on the TARGET timeline using SOURCE phone intervals.
+        """Build frame-level phoneme IDs directly from the TARGET phone tier.
 
-        Each source phone interval is forward-mapped to target time via the
-        anchor-derived src→tgt interpolator, then the corresponding target
-        frame range is filled with that phone's id.
+        Each target phone interval is converted to a frame range using its
+        own time boundaries, then filled with the corresponding phoneme id.
 
         Args:
-            source_phone_tier: Phone intervals from the source TextGrid.
+            target_phone_tier: Phone intervals from the target TextGrid.
             total_tgt_frames: Total number of target mel frames.
-            src_anchors: Source time anchor points (seconds).
-            tgt_anchors: Corresponding target time anchor points (seconds).
             pad_id: Id to use for frames not covered by any phone interval.
 
         Returns:
@@ -346,28 +352,13 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         def sec2frame(sec: float) -> int:
             return int(round(sec * self.sample_rate / self.h.hop_size))
 
-        # Build forward src→tgt interpolator from anchors.
-        src_times = np.array(src_anchors, dtype=float)
-        tgt_times = np.array(tgt_anchors, dtype=float)
-
-        # Deduplicate on the src axis so PchipInterpolator gets strictly increasing input.
-        _, unique_idx = np.unique(src_times, return_index=True)
-        src_u = src_times[unique_idx]
-        tgt_u = tgt_times[unique_idx]
-
-        src2tgt = PchipInterpolator(src_u, tgt_u)
-
-        for interval in source_phone_tier:
+        for interval in target_phone_tier:
             token = (interval.text or "").strip()
             token_norm = token if token in self.phoneme_mapping else token.upper()
             token_id = int(self.phoneme_mapping.get(token_norm, pad_id))
 
-            # Map source interval boundaries to target time.
-            tgt_start = float(src2tgt(interval.start_time))
-            tgt_end   = float(src2tgt(interval.end_time))
-
-            f_start = max(0, min(total_tgt_frames, sec2frame(tgt_start)))
-            f_end   = max(f_start, min(total_tgt_frames, sec2frame(tgt_end)))
+            f_start = max(0, min(total_tgt_frames, sec2frame(interval.start_time)))
+            f_end   = max(f_start, min(total_tgt_frames, sec2frame(interval.end_time)))
             if f_end > f_start:
                 tgt_ids[f_start:f_end] = token_id
 
@@ -644,13 +635,11 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         silence_mask = self._detect_silence_mask(src_anchors, tgt_anchors, total_target_frames)
         final_mel = self.warp_mel(source_mel, warping_path, silence_mask=silence_mask, fade_frames=fade_frames)
 
-        # 使用 target 
-        phone_tier = tg_src.get_tier_by_name(tier_name)
+        # 直接使用 target phoneme tier 展开到目标帧长度
+        phone_tier_tgt = tg_tgt.get_tier_by_name(tier_name)
         phoneme_ids = self.length_regulate_phoneme_ids(
-            source_phone_tier=phone_tier,
+            target_phone_tier=phone_tier_tgt,
             total_tgt_frames=total_target_frames,
-            src_anchors=src_anchors,
-            tgt_anchors=tgt_anchors,
             pad_id=pad_id,
         )
         return final_mel, phoneme_ids
