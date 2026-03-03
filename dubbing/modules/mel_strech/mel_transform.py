@@ -252,6 +252,7 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         source_mel: torch.Tensor,
         warping_path: torch.Tensor,
         silence_mask: Optional[torch.Tensor] = None,
+        fade_frames: int = 0,
     ) -> torch.Tensor:
         """
         使用 grid_sample 沿时间轴扭曲 Mel。/ Warp mel on time axis with grid_sample.
@@ -260,6 +261,8 @@ class GlobalWarpTransformer(BaseAudioTransformer):
             source_mel: 输入 Mel，形状为 (1, n_mels, src_len)。/ Input mel of shape (1, n_mels, src_len).
             warping_path: 目标帧对应源帧索引，形状为 (tgt_len,)。/ Source-frame index per target frame, shape (tgt_len,).
             silence_mask: 可选布尔张量 (tgt_len,)，True 的帧强制置为静音。
+            fade_frames: 淡入淡出帧数，0 表示关闭。大于 0 时在输出 mel 的首尾各做线性 fade。
+                         / Number of frames for fade-in and fade-out. 0 = disabled.
 
         Returns:
             torch.Tensor: 扭曲后的 Mel，形状为 (1, n_mels, tgt_len)。/ Warped mel of shape (1, n_mels, tgt_len).
@@ -283,6 +286,14 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         if silence_mask is not None and silence_mask.any():
             sil_val = source_mel.min().detach()  # use the quietest value as silence floor
             warped_mel[:, :, silence_mask] = sil_val
+
+        # Fade-in / fade-out (linear ramp over fade_frames).
+        if fade_frames > 0:
+            n = min(fade_frames, tgt_len // 2)
+            if n > 0:
+                ramp = torch.linspace(0.0, 1.0, n, device=warped_mel.device, dtype=warped_mel.dtype)
+                warped_mel[:, :, :n]       *= ramp          # fade-in
+                warped_mel[:, :, -n:]      *= ramp.flip(0)  # fade-out
 
         return warped_mel
     
@@ -574,6 +585,7 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         target_textgrid: Union[str, Path, tgt.TextGrid],
         tier_name: str = "phones",
         pad_id: int = 0,
+        fade_frames: int = 0,
     ):
         """
         Warp mel using source/target TextGrid alignment.
@@ -630,7 +642,7 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         total_target_frames = max(1, int(tgt_duration * self.sample_rate / self.h.hop_size))
         warping_path = self.calculate_warping_path(src_anchors, tgt_anchors, total_target_frames)
         silence_mask = self._detect_silence_mask(src_anchors, tgt_anchors, total_target_frames)
-        final_mel = self.warp_mel(source_mel, warping_path, silence_mask=silence_mask)
+        final_mel = self.warp_mel(source_mel, warping_path, silence_mask=silence_mask, fade_frames=fade_frames)
 
         # 使用 target 
         phone_tier = tg_src.get_tier_by_name(tier_name)
