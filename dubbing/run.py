@@ -23,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--data", type=str, default="cfm_phase1", help="dataset key in data_factory")
 	parser.add_argument("--data_root", type=str, required=True, help="root dir containing ost/ and aligned/")
 	parser.add_argument("--filter_by_mse", action="store_true", default=True, help="filter by mse in metadata csv")
-	parser.add_argument("--mse_threshold", type=float, default=8, help="mse threshold for filtering")
+	parser.add_argument("--mse_threshold", type=float, default=4, help="threshold for filtering")
 	parser.add_argument("--train_split_ratio", type=float, default=0.9, help="train/test split ratio")
 	parser.add_argument("--tier_name", type=str, default="phones", help="TextGrid tier used for alignment")
 	parser.add_argument("--phoneme_map_path", type=str, default="dubbing/modules/english_us_arpa_300.json", help="phoneme id mapping json")
