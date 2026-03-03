@@ -563,7 +563,7 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         final_mel = self.warp_mel(mel_src, warping_path)
         self.save_audio(final_mel, output_path)
 
-        if self.verbose: print(f"✅ Saved: {output_path}")
+        if self.verbose: print(f"Saved: {output_path}")
         return True
     
     
@@ -632,6 +632,7 @@ class GlobalWarpTransformer(BaseAudioTransformer):
         silence_mask = self._detect_silence_mask(src_anchors, tgt_anchors, total_target_frames)
         final_mel = self.warp_mel(source_mel, warping_path, silence_mask=silence_mask)
 
+        # 使用 target 
         phone_tier = tg_src.get_tier_by_name(tier_name)
         phoneme_ids = self.length_regulate_phoneme_ids(
             source_phone_tier=phone_tier,

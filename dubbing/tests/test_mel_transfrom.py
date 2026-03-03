@@ -26,11 +26,13 @@ if __name__ == "__main__":
     # )
     
     # test for 
+    SOURCE_DIR = "dialog"
+    SOURCE_PATH = "train_dia588_row539"
     
     import tgt
-    source_tg = tgt.io.read_textgrid("/home/ruixin/Dubbing/mel_convert/test/aligned/test_short1_1.TextGrid", include_empty_intervals=True)
-    target_tg = tgt.io.read_textgrid("/home/ruixin/Dubbing/mel_convert/test/aligned/test_short_gt.TextGrid", include_empty_intervals=True)
-    source_wav = "/home/ruixin/Dubbing/mel_convert/test/test_short1_1.wav"
+    source_tg = tgt.io.read_textgrid(f"/data2/ruixin/datasets/MELD_gen_pairs/{SOURCE_DIR}/aligned/{SOURCE_PATH}_r1.TextGrid")
+    target_tg = tgt.io.read_textgrid(f"/data2/ruixin/datasets/MELD_gen_pairs/{SOURCE_DIR}/aligned/{SOURCE_PATH}_r2.TextGrid")
+    source_wav = f"/data2/ruixin/datasets/MELD_gen_pairs/{SOURCE_DIR}/ost/{SOURCE_PATH}_r1.wav"
     transformer = GlobalWarpTransformer(use_vocoder=True, device="cpu", verbose=True)
     
     wav, sr = transformer.load_audio(source_wav)
@@ -64,3 +66,14 @@ if __name__ == "__main__":
     print(target_tg.get_tier_by_name("phones").end_time)
     wav_out_len = wav_out.shape[-1]
     print(f"Output wav length (samples): {wav_out_len}, duration (s): {wav_out_len/sr:.2f}s")
+    
+    # 测试 words tier 的对齐
+    out2 = transformer.transform_mel_with_path(
+        source_mel=mel_sorce,
+        source_textgrid=source_tg,
+        target_textgrid=target_tg,
+        tier_name="words",
+    )
+    
+    wav_out2 = transformer.model(out2[0]).cpu().squeeze(0)
+    torchaudio.save("test_out_words.wav", wav_out2, sr)

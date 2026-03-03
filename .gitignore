@@ -45,3 +45,5 @@ mel_convert/test/
 **/cuda/
 
 !dubbing/modules/english_us_arpa_300.json
+
+test_output/
