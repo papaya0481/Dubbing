@@ -127,6 +127,7 @@ class IndexTTS2Semantic(IndexTTS2):
         diffusion_steps: int = 25,
         inference_cfg_rate: float = 0.7,
         sampling_rate: int = 22050,
+        emo_vector: Optional[torch.Tensor] = None,
         **infer_kwargs,
     ):
         """先做一次正常 TTS 推理，再对输出 wav 做 MFA 对齐，最后用 SemanticTransformer
@@ -154,8 +155,7 @@ class IndexTTS2Semantic(IndexTTS2):
             raise ValueError(
                 "需要提供 MFAAligner 实例（通过 mfa_aligner 参数或构造时的 mfa_aligner 参数传入）。"
             )
-            
-        _tmp_path = None
+
 
         # ----------------------------------------------------------
         # 1. 第一次推理：缓存 speaker/style/prompt，并获取 S_infer
@@ -163,6 +163,7 @@ class IndexTTS2Semantic(IndexTTS2):
         first_result = self.infer(
             spk_audio_prompt=spk_audio_prompt,
             text=text,
+            emo_vector=emo_vector,
             return_stats=True,
             method = "hmm",    # 强制使用 hmm 以获得更稳定的时长预测（更适合后续扭曲）
             **infer_kwargs,

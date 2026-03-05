@@ -239,7 +239,18 @@ def test_integration_infer_with_semantic_warp():
     # read text from ost path
     ost_txt_path = f"/data2/ruixin/datasets/MELD_gen_pairs/{target_base}/ost/{target_name.replace('_r2', '_r1')}.txt"
     with open(ost_txt_path, "r") as f:
-        TEXT = f.read().strip().splitlines()
+        raw_text = f.read().strip()
+
+    # 将文本随机分成两段（在单词边界处切割）
+    import random
+    words = raw_text.split()
+    if len(words) <= 1:
+        TEXT = [raw_text, raw_text]
+    else:
+        split_idx = random.randint(1, len(words) - 1)
+        TEXT = [" ".join(words[:split_idx]), " ".join(words[split_idx:])]
+    print(f"[文本分割] 第1段: '{TEXT[0]}' | 第2段: '{TEXT[1]}'")
+    
 
     # ---- 初始化 IndexTTS2Semantic ----
     from indextts.infer_semantic import IndexTTS2Semantic
@@ -261,6 +272,9 @@ def test_integration_infer_with_semantic_warp():
     model.mfa_aligner = aligner
 
     # ---- 执行语义扭曲推理 ----
+    emo_vector = [[0.0]*8, [0.0]*8]  # 示例情感向量，实际使用时应根据模型需求构造
+    emo_vector[0][0] = 1.0  # 假设第一个维度代表某种情感（如愤怒），这里设置为 1.0 以激活该情感
+    emo_vector[1][1] = 1.0  # 假设第二个维度代表另一种情感（如快乐），这里设置为 1.0 以激活该情感
     result = model.infer_with_semantic_warp(
         spk_audio_prompt=SPK_PROMPT,
         text=TEXT,
@@ -268,6 +282,7 @@ def test_integration_infer_with_semantic_warp():
         target_textgrid=str(TARGET_TG_PATH),
         tier_name="phones",
         emo_audio_prompt=SPK_PROMPT,
+        emo_vector=emo_vector,
         verbose=True,
     )
 
@@ -365,4 +380,5 @@ if __name__ == "__main__":
     print("=" * 60)
     print("集成测试（需要真实模型）")
     print("=" * 60)
+    
     test_integration_infer_with_semantic_warp()
