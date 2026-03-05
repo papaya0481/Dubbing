@@ -1,0 +1,11 @@
+# =============================================================================
+# Ablation: cond_mel via bicubic interpolation (no TextGrid-guided warping)
+# Inherits everything from default.yaml; only overrides are listed here.
+# =============================================================================
+extends: default.yaml
+
+model_id: cfm_phase1
+model_name: LipSyncCFM_StretchEntireMel
+
+data:
+  dataset: cfm_phase1_stretch

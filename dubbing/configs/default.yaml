@@ -15,7 +15,7 @@ itr: 1
 
 # --- Data ---
 data:
-  root: /data/path/to/dataset
+  root: /data2/ruixin/datasets/MELD_gen_pairs
   dataset: cfm_phase1
   train_split_ratio: 0.9
   filter_by_mse: true

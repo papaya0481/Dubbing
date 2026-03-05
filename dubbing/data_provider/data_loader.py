@@ -293,6 +293,67 @@ class Dataset_CFM_Phase1(Dataset):
             "mse": mse,
             "text_r1": text_r1,
         }
+        
+class Dataset_CFM_Phase1_StretchEntireMel(Dataset_CFM_Phase1):
+    """Variant that stretches source mel to target length via bicubic interpolation
+    instead of TextGrid-guided warping. Phoneme IDs are read directly from the
+    target TextGrid. Everything else (normalization, filtering, splits) is identical.
+    """
+
+    def __getitem__(self, index: int):
+        import torch.nn.functional as F
+
+        sample = self.samples[index]
+
+        r1_wav = self._load_wav(sample.r1_audio)
+        r2_wav = self._load_wav(sample.r2_audio)
+
+        r1_mel = self._wav_to_mel(r1_wav)  # (1, n_mels, T_src)
+        r2_mel = self._wav_to_mel(r2_wav)  # (1, n_mels, T_tgt)
+
+        target_frames = r2_mel.shape[-1]
+
+        # Bicubic resize along the time axis only.
+        # F.interpolate with mode='bicubic' requires 4-D input.
+        cond_mel_raw = F.interpolate(
+            r1_mel.unsqueeze(0),                          # (1, 1, n_mels, T_src)
+            size=(r1_mel.shape[1], target_frames),
+            mode='bicubic',
+            align_corners=True,
+        ).squeeze(0)                                       # (1, n_mels, target_frames)
+
+        # Phoneme IDs directly from target TextGrid.
+        tg_tgt = tgt.io.read_textgrid(str(sample.r2_tg))
+        phone_tier_tgt = tg_tgt.get_tier_by_name(self.tier_name)
+        phoneme_ids = self._warper.length_regulate_phoneme_ids(
+            target_phone_tier=phone_tier_tgt,
+            total_tgt_frames=target_frames,
+            pad_id=self.pad_phoneme_id,
+        )
+
+        cond_mel = cond_mel_raw.squeeze(0)  # (n_mels, target_frames)
+        x1       = r2_mel.squeeze(0)        # (n_mels, target_frames)
+
+        x_mean = cond_mel.mean()
+        x_std  = cond_mel.std().clamp(min=1e-5)
+        cond_mel = (cond_mel - x_mean) / x_std
+        x1       = (x1       - x_mean) / x_std
+
+        mse = float(torch.mean((cond_mel - x1) ** 2).item())
+
+        text_r1 = self._extract_text(sample.r1_tg, "words")
+
+        return {
+            "pair_key": sample.pair_key,
+            "cond_mel": cond_mel,
+            "x1": x1,
+            "phoneme_ids": phoneme_ids,
+            "x_len": torch.tensor(target_frames, dtype=torch.long),
+            "x_mean": x_mean,
+            "x_std": x_std,
+            "mse": mse,
+            "text_r1": text_r1,
+        }
 
 
 def collate_cfm_phase1(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:

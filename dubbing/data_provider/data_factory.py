@@ -1,5 +1,6 @@
 from data_provider.data_loader import (
     Dataset_CFM_Phase1,
+    Dataset_CFM_Phase1_StretchEntireMel,
     collate_cfm_phase1,
 )
 
@@ -7,6 +8,7 @@ from torch.utils.data import DataLoader
 
 data_dict = {
     "cfm_phase1": Dataset_CFM_Phase1,
+    "cfm_phase1_stretch": Dataset_CFM_Phase1_StretchEntireMel,
 }
 
 
