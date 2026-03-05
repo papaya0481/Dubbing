@@ -246,6 +246,8 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--sample-size", type=int, default=None, help="指定则固定随机种子42抽样；不指定则全量合成")
 	parser.add_argument("--seed", type=int, default=42)
 	parser.add_argument("--repeat", type=int, default=2)
+	parser.add_argument("--batch-size", type=int, default=4,
+	                    help="DataLoader 每批的样本数；同 speaker 的样本合并为单次 GPT generate 调用")
 	parser.add_argument("--num-beams", type=int, default=2)
 	parser.add_argument("--max-text-tokens-per-sentence", type=int, default=200)
 	parser.add_argument("--max-mel-tokens", type=int, default=2000)
@@ -392,17 +394,24 @@ def main() -> None:
 		return
 
 	sys.path.insert(0, str(Path(args.index_tts_root)))
-	infer_mod = importlib.import_module("indextts.infer_v2")
-	IndexTTS2 = getattr(infer_mod, "IndexTTS2")
+	infer_batch_mod = importlib.import_module("indextts.infer_batch")
+	IndexTTS2Batch = getattr(infer_batch_mod, "IndexTTS2Batch")
+	DubbingDataset = getattr(infer_batch_mod, "DubbingDataset")
+	collate_items  = getattr(infer_batch_mod, "collate_items")
 
-	tts = IndexTTS2(
+	from torch.utils.data import DataLoader
+
+	tts = IndexTTS2Batch(
 		model_dir=args.model_dir,
 		cfg_path=str(Path(args.model_dir) / "config.yaml"),
 		is_fp16=args.is_fp16,
 		use_cuda_kernel=False,
+		s2mel_max_batch_size=args.batch_size,
 	)
 
-	metadata_path = output_dir / "generation_metadata.csv"
+	# ------------------------------------------------------------------
+	# 构建全量工作项列表（每条 = 一个 (sample, rep) 组合）
+	# ------------------------------------------------------------------
 	fieldnames = [
 		"sample_id",
 		"split",
@@ -428,117 +437,239 @@ def main() -> None:
 		"error",
 	]
 
-	total = len(selected) * args.repeat
+	work_items: list[dict[str, Any]] = []
+	for sample in selected:
+		text, emo_text, emo_vectors = build_text_and_emotion(sample)
+		sample_spk_audio_prompt: Path | None = None
+		sample_prompt_error = ""
+		try:
+			sample_spk_audio_prompt = resolve_spk_prompt_for_sample(
+				spk_audio_prompt=spk_audio_prompt,
+				dataset_option=args.dataset_option,
+				sample=sample,
+			)
+		except Exception as exc:
+			sample_prompt_error = str(exc)
+
+		target_duration_tokens = (
+			seconds_to_mel_tokens(sample["target_seconds"])
+			if sample.get("target_seconds") is not None
+			else None
+		)
+
+		for rep in range(1, args.repeat + 1):
+			out_wav = output_dir / f"{sample['sample_key']}_r{rep}.wav"
+			out_txt = out_wav.with_suffix(".txt")
+
+			# 解析已跳过 / 错误条件，供 DataLoader 过滤
+			if out_wav.exists():
+				pre_status = "skipped_existing"
+			elif sample_spk_audio_prompt is None:
+				pre_status = "failed_no_prompt"
+			else:
+				pre_status = "pending"
+
+			work_items.append({
+				# DataLoader 所需的核心推理字段
+				"spk_audio_prompt": str(sample_spk_audio_prompt) if sample_spk_audio_prompt else "",
+				"text":             text,
+				"output_path":      str(out_wav),
+				"emo_vectors":      emo_vectors,
+				"target_duration_tokens": target_duration_tokens,
+				# 元数据字段（写 CSV 用）
+				"sample_id":           sample["global_idx"],
+				"split":               sample["split"],
+				"source_file":         sample["source_file"],
+				"dataset_option":      args.dataset_option,
+				"sample_key":          sample["sample_key"],
+				"dialogue_id":         sample["dialogue_id"],
+				"utterance_ids":       "|".join(sample["utterance_ids"]),
+				"repeat_idx":          rep,
+				"output_wav":          str(out_wav),
+				"output_txt":          str(out_txt),
+				"source_text":         "|".join(sample["utterances"]),
+				"source_emotions":     "|".join(sample["emotions"]),
+				"emo_text":            emo_text,
+				"target_seconds":      str(sample.get("target_seconds")),
+				"target_duration_tokens_str": str(target_duration_tokens),
+				"source_prompt_wav":   str(sample_spk_audio_prompt) if sample_spk_audio_prompt else "",
+				"pre_status":          pre_status,
+				"pre_error":           sample_prompt_error,
+				"transcript":          " ".join(sample["utterances"]).strip(),
+			})
+
+	total = len(work_items)
+	print(f"[Plan] total work items: {total}  (samples={len(selected)} × repeat={args.repeat})")
+
+	# ------------------------------------------------------------------
+	# DataLoader：按 batch_size 分批，collate_items 保持 dict 列表原样
+	# ------------------------------------------------------------------
+	dataset = DubbingDataset(work_items)
+	loader  = DataLoader(
+		dataset,
+		batch_size=args.batch_size,
+		shuffle=False,
+		num_workers=0,          # 推理在主进程；数据本身是纯 Python dict，无需多进程
+		collate_fn=collate_items,
+		drop_last=False,
+	)
+
+	metadata_path = output_dir / "generation_metadata.csv"
 	current = 0
 
 	with metadata_path.open("w", encoding="utf-8", newline="") as f:
 		writer = csv.DictWriter(f, fieldnames=fieldnames)
 		writer.writeheader()
 
-		for sample in selected:
-			text, emo_text, emo_vectors = build_text_and_emotion(sample)
-			sample_spk_audio_prompt: Path | None = None
-			sample_prompt_error = ""
+		for batch in loader:
+			# ---- 过滤无需推理的条目 ----
+			pending   = [item for item in batch if item["pre_status"] == "pending"]
+			non_infer = [item for item in batch if item["pre_status"] != "pending"]
+
+			# 对 non_infer 直接写入 CSV
+			for item in non_infer:
+				status = "skipped_existing" if item["pre_status"] == "skipped_existing" else "failed"
+				error  = item["pre_error"] if status == "failed" else ""
+				if status == "skipped_existing":
+					transcript = item["transcript"]
+					if transcript:
+						Path(item["output_txt"]).write_text(transcript + "\n", encoding="utf-8")
+				writer.writerow({
+					"sample_id":            item["sample_id"],
+					"split":                item["split"],
+					"source_file":          item["source_file"],
+					"dataset_option":       item["dataset_option"],
+					"sample_key":           item["sample_key"],
+					"dialogue_id":          item["dialogue_id"],
+					"utterance_ids":        item["utterance_ids"],
+					"repeat_idx":           item["repeat_idx"],
+					"output_wav":           item["output_wav"],
+					"output_txt":           item["output_txt"],
+					"source_text":          item["source_text"],
+					"source_emotions":      item["source_emotions"],
+					"text":                 item["text"],
+					"emo_text":             item["emo_text"],
+					"target_seconds":       item["target_seconds"],
+					"target_duration_tokens": item["target_duration_tokens_str"],
+					"source_prompt_wav":    item["source_prompt_wav"],
+					"num_beams":            args.num_beams,
+					"seg_lens":             "",
+					"wav_secs":             "",
+					"status":               status,
+					"error":                error,
+				})
+				current += 1
+				print(f"[{current}/{total}] {item['sample_key']} rep={item['repeat_idx']} -> {status}")
+
+			if not pending:
+				f.flush()
+				continue
+
+			# ---- 调用批量推理 ----
 			try:
-				sample_spk_audio_prompt = resolve_spk_prompt_for_sample(
-					spk_audio_prompt=spk_audio_prompt,
-					dataset_option=args.dataset_option,
-					sample=sample,
+				batch_results = tts.infer_batch(
+					spk_audio_prompts=[item["spk_audio_prompt"] for item in pending],
+					texts=[item["text"] for item in pending],
+					output_paths=[item["output_path"] for item in pending],
+					emo_vectors_list=[item["emo_vectors"] for item in pending],
+					target_duration_tokens_list=[item["target_duration_tokens"] for item in pending],
+					verbose=True,
+					num_beams=args.num_beams,
+					max_text_tokens_per_sentence=args.max_text_tokens_per_sentence,
+					max_mel_tokens=args.max_mel_tokens,
+					return_stats=True,
 				)
 			except Exception as exc:
-				sample_prompt_error = str(exc)
-			target_duration_tokens = (
-				seconds_to_mel_tokens(sample["target_seconds"])
-				if sample.get("target_seconds") is not None
-				else None
-			)
+				traceback.print_exc()
+				# 整批失败：逐条写失败记录
+				for item in pending:
+					writer.writerow({
+						"sample_id":            item["sample_id"],
+						"split":                item["split"],
+						"source_file":          item["source_file"],
+						"dataset_option":       item["dataset_option"],
+						"sample_key":           item["sample_key"],
+						"dialogue_id":          item["dialogue_id"],
+						"utterance_ids":        item["utterance_ids"],
+						"repeat_idx":           item["repeat_idx"],
+						"output_wav":           item["output_wav"],
+						"output_txt":           item["output_txt"],
+						"source_text":          item["source_text"],
+						"source_emotions":      item["source_emotions"],
+						"text":                 item["text"],
+						"emo_text":             item["emo_text"],
+						"target_seconds":       item["target_seconds"],
+						"target_duration_tokens": item["target_duration_tokens_str"],
+						"source_prompt_wav":    item["source_prompt_wav"],
+						"num_beams":            args.num_beams,
+						"seg_lens":             "",
+						"wav_secs":             "",
+						"status":               "failed",
+						"error":                str(exc),
+					})
+					current += 1
+					print(f"[{current}/{total}] {item['sample_key']} -> failed (batch error)")
+				f.flush()
+				continue
 
-			for rep in range(1, args.repeat + 1):
-				current += 1
-				out_wav = output_dir / f"{sample['sample_key']}_r{rep}.wav"
-				out_txt = out_wav.with_suffix(".txt")
-				status = "ok"
-				error_msg = ""
-				seg_lens = ""
-				wav_secs = ""
+			# ---- 处理推理结果 ----
+			for item, result in zip(pending, batch_results):
+				seg_lens_str = ""
+				wav_secs_str = ""
+				status       = "ok"
+				error_msg    = ""
 
-				if out_wav.exists():
-					status = "skipped_existing"
-				elif sample_spk_audio_prompt is None:
-					status = "failed"
-					error_msg = sample_prompt_error or "未解析到 spk_audio_prompt"
+				if result is None:
+					status    = "failed"
+					error_msg = "infer_batch returned None"
 				else:
 					try:
-						_, seg_lens_raw, wav_secs_raw, inference_stats = tts.infer(
-							spk_audio_prompt=str(sample_spk_audio_prompt),
-							text=text,
-							output_path=str(out_wav),
-							style_prompt=None,
-							emo_audio_prompt=None,
-							emo_alpha=0,
-							use_emo_text=False,
-							emo_text=None,
-							use_random=False,
-							verbose=True,
-							emo_vector=emo_vectors,
-							target_duration_tokens=None,
-							method="hmm",
-							save_attention_maps=False,
-							max_text_tokens_per_sentence=args.max_text_tokens_per_sentence,
-							do_sample=True,
-							top_p=0.8,
-							top_k=30,
-							temperature=0.8,
-							length_penalty=0,
-							num_beams=args.num_beams,
-							repetition_penalty=10.0,
-							max_mel_tokens=args.max_mel_tokens,
-							return_stats=True,
-						)
-						seg_lens = str(seg_lens_raw)
-						wav_secs = str(wav_secs_raw)
-						s_infer_tensor = inference_stats.get("S_infer")
+						out_path, seg_ls, wav_secs_raw, inference_stats = result
+						seg_lens_str = str(seg_ls)
+						wav_secs_str = str(wav_secs_raw)
+
+						# 保存 code embedding（若有）
+						s_infer_tensor = inference_stats.get("S_infer") if isinstance(inference_stats, dict) else None
 						if s_infer_tensor is not None:
-							emb_path = emb_dir / out_wav.with_suffix(".pt").name
+							emb_path = emb_dir / Path(item["output_wav"]).with_suffix(".pt").name
 							torch.save(s_infer_tensor, emb_path)
-					except Exception as exc:
-						status = "failed"
-						error_msg = str(exc)
-						traceback.print_exc()
+					except Exception as exc2:
+						status    = "failed"
+						error_msg = str(exc2)
 
 				if status in {"ok", "skipped_existing"}:
-					transcript = " ".join(sample["utterances"]).strip()
+					transcript = item["transcript"]
 					if transcript:
-						out_txt.write_text(transcript + "\n", encoding="utf-8")
+						Path(item["output_txt"]).write_text(transcript + "\n", encoding="utf-8")
 
-				writer.writerow(
-					{
-						"sample_id": sample["global_idx"],
-						"split": sample["split"],
-						"source_file": sample["source_file"],
-						"dataset_option": args.dataset_option,
-						"sample_key": sample["sample_key"],
-						"dialogue_id": sample["dialogue_id"],
-						"utterance_ids": "|".join(sample["utterance_ids"]),
-						"repeat_idx": rep,
-						"output_wav": str(out_wav),
-						"output_txt": str(out_txt),
-						"source_text": "|".join(sample["utterances"]),
-						"source_emotions": "|".join(sample["emotions"]),
-						"text": text,
-						"emo_text": emo_text,
-						"target_seconds": str(sample.get("target_seconds")),
-						"target_duration_tokens": str(target_duration_tokens),
-						"source_prompt_wav": str(sample_spk_audio_prompt) if sample_spk_audio_prompt is not None else "",
-						"num_beams": args.num_beams,
-						"seg_lens": seg_lens,
-						"wav_secs": wav_secs,
-						"status": status,
-						"error": error_msg,
-					}
-				)
-				f.flush()
-				print(f"[{current}/{total}] {sample['sample_key']} rep={rep} -> {status}")
+				writer.writerow({
+					"sample_id":            item["sample_id"],
+					"split":                item["split"],
+					"source_file":          item["source_file"],
+					"dataset_option":       item["dataset_option"],
+					"sample_key":           item["sample_key"],
+					"dialogue_id":          item["dialogue_id"],
+					"utterance_ids":        item["utterance_ids"],
+					"repeat_idx":           item["repeat_idx"],
+					"output_wav":           item["output_wav"],
+					"output_txt":           item["output_txt"],
+					"source_text":          item["source_text"],
+					"source_emotions":      item["source_emotions"],
+					"text":                 item["text"],
+					"emo_text":             item["emo_text"],
+					"target_seconds":       item["target_seconds"],
+					"target_duration_tokens": item["target_duration_tokens_str"],
+					"source_prompt_wav":    item["source_prompt_wav"],
+					"num_beams":            args.num_beams,
+					"seg_lens":             seg_lens_str,
+					"wav_secs":             wav_secs_str,
+					"status":               status,
+					"error":                error_msg,
+				})
+				current += 1
+				print(f"[{current}/{total}] {item['sample_key']} rep={item['repeat_idx']} -> {status}")
+
+			f.flush()
 
 	print(f"Done. metadata csv saved to: {metadata_path}")
 

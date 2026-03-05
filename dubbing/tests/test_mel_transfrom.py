@@ -19,7 +19,6 @@ def save_mel_phoneme_visualization(
     phoneme_ids,
     transformer,
     image_path: str = "test_stretched_mel_with_frame_phonemes.png",
-    tsv_path: str = "test_stretched_mel_frame_phonemes.tsv",
 ):
     import matplotlib.pyplot as plt
 
