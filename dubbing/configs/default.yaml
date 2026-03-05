@@ -49,12 +49,12 @@ model:
 
 # --- Training hyperparameters ---
 training:
-  epochs: 20
+  epochs: 40
   learning_rate: 1.0e-4
   weight_decay: 1.0e-4
   max_grad_norm: 1.0
   lr_scheduler: cosine      # linear | cosine
-  lr_min: 1.0e-5
+  lr_min: 1.0e-6
   early_stop_patience: 10
   inference_steps: 25
   train_infer_max_batches: 4
