@@ -12,7 +12,7 @@ data_dict = {
 
 
 def data_provider(args, flag: str):
-    Data = data_dict[args.data]
+    Data = data_dict[args.data.dataset]
 
     if flag in {'val', 'test'}:
         shuffle_flag = False
@@ -21,23 +21,23 @@ def data_provider(args, flag: str):
     else:
         shuffle_flag = True
         drop_last = False
-        batch_size = args.batch_size  # bsz for train and valid
+        batch_size = args.data.batch_size
 
     data_set = Data(
-        root_dir=args.data_root,
+        root_dir=args.data.root,
         split=flag,
-        split_ratio=args.train_split_ratio,
-        seed=args.seed,
-        filter_enabled=args.filter_by_mse,
-        mse_threshold=args.mse_threshold,
-        tier_name=args.tier_name,
-        phoneme_map_path=args.phoneme_map_path,
+        split_ratio=args.data.train_split_ratio,
+        seed=args.system.seed,
+        filter_enabled=args.data.filter_by_mse,
+        mse_threshold=args.data.mse_threshold,
+        tier_name=args.data.tier_name,
+        phoneme_map_path=args.data.phoneme_map_path,
     )
     data_loader = DataLoader(
         data_set,
         batch_size=batch_size,
         shuffle=shuffle_flag,
-        num_workers=args.num_workers,
+        num_workers=args.data.num_workers,
         drop_last=drop_last,
         collate_fn=collate_cfm_phase1,
     )

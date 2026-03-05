@@ -1,156 +1,88 @@
 import argparse
+import datetime
+import hashlib
+import logging
 import random
-from types import SimpleNamespace
 
 import numpy as np
 import torch
 
-from exp.cfm.phase1 import Exp_CFM_Phase1
+from config import apply_overrides, config_to_dict, load_config
+from exp.cfm.phase1_train_expand import Exp_CFM_Phase1_TrainExpand
 from logger import get_logger, set_log_level, show_setting
-
 
 logger = get_logger("dubbing.run")
 
 
 def build_parser() -> argparse.ArgumentParser:
-	parser = argparse.ArgumentParser(description="CFM Phase1 Trainer")
-
-	parser.add_argument("--is_training", type=int, required=True, default=1, help="1 for train+test, 0 for test only")
-	parser.add_argument("--model_id", type=str, required=True, default="cfm_phase1", help="experiment model id")
-	parser.add_argument("--model", type=str, required=True, default="LipSyncCFM", help="model name")
-	parser.add_argument("--exp_name", type=str, help="experiment entry name")
-
-	parser.add_argument("--data", type=str, default="cfm_phase1", help="dataset key in data_factory")
-	parser.add_argument("--data_root", type=str, required=True, help="root dir containing ost/ and aligned/")
-	parser.add_argument("--filter_by_mse", action="store_true", default=True, help="filter by mse in metadata csv")
-	parser.add_argument("--mse_threshold", type=float, default=4, help="threshold for filtering")
-	parser.add_argument("--train_split_ratio", type=float, default=0.9, help="train/test split ratio")
-	parser.add_argument("--tier_name", type=str, default="phones", help="TextGrid tier used for alignment")
-	parser.add_argument("--phoneme_map_path", type=str, default="dubbing/modules/english_us_arpa_300.json", help="phoneme id mapping json")
-
-	parser.add_argument("--hidden_dim", type=int, default=512)
-	parser.add_argument("--num_heads", type=int, default=8)
-	parser.add_argument("--depth", type=int, default=8)
-	parser.add_argument("--dropout", type=float, default=0.1)
-	parser.add_argument("--ff_mult", type=int, default=4)
-	parser.add_argument("--cond_dim", type=int, default=128)
-	parser.add_argument("--mu_dim", type=int, default=80)
-	parser.add_argument("--phoneme_vocab_size", type=int, default=72)
-	parser.add_argument("--lip_dim", type=int, default=0)
-	parser.add_argument("--long_skip_connection", action="store_true", default=False)
-	parser.add_argument("--generate_from_noise", action="store_true", default=True, help="whether to generate from pure noise instead of stretched mel + noise")
-
-	parser.add_argument("--t_scheduler", type=str, default="linear", choices=["linear", "cosine"])
-	parser.add_argument("--training_cfg_rate", type=float, default=0.2)
-	parser.add_argument("--inference_cfg_rate", type=float, default=0.7)
-	parser.add_argument("--training_temperature", type=float, default=0.1, help="noise scale added to stretched mel during training")
-	parser.add_argument("--inference_steps", type=int, default=25, help="number of Euler steps for inference")
-
-	parser.add_argument("--checkpoints", type=str, default="./checkpoints")
-	parser.add_argument("--num_workers", type=int, default=4)
-	parser.add_argument("--itr", type=int, default=1)
-	parser.add_argument("--train_epochs", type=int, default=20)
-	parser.add_argument("--batch_size", type=int, default=8)
-	parser.add_argument("--learning_rate", type=float, default=1e-4)
-	parser.add_argument("--weight_decay", type=float, default=1e-4)
-	parser.add_argument("--max_grad_norm", type=float, default=1.0)
-	parser.add_argument("--lr_reduce_factor", type=float, default=0.6,
-		help="ReduceLROnPlateau: factor to multiply lr by on plateau")
-	parser.add_argument("--lr_reduce_patience", type=int, default=3,
-		help="ReduceLROnPlateau: epochs with no improvement before reducing lr")
-	parser.add_argument("--lr_min", type=float, default=1e-5,
-		help="ReduceLROnPlateau: minimum lr")
-	parser.add_argument("--lr_scheduler", type=str, default="cosine", choices=["linear", "cosine"],
-		help="learning rate scheduler type (linear or cosine)")
-	parser.add_argument("--early_stop_patience", type=int, default=10,
-		help="stop training after this many epochs with no val improvement")
-
-	parser.add_argument("--seed", type=int, default=2026)
-	parser.add_argument("--log_level", type=str, default="INFO",
-		choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-		help="logging verbosity; DEBUG also prints full model structure")
-	parser.add_argument("--use_gpu", type=bool, default=True)
-	parser.add_argument("--gpu", type=int, default=0)
-	parser.add_argument("--use_multi_gpu", action="store_true", default=False)
-	parser.add_argument("--devices", type=str, default="0,1,2,3")
-
+	parser = argparse.ArgumentParser(
+		description="CFM Phase1 Trainer",
+		formatter_class=argparse.RawTextHelpFormatter,
+	)
+	parser.add_argument(
+		"--config", required=True, metavar="PATH",
+		help="Path to a YAML config file (e.g. dubbing/configs/default.yaml)",
+	)
+	parser.add_argument(
+		"overrides", nargs="*", metavar="key=value",
+		help=(
+			"Optional dotted overrides applied on top of the YAML, e.g.:\n"
+			"  data.root=/my/data  training.learning_rate=5e-4  system.gpu=1"
+		),
+	)
 	return parser
-
-
-def inject_nested_cfg(args: argparse.Namespace) -> argparse.Namespace:
-	args.DiT = SimpleNamespace(
-		in_channels=80,
-		hidden_dim=args.hidden_dim,
-		num_heads=args.num_heads,
-		depth=args.depth,
-		cond_dim=args.cond_dim,
-		mu_dim=args.mu_dim,
-		dropout=args.dropout,
-		ff_mult=args.ff_mult,
-		long_skip_connection=args.long_skip_connection,
-		phoneme_vocab_size=args.phoneme_vocab_size,
-		lip_dim=args.lip_dim,
-		static_chunk_size=50,
-		num_decoding_left_chunks=2,
-	)
-	args.CFM = SimpleNamespace(
-		t_scheduler=args.t_scheduler,
-		training_cfg_rate=args.training_cfg_rate,
-		inference_cfg_rate=args.inference_cfg_rate,
-		training_temperature=args.training_temperature,
-		generate_from_noise=args.generate_from_noise,
-	)
-	return args
 
 
 if __name__ == "__main__":
 	parser = build_parser()
-	args = parser.parse_args()
+	cli = parser.parse_args()
 
-	random.seed(args.seed)
-	np.random.seed(args.seed)
-	torch.manual_seed(args.seed)
+	cfg = load_config(cli.config)
+	if cli.overrides:
+		apply_overrides(cfg, cli.overrides)
 
-	import logging
-	set_log_level(getattr(logging, args.log_level.upper(), logging.INFO))
+	# --- Reproducibility ---
+	random.seed(cfg.system.seed)
+	np.random.seed(cfg.system.seed)
+	torch.manual_seed(cfg.system.seed)
 
-	args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
-	if args.use_gpu and args.use_multi_gpu:
-		args.devices = args.devices.replace(" ", "")
-		device_ids = args.devices.split(",")
-		args.device_ids = [int(d) for d in device_ids]
-		args.gpu = args.device_ids[0]
+	# --- Logging ---
+	set_log_level(getattr(logging, cfg.system.log_level.upper(), logging.INFO))
 
-	args = inject_nested_cfg(args)
+	# --- GPU setup ---
+	cfg.system.use_gpu = bool(torch.cuda.is_available() and cfg.system.use_gpu)
+	if cfg.system.use_gpu and cfg.system.use_multi_gpu:
+		device_ids = [int(d) for d in cfg.system.devices.replace(" ", "").split(",")]
+		cfg.system.device_ids = device_ids
+		cfg.system.gpu = device_ids[0]
 
-	logger.info("Args in experiment:")
-	logger.info(str(args))
-
-	Exp = Exp_CFM_Phase1
- 
-	if args.exp_name is None:
-		# use date + hash as default exp_name to avoid overwriting previous results
-		import datetime
-		import hashlib
+	# --- Auto exp_name ---
+	if cfg.exp_name is None:
 		time_now = datetime.datetime.now().strftime("%m%d%H")
-		args.exp_name = time_now + "_" + hashlib.md5((str(args) + str(time_now)).encode()).hexdigest()[:4]
+		cfg.exp_name = time_now + "_" + hashlib.md5(
+			(str(config_to_dict(cfg)) + time_now).encode()
+		).hexdigest()[:4]
 
-	if args.is_training:
-		for ii in range(args.itr):
-			setting_parts = [args.model_id, args.model, args.exp_name, ii]
+	logger.info(f"Config:\n{config_to_dict(cfg)}")
+
+	Exp = Exp_CFM_Phase1_TrainExpand
+
+	if cfg.is_training:
+		for ii in range(cfg.itr):
+			setting_parts = [cfg.model_id, cfg.model_name, cfg.exp_name, ii]
 			show_setting("Training Setting", setting_parts)
-			setting = "_".join([str(x) for x in setting_parts])
-			exp = Exp(args)
+			setting = "_".join(str(x) for x in setting_parts)
+			exp = Exp(cfg)
 			logger.info(f"Start training: {setting}")
 			exp.train(setting)
 			logger.info(f"Testing: {setting}")
 			exp.test(setting, test=1)
 			torch.cuda.empty_cache()
 	else:
-		setting_parts = [args.model_id, args.model, args.exp_name, 0]
+		setting_parts = [cfg.model_id, cfg.model_name, cfg.exp_name, 0]
 		show_setting("Testing Setting", setting_parts)
-		setting = "_".join([str(x) for x in setting_parts])
-		exp = Exp(args)
+		setting = "_".join(str(x) for x in setting_parts)
+		exp = Exp(cfg)
 		logger.info(f"Testing: {setting}")
 		exp.test(setting, test=1)
 		torch.cuda.empty_cache()

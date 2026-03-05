@@ -1,6 +1,7 @@
 import os
-import torch
 import json
+import torch
+from config import config_to_dict
 from logger import get_logger
 
 
@@ -17,23 +18,26 @@ class Exp_Basic(object):
         return None
 
     def _acquire_device(self):
-        if self.args.use_gpu:
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(
-                self.args.gpu) if not self.args.use_multi_gpu else self.args.devices
-            device = torch.device('cuda:{}'.format(self.args.gpu))
-            logger.info(f"Use GPU: cuda:{self.args.gpu}")
+        sys = self.args.system
+        if sys.use_gpu:
+            os.environ["CUDA_VISIBLE_DEVICES"] = (
+                str(sys.gpu) if not sys.use_multi_gpu else sys.devices
+            )
+            device = torch.device(f"cuda:{sys.gpu}")
+            logger.info(f"Use GPU: cuda:{sys.gpu}")
         else:
             device = torch.device('cpu')
             logger.info("Use CPU")
         return device
-    
+
     def _build_scheduler(self, optimizer):
-        lr_min = getattr(self.args, 'lr_min', 1e-5)
-        sched_type = getattr(self.args, 'lr_scheduler', 'cosine').lower()
-        n = self.args.train_epochs
+        t = self.args.training
+        lr_min = t.lr_min
+        sched_type = t.lr_scheduler.lower()
+        n = t.epochs
 
         if sched_type == 'linear':
-            end_factor = lr_min / max(self.args.learning_rate, 1e-12)
+            end_factor = lr_min / max(t.learning_rate, 1e-12)
             logger.info(f"Scheduler: LinearLR  end_factor={end_factor:.2e}  total_iters={n}")
             return torch.optim.lr_scheduler.LinearLR(
                 optimizer,
@@ -50,12 +54,11 @@ class Exp_Basic(object):
             )
         else:
             raise ValueError(f"Unknown lr_scheduler '{sched_type}'. Choose 'linear' or 'cosine'.")
-        
+
     def _save_args(self, path):
-        # 保存训练配置
         args_path = os.path.join(path, "args.json")
         with open(args_path, "w", encoding="utf-8") as f:
-            json.dump(vars(self.args), f, indent=2, default=str)
+            json.dump(config_to_dict(self.args), f, indent=2, default=str)
         logger.info(f"Args saved to: {args_path}")
         
     def _save_state(self, path, epoch, model_state, optimizer_state=None, scheduler_state=None):

@@ -23,32 +23,33 @@ class Exp_CFM_Phase1_TrainExpand(Exp_CFM_Phase1):
 		val_data, val_loader = self._get_data("val")
 		test_data, test_loader = self._get_data("test")
 
-		os.makedirs(self.args.checkpoints, exist_ok=True)
-		ckpt_dir = os.path.join(self.args.checkpoints, setting)
+		os.makedirs(self.args.system.checkpoints, exist_ok=True)
+		ckpt_dir = os.path.join(self.args.system.checkpoints, setting)
 		os.makedirs(ckpt_dir, exist_ok=True)
 		self.best_ckpt_path = os.path.join(ckpt_dir, "best.pth")
 		self._save_args(ckpt_dir)
-  
-		self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.args.learning_rate, weight_decay=self.args.weight_decay)
+
+		t = self.args.training
+		self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=t.learning_rate, weight_decay=t.weight_decay)
 		self.scheduler = self._build_scheduler(self.optimizer)
 
 		best_val = float("inf")
 		stale_epochs = 0
-		early_stop_patience = getattr(self.args, 'early_stop_patience', 8)
+		early_stop_patience = t.early_stop_patience
 		self.epoch_logs = []
 
 		logger.info(f"Train samples: {len(train_data)} | Val samples: {len(val_data)} | Test samples: {len(test_data)}")
-		for epoch in range(1, self.args.train_epochs + 1):
+		for epoch in range(1, t.epochs + 1):
 			t0 = time.time()
-			train_loss = self._run_one_epoch(train_loader, train=True, stage=f"Train {epoch}/{self.args.train_epochs}")
-			val_loss = self._run_one_epoch(val_loader, train=False, stage=f"Val {epoch}/{self.args.train_epochs}")
+			train_loss = self._run_one_epoch(train_loader, train=True, stage=f"Train {epoch}/{t.epochs}")
+			val_loss = self._run_one_epoch(val_loader, train=False, stage=f"Val {epoch}/{t.epochs}")
 
 			cur_lr = self.optimizer.param_groups[0]['lr']
 			self.scheduler.step()
 			new_lr = self.optimizer.param_groups[0]['lr']
 			lr_tag = f" LR={cur_lr:.2e} -> {new_lr:.2e}" if new_lr != cur_lr else f" LR={cur_lr:.2e}]"
 			logger.info(
-				f"Epoch {epoch}/{self.args.train_epochs} | "
+				f"Epoch {epoch}/{t.epochs} | "
 				f"train_loss={train_loss:.6f} | val_loss={val_loss:.6f} |"
 				f"{lr_tag} | time={time.time()-t0:.1f}s"
 			)
@@ -63,7 +64,7 @@ class Exp_CFM_Phase1_TrainExpand(Exp_CFM_Phase1):
 			if val_loss < best_val:
 				best_val = val_loss
 				stale_epochs = 0
-				torch.save({"model": self.model.state_dict(), "args": vars(self.args)}, self.best_ckpt_path)
+				torch.save({"model": self.model.state_dict(), "args": self.args}, self.best_ckpt_path)
 				logger.info(f"Saved best checkpoint: {self.best_ckpt_path}")
 			else:
 				stale_epochs += 1
@@ -81,7 +82,7 @@ class Exp_CFM_Phase1_TrainExpand(Exp_CFM_Phase1):
 					loader=train_loader,
 					output_dir=train_output_dir,
 					stage_name="TrainInfer+Save",
-					max_batches=getattr(self.args, "train_infer_max_batches", 4),
+					max_batches=t.train_infer_max_batches,
 				)
 
 		return self.model
@@ -89,7 +90,7 @@ class Exp_CFM_Phase1_TrainExpand(Exp_CFM_Phase1):
 	def test(self, setting: str, test: int = 0, epoch: int = 0):
 		_, test_loader = self._get_data("test")
 
-		ckpt_dir = os.path.join(self.args.checkpoints, setting)
+		ckpt_dir = os.path.join(self.args.system.checkpoints, setting)
 		best_ckpt_path = os.path.join(ckpt_dir, "best.pth")
 		if os.path.exists(best_ckpt_path):
 			state = torch.load(best_ckpt_path, map_location=self.device, weights_only=False)
@@ -111,7 +112,7 @@ class Exp_CFM_Phase1_TrainExpand(Exp_CFM_Phase1):
 			loader=test_loader,
 			output_dir=output_dir,
 			stage_name="Infer+Save",
-			max_batches=getattr(self.args, "test_infer_max_batches", 16),
+			max_batches=self.args.training.test_infer_max_batches,
 		)
 
 		logger.info(f"Test outputs saved to: {output_dir}")
@@ -138,9 +139,9 @@ class Exp_CFM_Phase1_TrainExpand(Exp_CFM_Phase1):
 					phoneme_ids=phoneme_ids,
 					lip_embedding=None,
 					x_lens=x_lens,
-					steps=getattr(self.args, 'inference_steps', 25),
-					cfg_scale=getattr(self.args, 'inference_cfg_rate', 0.5),
-					temperature=getattr(self.args, 'training_temperature', 0.2),
+					steps=self.args.training.inference_steps,
+					cfg_scale=self.args.model.CFM.inference_cfg_rate,
+					temperature=self.args.model.CFM.training_temperature,
 				)
 
 				scale = x_std[:, None, None]

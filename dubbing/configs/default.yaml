@@ -1,0 +1,72 @@
+# =============================================================================
+# Default experiment config for CFM Phase1
+#
+# Run:  python dubbing/run.py --config dubbing/configs/default.yaml \
+#           data.root=/path/to/data  system.gpu=0
+# All values can be overridden via dotted CLI args: key.subkey=value
+# =============================================================================
+
+# --- Experiment identity ---
+model_id: cfm_phase1
+model_name: LipSyncCFM
+exp_name: null          # null = auto-generate from timestamp + hash
+is_training: 1
+itr: 1
+
+# --- Data ---
+data:
+  root: /data/path/to/dataset
+  dataset: cfm_phase1
+  train_split_ratio: 0.9
+  filter_by_mse: true
+  mse_threshold: 4.0
+  tier_name: phones
+  phoneme_map_path: dubbing/modules/english_us_arpa_300.json
+  batch_size: 8
+  num_workers: 4
+
+# --- Model architecture ---
+model:
+  DiT:
+    in_channels: 80
+    hidden_dim: 512
+    num_heads: 8
+    depth: 8
+    dropout: 0.1
+    ff_mult: 4
+    cond_dim: 128
+    mu_dim: 80
+    phoneme_vocab_size: 72
+    lip_dim: 0
+    long_skip_connection: false
+    static_chunk_size: 50
+    num_decoding_left_chunks: 2
+  CFM:
+    t_scheduler: linear
+    training_cfg_rate: 0.2
+    inference_cfg_rate: 0.7
+    training_temperature: 0.1
+    generate_from_noise: true
+
+# --- Training hyperparameters ---
+training:
+  epochs: 20
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  max_grad_norm: 1.0
+  lr_scheduler: cosine      # linear | cosine
+  lr_min: 1.0e-5
+  early_stop_patience: 10
+  inference_steps: 25
+  train_infer_max_batches: 4
+  test_infer_max_batches: 16
+
+# --- System ---
+system:
+  seed: 2026
+  log_level: INFO           # DEBUG | INFO | WARNING | ERROR
+  checkpoints: ./checkpoints
+  use_gpu: true
+  gpu: 0
+  use_multi_gpu: false
+  devices: "0,1,2,3"

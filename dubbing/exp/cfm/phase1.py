@@ -19,9 +19,9 @@ class Exp_CFM_Phase1(Exp_Basic):
 		super().__init__(args)
 
 	def _build_model(self):
-		model = LipSyncCFM(self.args)
-		if self.args.use_multi_gpu and self.args.use_gpu:
-			model = torch.nn.DataParallel(model, device_ids=self.args.device_ids)
+		model = LipSyncCFM(self.args.model)
+		if self.args.system.use_multi_gpu and self.args.system.use_gpu:
+			model = torch.nn.DataParallel(model, device_ids=self.args.system.device_ids)
 		logger.debug(f"Model structure:\n{model}")
 		# print number of parameters
 		num_params = sum(p.numel() for p in model.parameters())
@@ -65,7 +65,7 @@ class Exp_CFM_Phase1(Exp_Basic):
 
 				if train:
 					loss.backward()
-					torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
+					torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.training.max_grad_norm)
 					self.optimizer.step()
 
 				total_loss += float(loss.item())
@@ -80,32 +80,33 @@ class Exp_CFM_Phase1(Exp_Basic):
 		val_data, val_loader = self._get_data("val")
 		test_data, test_loader = self._get_data("test")
 
-		os.makedirs(self.args.checkpoints, exist_ok=True)
-		ckpt_dir = os.path.join(self.args.checkpoints, setting)
+		os.makedirs(self.args.system.checkpoints, exist_ok=True)
+		ckpt_dir = os.path.join(self.args.system.checkpoints, setting)
 		os.makedirs(ckpt_dir, exist_ok=True)
 		self.best_ckpt_path = os.path.join(ckpt_dir, "best.pth")
 		self._save_args(ckpt_dir)
-  
-		self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.args.learning_rate, weight_decay=self.args.weight_decay)
+
+		t = self.args.training
+		self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=t.learning_rate, weight_decay=t.weight_decay)
 		self.scheduler = self._build_scheduler(self.optimizer)
 
 		best_val = float("inf")
 		stale_epochs = 0
-		early_stop_patience = getattr(self.args, 'early_stop_patience', 8)
+		early_stop_patience = t.early_stop_patience
 		self.epoch_logs = []
 
 		logger.info(f"Train samples: {len(train_data)} | Val samples: {len(val_data)} | Test samples: {len(test_data)}")
-		for epoch in range(1, self.args.train_epochs + 1):
+		for epoch in range(1, t.epochs + 1):
 			t0 = time.time()
-			train_loss = self._run_one_epoch(train_loader, train=True, stage=f"Train {epoch}/{self.args.train_epochs}")
-			val_loss = self._run_one_epoch(val_loader, train=False, stage=f"Val {epoch}/{self.args.train_epochs}")
+			train_loss = self._run_one_epoch(train_loader, train=True, stage=f"Train {epoch}/{t.epochs}")
+			val_loss = self._run_one_epoch(val_loader, train=False, stage=f"Val {epoch}/{t.epochs}")
 
 			cur_lr = self.optimizer.param_groups[0]['lr']
 			self.scheduler.step()
 			new_lr = self.optimizer.param_groups[0]['lr']
 			lr_tag = f" LR={cur_lr:.2e} -> {new_lr:.2e}" if new_lr != cur_lr else f" LR={cur_lr:.2e}]"
 			logger.info(
-				f"Epoch {epoch}/{self.args.train_epochs} | "
+				f"Epoch {epoch}/{t.epochs} | "
 				f"train_loss={train_loss:.6f} | val_loss={val_loss:.6f} |"
 				f"{lr_tag} | time={time.time()-t0:.1f}s"
 			)
@@ -120,7 +121,7 @@ class Exp_CFM_Phase1(Exp_Basic):
 			if val_loss < best_val:
 				best_val = val_loss
 				stale_epochs = 0
-				torch.save({"model": self.model.state_dict(), "args": vars(self.args)}, self.best_ckpt_path)
+				torch.save({"model": self.model.state_dict(), "args": self.args}, self.best_ckpt_path)
 				logger.info(f"Saved best checkpoint: {self.best_ckpt_path}")
 			else:
 				stale_epochs += 1
@@ -138,7 +139,7 @@ class Exp_CFM_Phase1(Exp_Basic):
 	def _get_vocoder(self) -> GlobalWarpTransformer:
 		"""Lazily build a vocoder-enabled warper for mel-to-wav conversion."""
 		if not hasattr(self, "_vocoder") or self._vocoder is None:
-			device = "cuda" if self.args.use_gpu else "cpu"
+			device = "cuda" if self.args.system.use_gpu else "cpu"
 			self._vocoder = GlobalWarpTransformer(
 				use_vocoder=True,
 				device=device,
@@ -149,7 +150,7 @@ class Exp_CFM_Phase1(Exp_Basic):
 	def test(self, setting: str, test: int = 0, epoch: int = 0):
 		_, test_loader = self._get_data("test")
 
-		ckpt_dir = os.path.join(self.args.checkpoints, setting)
+		ckpt_dir = os.path.join(self.args.system.checkpoints, setting)
 		best_ckpt_path = os.path.join(ckpt_dir, "best.pth")
 		if os.path.exists(best_ckpt_path):
 			state = torch.load(best_ckpt_path, map_location=self.device, weights_only=False)
@@ -182,14 +183,15 @@ class Exp_CFM_Phase1(Exp_Basic):
 				x_mean = batch["x_mean"].to(self.device)  # [B]
 				x_std  = batch["x_std"].to(self.device)   # [B]
 
+				tr = self.args.training
 				pred_mel = self.model.inference(
 					stretched_mel=x0,
 					phoneme_ids=phoneme_ids,
 					lip_embedding=None,
 					x_lens=x_lens,
-					steps=getattr(self.args, 'inference_steps', 25),
-					cfg_scale=getattr(self.args, 'inference_cfg_rate', 0.5),
-     				temperature=getattr(self.args, 'training_temperature', 0.2),
+					steps=tr.inference_steps,
+					cfg_scale=self.args.model.CFM.inference_cfg_rate,
+					temperature=self.args.model.CFM.training_temperature,
 				)
 
 				# Denormalize: bring mels back to original log-mel scale for vocoder
