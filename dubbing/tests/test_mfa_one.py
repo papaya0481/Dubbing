@@ -6,7 +6,7 @@ if str(project_dubbing_root) not in sys.path:
     sys.path.insert(0, str(project_dubbing_root))
 
 import os  
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 from indextts.inferDub import IndexTTS2ForDub
 import torchaudio

@@ -37,6 +37,7 @@ from montreal_forced_aligner.tokenization.simple import SimpleTokenizer
 from montreal_forced_aligner.tokenization.spacy import generate_language_tokenizer
 
 import librosa
+import tgt
 
 class MFAAligner:
     def __init__(
@@ -245,8 +246,9 @@ class MFAAligner:
         wavs: torch.Tensor = None,
         sampling_rate: int = 22050,
         text: str = None,
+        return_textgrid: bool = True,
         **kwargs,
-    ):
+    ) -> HierarchicalCtm | tuple[tgt.TextGrid, list[list[tgt.Interval]]]:
         """
         Align a single wavs with a pronunciation dictionary and a pretrained acoustic model.
         
@@ -372,11 +374,38 @@ class MFAAligner:
             utt.apply_cmvn(cmvn)
             ctm = kalpy_aligner.align_utterance(utt)
             file_ctm.word_intervals.extend(ctm.word_intervals)
-        if str(output_path) != "-":
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            
-        print(f"Alignment result: {file_ctm}")
+    
+        if return_textgrid:
+            return self.ctm_to_textgrid_fast(file_ctm)
+        return file_ctm
         # file_ctm.export_textgrid(
         #     output_path, file_duration=file.wav_info.duration, output_format=output_format
         # )
+        
+    @staticmethod
+    def ctm_to_textgrid_fast(
+        h_ctm: HierarchicalCtm,
+    ) -> tuple[tgt.TextGrid, list[list[tgt.Interval]]]:
+        # 1. 一行代码搞定 words 层
+        word_tier = tgt.IntervalTier(name='words', objects=[
+            tgt.Interval(w.begin, w.end, w.label) for w in h_ctm.word_intervals
+        ])
+
+        # 2. 按 word 构建 phone groups (保留层级结构)
+        phone_groups: list[list[tgt.Interval]] = [
+            [tgt.Interval(p.begin, p.end, p.label) for p in w.phones]
+            for w in h_ctm.word_intervals
+        ]
+
+        # 3. 展平 phone groups 得到 phones tier
+        phone_tier = tgt.IntervalTier(name='phones', objects=[
+            p for group in phone_groups for p in group
+        ])
+
+        # 4. 组装并导出
+        tg = tgt.TextGrid()
+        tg.add_tier(word_tier)
+        tg.add_tier(phone_tier)
+
+        return tg, phone_groups
             
