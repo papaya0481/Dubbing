@@ -31,7 +31,7 @@ model:
     in_channels: 80
     hidden_dim: 512
     num_heads: 8
-    depth: 8
+    depth: 12
     dropout: 0.1
     ff_mult: 4
     cond_dim: 128
@@ -45,7 +45,7 @@ model:
     t_scheduler: linear
     training_cfg_rate: 0.2
     inference_cfg_rate: 0.7
-    training_temperature: 0.1
+    training_temperature: 0.9
     generate_from_noise: true
 
 # --- Training hyperparameters ---
@@ -64,7 +64,7 @@ training:
 # --- System ---
 system:
   seed: 2026
-  log_level: INFO           # DEBUG | INFO | WARNING | ERROR
+  log_level: DEBUG          # DEBUG | INFO | WARNING | ERROR
   checkpoints: ./checkpoints
   use_gpu: true
   gpu: 0
