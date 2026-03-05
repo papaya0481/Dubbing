@@ -124,7 +124,6 @@ class IndexTTS2Semantic(IndexTTS2):
         target_textgrid: Union[str, Path, tgt.TextGrid],
         mfa_aligner=None,
         tier_name: str = "phones",
-        first_pass_output_path: Optional[str] = None,
         diffusion_steps: int = 25,
         inference_cfg_rate: float = 0.7,
         sampling_rate: int = 22050,
@@ -155,91 +154,81 @@ class IndexTTS2Semantic(IndexTTS2):
             raise ValueError(
                 "需要提供 MFAAligner 实例（通过 mfa_aligner 参数或构造时的 mfa_aligner 参数传入）。"
             )
-
-        _use_tmp = first_pass_output_path is None
+            
         _tmp_path = None
 
-        try:
-            if _use_tmp:
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _f:
-                    _tmp_path = _f.name
-                first_pass_wav_path = _tmp_path
-            else:
-                first_pass_wav_path = first_pass_output_path
+        # ----------------------------------------------------------
+        # 1. 第一次推理：缓存 speaker/style/prompt，并获取 S_infer
+        # ----------------------------------------------------------
+        first_result = self.infer(
+            spk_audio_prompt=spk_audio_prompt,
+            text=text,
+            return_stats=True,
+            method = "hmm",    # 强制使用 hmm 以获得更稳定的时长预测（更适合后续扭曲）
+            **infer_kwargs,
+        )
+        seg_lens, sampling_rate, wav_out, inference_stats = first_result
+        S_infer: torch.Tensor = inference_stats["S_infer"].to(self.device)
 
-            # ----------------------------------------------------------
-            # 1. 第一次推理：缓存 speaker/style/prompt，并获取 S_infer
-            # ----------------------------------------------------------
-            first_result = self.infer(
-                spk_audio_prompt=spk_audio_prompt,
-                text=text,
-                output_path=first_pass_wav_path,
-                return_stats=True,
-                **infer_kwargs,
-            )
-            _fpath, seg_lens, _wav_len, inference_stats = first_result
-            S_infer: torch.Tensor = inference_stats["S_infer"].to(self.device)
+        # ----------------------------------------------------------
+        # 2. 加载第一次推理的 wav，准备 MFA 对齐
+        # ----------------------------------------------------------
+        wav_out_mono = wav_out.mean(dim=0)                       # (N,)
+        if wav_out_mono.dtype == torch.int16:
+            wav_out_mono = wav_out_mono.float() / 32767.0
 
-            # ----------------------------------------------------------
-            # 2. 加载第一次推理的 wav，准备 MFA 对齐
-            # ----------------------------------------------------------
-            wav_out, sr_out = torchaudio.load(first_pass_wav_path)  # (C, N)
-            wav_out_mono = wav_out.mean(dim=0)                       # (N,)
-            if wav_out_mono.dtype == torch.int16:
-                wav_out_mono = wav_out_mono.float() / 32767.0
+        # ----------------------------------------------------------
+        # 3. MFA 强制对齐：得到 source_textgrid
+        #    去除 "|" 分隔符，MFA 只处理纯文本
+        # ----------------------------------------------------------
+        clean_text = " ".join(text).strip()
+        import time
+        start_time = time.time()
+        mfa_result = aligner.align_one_wav(
+            wavs=wav_out_mono,
+            sampling_rate=sampling_rate,
+            text=clean_text,
+            return_textgrid=True,
+        )
+        end_time = time.time()
+        print(f"MFA 对齐耗时：{end_time - start_time:.2f} 秒")
+        # ctm_to_textgrid_fast 返回 (tgt.TextGrid, phone_groups)
+        source_tg: tgt.TextGrid = mfa_result[0]
 
-            # ----------------------------------------------------------
-            # 3. MFA 强制对齐：得到 source_textgrid
-            #    去除 "|" 分隔符，MFA 只处理纯文本
-            # ----------------------------------------------------------
-            clean_text = " ".join(text.split("|")).strip()
-            mfa_result = aligner.align_one_wav(
-                wavs=wav_out_mono,
-                sampling_rate=sr_out,
-                text=clean_text,
-                return_textgrid=True,
-            )
-            # ctm_to_textgrid_fast 返回 (tgt.TextGrid, phone_groups)
-            source_tg: tgt.TextGrid = mfa_result[0]
+        # ----------------------------------------------------------
+        # 4. SemanticTransformer：将 S_infer 扭曲到目标时长
+        # ----------------------------------------------------------
+        S_warped, tgt_duration = self.semantic_transformer.transform(
+            s_infer=S_infer,
+            source_textgrid=source_tg,
+            target_textgrid=target_textgrid,
+            tier_name=tier_name,
+        )
 
-            # ----------------------------------------------------------
-            # 4. SemanticTransformer：将 S_infer 扭曲到目标时长
-            # ----------------------------------------------------------
-            S_warped, tgt_duration = self.semantic_transformer.transform(
-                s_infer=S_infer,
-                source_textgrid=source_tg,
-                target_textgrid=target_textgrid,
-                tier_name=tier_name,
-            )
+        # ----------------------------------------------------------
+        # 5. 用 S_warped 重新生成 wav
+        # ----------------------------------------------------------
+        wav_final = self._decode_s_warped_to_wav(
+            s_warped=S_warped,
+            tgt_duration=tgt_duration,
+            diffusion_steps=diffusion_steps,
+            inference_cfg_rate=inference_cfg_rate,
+        )
 
-            # ----------------------------------------------------------
-            # 5. 用 S_warped 重新生成 wav
-            # ----------------------------------------------------------
-            wav_final = self._decode_s_warped_to_wav(
-                s_warped=S_warped,
-                tgt_duration=tgt_duration,
-                diffusion_steps=diffusion_steps,
-                inference_cfg_rate=inference_cfg_rate,
-            )
+        wav_final = torch.clamp(32767 * wav_final, -32767.0, 32767.0).cpu()
+        wav_length_final = wav_final.shape[-1] / sampling_rate
 
-            wav_final = torch.clamp(32767 * wav_final, -32767.0, 32767.0).cpu()
-            wav_length_final = wav_final.shape[-1] / sampling_rate
-
-            # ----------------------------------------------------------
-            # 6. 保存或返回
-            # ----------------------------------------------------------
-            if output_path is not None:
-                if os.path.isfile(output_path):
-                    os.remove(output_path)
-                _out_dir = os.path.dirname(os.path.abspath(output_path))
-                if _out_dir:
-                    os.makedirs(_out_dir, exist_ok=True)
-                torchaudio.save(output_path, wav_final.type(torch.int16), sampling_rate)
-                return output_path, seg_lens, wav_length_final
-            else:
-                wav_data = wav_final.type(torch.int16).numpy().T
-                return (sampling_rate, wav_data)
-
-        finally:
-            if _use_tmp and _tmp_path is not None and os.path.exists(_tmp_path):
-                os.remove(_tmp_path)
+        # ----------------------------------------------------------
+        # 6. 保存或返回
+        # ----------------------------------------------------------
+        if output_path is not None:
+            if os.path.isfile(output_path):
+                os.remove(output_path)
+            _out_dir = os.path.dirname(os.path.abspath(output_path))
+            if _out_dir:
+                os.makedirs(_out_dir, exist_ok=True)
+            torchaudio.save(output_path, wav_final.type(torch.int16), sampling_rate)
+            return output_path, seg_lens, wav_length_final
+        else:
+            wav_data = wav_final.type(torch.int16).numpy().T
+            return seg_lens, sampling_rate, wav_data

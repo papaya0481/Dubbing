@@ -294,6 +294,22 @@ class IndexTTS2:
                 wavs_list.append(sil_tensor)
 
         return wavs_list
+    
+    def normalize_emo_vec(self, emo_vector, apply_bias=True):
+        # apply biased emotion factors for better user experience,
+        # by de-emphasizing emotions that can cause strange results
+        if apply_bias:
+            # [happy, angry, sad, afraid, disgusted, melancholic, surprised, calm]
+            emo_bias = [0.9375, 0.875, 1.0, 1.0, 0.9375, 0.9375, 0.6875, 0.5625]
+            emo_vector = [vec * bias for vec, bias in zip(emo_vector, emo_bias)]
+
+        # the total emotion sum must be 0.8 or less
+        emo_sum = sum(emo_vector)
+        if emo_sum > 0.8:
+            scale_factor = 0.8 / emo_sum
+            emo_vector = [vec * scale_factor for vec in emo_vector]
+
+        return emo_vector
 
     def _load_and_cut_audio(self, audio_path, max_audio_length_seconds, verbose=False, sr=None):
         if sr is None:
@@ -374,7 +390,7 @@ class IndexTTS2:
             json.dump(existing_data, f, ensure_ascii=False, indent=2)
         
     # 原始推理模式
-    def infer(self, spk_audio_prompt, text, output_path,
+    def infer(self, spk_audio_prompt, text, output_path=None,
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None, style_prompt=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
@@ -584,7 +600,12 @@ class IndexTTS2:
 
         self._set_gr_progress(0.1, "text processing...")        
         self.logger.info("Processing text...")        # 以“|”作为句子分割符，不同部分对应不同的情绪
-        text_list = text.split("|")
+        
+        if type(text) == str:
+            text_list = text.split("|")
+        else:
+            text_list = text    
+            
         text_tokens_list = []
         for txt in text_list:
             text_tokens_list.append(self.tokenizer.tokenize(txt))
@@ -871,11 +892,10 @@ class IndexTTS2:
             return output_path, seg_lens, wav_length
         else:
             # 返回以符合Gradio的格式要求
-            wav_data = wav.type(torch.int16)
-            wav_data = wav_data.numpy().T
+            wav_data = wav
             if return_stats:
-                return (sampling_rate, wav_data), inference_stats
-            return (sampling_rate, wav_data)
+                return seg_lens, sampling_rate, wav_data, inference_stats
+            return seg_lens, sampling_rate, wav_data
 
     def find_most_similar_cosine(self, query_vector, matrix):
         query_vector = query_vector.float()

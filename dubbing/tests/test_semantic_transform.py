@@ -24,7 +24,7 @@ if str(project_dubbing_root) not in sys.path:
     sys.path.insert(0, str(project_dubbing_root))
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 import torch
 import tgt
@@ -228,21 +228,18 @@ def test_integration_infer_with_semantic_warp():
     SPK_PROMPT     = "/data2/ruixin/ted-tts/AllInferenceResults/ESD/0001/Angry/0001_000351.wav"
 
     # target_textgrid：使用 test_output/ 里已有的 TextGrid
+    target_root = "/data2/ruixin/datasets/MELD_gen_pairs/"
+    target_base = "dialog"
+    target_name = "dev_dia4_row2_r2"
     TARGET_TG_PATH = (
-        project_dubbing_root.parent
-        / "test_output"
-        / "batch00_idx00_test_dia168_utt3_r2.TextGrid"
+        Path(target_root) / target_base / "aligned" / f"{target_name}.TextGrid"
     )
     OUTPUT_PATH = str(project_dubbing_root.parent / "test_output" / "test_semantic_warp.wav")
 
-    TEXT = "I left my guitar in their apartment."
-
-    # ---- 初始化 MFAAligner ----
-    from modules.mfa_alinger import MFAAligner
-    aligner = MFAAligner(
-        acoustic_model="english_us_arpa",
-        dictionary_model="english_us_arpa",
-    )
+    # read text from ost path
+    ost_txt_path = f"/data2/ruixin/datasets/MELD_gen_pairs/{target_base}/ost/{target_name.replace('_r2', '_r1')}.txt"
+    with open(ost_txt_path, "r") as f:
+        TEXT = f.read().strip().splitlines()
 
     # ---- 初始化 IndexTTS2Semantic ----
     from indextts.infer_semantic import IndexTTS2Semantic
@@ -250,9 +247,18 @@ def test_integration_infer_with_semantic_warp():
         cfg_path=CFG_PATH,
         model_dir=CHECKPOINT_DIR,
         is_fp16=False,
-        mfa_aligner=aligner,
+        mfa_aligner=None,
         verbose_transform=True,
     )
+    
+    # ---- 初始化 MFAAligner ----
+    from modules.mfa_alinger import MFAAligner
+    aligner = MFAAligner(
+        acoustic_model="english_us_arpa",
+        dictionary_model="english_us_arpa",
+    )
+    
+    model.mfa_aligner = aligner
 
     # ---- 执行语义扭曲推理 ----
     result = model.infer_with_semantic_warp(
@@ -356,7 +362,7 @@ if __name__ == "__main__":
     visualize_warp_comparison(s_demo, s_w, save_path="test_semantic_warp_comparison.png")
 
     # ---- 集成测试（可选，注释掉以跳过）----
-    # print("=" * 60)
-    # print("集成测试（需要真实模型）")
-    # print("=" * 60)
-    # test_integration_infer_with_semantic_warp()
+    print("=" * 60)
+    print("集成测试（需要真实模型）")
+    print("=" * 60)
+    test_integration_infer_with_semantic_warp()
