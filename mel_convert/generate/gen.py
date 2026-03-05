@@ -240,7 +240,7 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--dataset-root", type=str, default="/home/ruixin/dataset/MELD")
 	parser.add_argument("--dataset-option", type=str, choices=["sent_emo", "dialog"], default="sent_emo")
 	parser.add_argument("--model-dir", type=str, default="/data2/ruixin/index-tts2/checkpoints")
-	parser.add_argument("--index-tts-root", type=str, default="/home/ruixin/Dubbing/dubbing/indextts")
+	parser.add_argument("--index-tts-root", type=str, default="/home/ruixin/Dubbing/dubbing")
 	parser.add_argument("--spk-audio-prompt", type=str, required=True)
 	parser.add_argument("--output-dir", type=str, required=True)
 	parser.add_argument("--sample-size", type=int, default=None, help="指定则固定随机种子42抽样；不指定则全量合成")
@@ -572,7 +572,7 @@ def main() -> None:
 					texts=[item["text"] for item in pending],
 					output_paths=[item["output_path"] for item in pending],
 					emo_vectors_list=[item["emo_vectors"] for item in pending],
-					target_duration_tokens_list=[item["target_duration_tokens"] for item in pending],
+					target_duration_tokens_list=None,
 					verbose=True,
 					num_beams=args.num_beams,
 					max_text_tokens_per_sentence=args.max_text_tokens_per_sentence,
@@ -581,6 +581,11 @@ def main() -> None:
 				)
 			except Exception as exc:
 				traceback.print_exc()
+				err_str = str(exc)
+				is_cuda_fatal = (
+					"CUDA" in err_str or "cuda" in err_str
+					or "AcceleratorError" in type(exc).__name__
+				)
 				# 整批失败：逐条写失败记录
 				for item in pending:
 					writer.writerow({
@@ -610,6 +615,10 @@ def main() -> None:
 					current += 1
 					print(f"[{current}/{total}] {item['sample_key']} -> failed (batch error)")
 				f.flush()
+				if is_cuda_fatal:
+					# CUDA context 已损坏，同进程无法恢复。刺盘后退出，重运行会自动跳过已完成文件。
+					print("[FATAL] CUDA context corrupted, exiting. Re-run to resume from checkpoint.")
+					sys.exit(1)
 				continue
 
 			# ---- 处理推理结果 ----

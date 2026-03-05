@@ -476,7 +476,7 @@ class IndexTTS2Batch(IndexTTS2):
                         emo_cond_mel_lengths=emo_cond_lengths_i,
                         emo_vecs=emovecs_i,
                         use_speed=use_speed,
-                        attention_mask=attn_mask,
+                        attention_mask=None,  # attn_mask 是组级维度，逐样本 forward 不适用
                     )
                 gpt_fwd_elapsed = time.perf_counter() - gpt_fwd_t0
 
