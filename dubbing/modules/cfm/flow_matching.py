@@ -31,8 +31,7 @@ class CFMConfig:
     training_cfg_rate: float = 0.1
     inference_cfg_rate: float = 0.5
     training_temperature: float = 0.2
-    generate_from_noise: bool = False  # 是否从纯噪声开始生成（而不是拉伸Mel + 噪声）
-    
+
     # logit normal params
     logit_loc: float = 0.0
     logit_scale: float = 1.0
@@ -92,7 +91,6 @@ class LipSyncCFM(nn.Module):
         self.training_cfg_rate = cfm_cfg.training_cfg_rate
         self.inference_cfg_rate = cfm_cfg.inference_cfg_rate
         self.training_temperature = cfm_cfg.training_temperature
-        self.generate_from_noise = cfm_cfg.generate_from_noise
         self.logit_loc = cfm_cfg.logit_loc
         self.logit_scale = cfm_cfg.logit_scale
 
@@ -113,11 +111,7 @@ class LipSyncCFM(nn.Module):
         # 1. 定义流的起点 x0 (Source Distribution)
         # -------------------------------------------------------
         # 起点 = 拉伸Mel + 带温度的噪声
-        epsilon = torch.randn_like(clean_mel) * self.training_temperature
-        if self.generate_from_noise:
-            x0 = epsilon  # 直接从纯噪声开始
-        else:
-            x0 = stretched_mel + epsilon 
+        x0 = torch.randn_like(clean_mel) * self.training_temperature
         
         # 目标 x1 就是 clean_mel
         x1 = clean_mel
@@ -220,11 +214,7 @@ class LipSyncCFM(nn.Module):
         # -------------------------------------------------------
         # 同样从 "拉伸Mel + 噪声" 开始
         # temperature 控制随机性：越小越接近原始拉伸Mel，越大越自由
-        noise = torch.randn_like(stretched_mel) * temperature
-        if self.generate_from_noise:
-            x = noise  # 直接从纯噪声开始
-        else:
-            x = stretched_mel + noise
+        x = torch.randn_like(stretched_mel) * temperature
         
         # Build phoneme condition [B, T, cond_dim]; zero padding positions via mask.
         if cond is None:

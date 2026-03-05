@@ -31,7 +31,7 @@ def test_with_args():
     # 取出一个 batch，检查数据格式
     for batch in train_loader:
         print(batch)
-        print(batch["x0"].shape)  # stretched mel
+        print(batch["cond_mel"].shape)  # stretched mel
         print(batch["x1"].shape)  # clean mel
         print(batch["phoneme_ids"][0])  # phoneme ids
         
@@ -46,22 +46,22 @@ def test_with_args():
     import torch
     vocoder = bigvgan.BigVGAN.from_pretrained("nvidia/bigvgan_v2_22khz_80band_256x")
     # 测试 vocoder 将x0, x1 转成音频
-    x0 = batch["x0"]  # (B, 80, T)
+    cond_mel = batch["cond_mel"]  # (B, 80, T)
     x1 = batch["x1"] # (B, 80, T)
     xmean = batch["x_mean"][:, None, None]  # (B, 1, 1)
     xstd = batch["x_std"][:, None, None]   # (B, 1, 1
-    # 测试中间态，模拟 CFM 可能对 x0 进行的处理，例如加噪声、时间拉伸等，看看对音质的影响
-    xz = x0 + 0.1 * torch.randn_like(x0)  # 模拟加噪声
+    # 测试中间态，模拟 CFM 可能对 cond_mel 进行的处理，例如加噪声、时间拉伸等，看看对音质的影响
+    xz = cond_mel + 0.1 * torch.randn_like(cond_mel)  # 模拟加噪声
     t = 0.2
-    xt = (1-t) * x0 + t * x1  # 模拟时间拉伸后的特征
+    xt = (1-t) * cond_mel + t * x1  # 模拟时间拉伸后的特征
     
     # 做 reverse 归一化
-    x0 = x0 * xstd + xmean
+    cond_mel = cond_mel * xstd + xmean
     x1 = x1 * xstd + xmean
     xz = xz * xstd + xmean
     xt = xt * xstd + xmean
     with torch.no_grad():
-        wav_x0 = vocoder(x0[max_mse_index:max_mse_index+1].cpu())  # input: (1, 80, T) -> output: (1, 1, T)
+        wav_x0 = vocoder(cond_mel[max_mse_index:max_mse_index+1].cpu())  # input: (1, 80, T) -> output: (1, 1, T)
         wav_x1 = vocoder(x1[max_mse_index:max_mse_index+1].cpu())
         wav_xz = vocoder(xz[max_mse_index:max_mse_index+1].cpu())
         wav_xt = vocoder(xt[max_mse_index:max_mse_index+1].cpu())
@@ -113,27 +113,27 @@ def test_with_testset(output_dir):
         if batch_idx >= 16:
             break
 
-        x0 = batch["x0"]
+        cond_mel = batch["cond_mel"]
         x1 = batch["x1"]
         xmean = batch["x_mean"][:, None, None]
         xstd = batch["x_std"][:, None, None]
         x_lens = batch["x_lens"]
 
-        x0_denorm = x0 * xstd + xmean
+        cond_mel_denorm = cond_mel * xstd + xmean
         x1_denorm = x1 * xstd + xmean
 
         with torch.no_grad():
             for sample_idx, pair_key in enumerate(batch["pair_key"]):
                 t = int(x_lens[sample_idx].item())
-                x0_i = x0_denorm[sample_idx:sample_idx + 1, :, :t].cpu()
+                cond_i = cond_mel_denorm[sample_idx:sample_idx + 1, :, :t].cpu()
                 x1_i = x1_denorm[sample_idx:sample_idx + 1, :, :t].cpu()
 
-                wav_x0 = vocoder(x0_i)
+                wav_cond = vocoder(cond_i)
                 wav_x1 = vocoder(x1_i)
 
                 safe_key = str(pair_key).replace("/", "_")
                 prefix = f"batch{batch_idx:02d}_idx{sample_idx:02d}_{safe_key}"
-                torchaudio.save(str(output_dir / f"{prefix}_x0.wav"), wav_x0.squeeze(0), 22050)
+                torchaudio.save(str(output_dir / f"{prefix}_cond.wav"), wav_cond.squeeze(0), 22050)
                 torchaudio.save(str(output_dir / f"{prefix}_x1.wav"), wav_x1.squeeze(0), 22050)
 
                 tg_pair = pair_to_textgrid.get(pair_key)

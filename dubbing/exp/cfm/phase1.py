@@ -45,7 +45,7 @@ class Exp_CFM_Phase1(Exp_Basic):
 		with ctx:
 			progress = tqdm(loader, desc=stage, leave=False, dynamic_ncols=True)
 			for batch in progress:
-				x0 = batch["x0"].to(self.device)
+				cond_mel = batch["cond_mel"].to(self.device)
 				x1 = batch["x1"].to(self.device)
 				phoneme_ids = batch["phoneme_ids"].to(self.device)
 				x_lens = batch["x_lens"].to(self.device)
@@ -55,7 +55,7 @@ class Exp_CFM_Phase1(Exp_Basic):
 
 				loss = self.model(
 					clean_mel=x1,
-					stretched_mel=x0,
+					stretched_mel=cond_mel,
 					phoneme_ids=phoneme_ids,
 					lip_embedding=None,
 					x_lens=x_lens,
@@ -175,7 +175,7 @@ class Exp_CFM_Phase1(Exp_Basic):
 		progress = tqdm(test_loader, desc="Infer+Save", dynamic_ncols=True)
 		with torch.no_grad():
 			for j, batch in enumerate(progress):
-				x0 = batch["x0"].to(self.device)
+				cond_mel = batch["cond_mel"].to(self.device)
 				phoneme_ids = batch["phoneme_ids"].to(self.device)
 				x_lens = batch["x_lens"].to(self.device)
 				x1 = batch["x1"].to(self.device)
@@ -185,7 +185,7 @@ class Exp_CFM_Phase1(Exp_Basic):
 
 				tr = self.args.training
 				pred_mel = self.model.inference(
-					stretched_mel=x0,
+					stretched_mel=cond_mel,
 					phoneme_ids=phoneme_ids,
 					lip_embedding=None,
 					x_lens=x_lens,
@@ -197,13 +197,13 @@ class Exp_CFM_Phase1(Exp_Basic):
 				# Denormalize: bring mels back to original log-mel scale for vocoder
 				scale = x_std[:, None, None]   # [B,1,1]
 				bias  = x_mean[:, None, None]  # [B,1,1]
-				pred_mel_out = pred_mel * scale + bias
-				x0_out       = x0      * scale + bias
-				x1_out       = x1      * scale + bias
+				pred_mel_out  = pred_mel  * scale + bias
+				cond_mel_out  = cond_mel  * scale + bias
+				x1_out        = x1        * scale + bias
 
 				for i, key in enumerate(pair_keys):
 					safe_key = str(key).replace("/", "_").replace(" ", "_")
-					vocoder.save_audio(x0_out[i : i + 1],   os.path.join(output_dir, f"{safe_key}_x0.wav"))
+					vocoder.save_audio(cond_mel_out[i : i + 1], os.path.join(output_dir, f"{safe_key}_cond.wav"))
 					vocoder.save_audio(pred_mel_out[i : i + 1], os.path.join(output_dir, f"{safe_key}_pred.wav"))
 					vocoder.save_audio(x1_out[i : i + 1],   os.path.join(output_dir, f"{safe_key}_x1.wav"))
 				

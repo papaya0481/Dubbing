@@ -46,7 +46,6 @@ model:
     training_cfg_rate: 0.2
     inference_cfg_rate: 0.7
     training_temperature: 0.9
-    generate_from_noise: true
 
 # --- Training hyperparameters ---
 training:

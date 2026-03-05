@@ -126,7 +126,7 @@ class Exp_CFM_Phase1_TrainExpand(Exp_CFM_Phase1):
 		progress = tqdm(loader, desc=stage_name, dynamic_ncols=True)
 		with torch.no_grad():
 			for j, batch in enumerate(progress):
-				x0 = batch["x0"].to(self.device)
+				cond_mel = batch["cond_mel"].to(self.device)
 				phoneme_ids = batch["phoneme_ids"].to(self.device)
 				x_lens = batch["x_lens"].to(self.device)
 				x1 = batch["x1"].to(self.device)
@@ -135,7 +135,7 @@ class Exp_CFM_Phase1_TrainExpand(Exp_CFM_Phase1):
 				x_std = batch["x_std"].to(self.device)
 
 				pred_mel = self.model.inference(
-					stretched_mel=x0,
+					stretched_mel=cond_mel,
 					phoneme_ids=phoneme_ids,
 					lip_embedding=None,
 					x_lens=x_lens,
@@ -146,13 +146,13 @@ class Exp_CFM_Phase1_TrainExpand(Exp_CFM_Phase1):
 
 				scale = x_std[:, None, None]
 				bias = x_mean[:, None, None]
-				pred_mel_out = pred_mel * scale + bias
-				x0_out = x0 * scale + bias
-				x1_out = x1 * scale + bias
+				pred_mel_out  = pred_mel  * scale + bias
+				cond_mel_out  = cond_mel  * scale + bias
+				x1_out        = x1        * scale + bias
 
 				for i, key in enumerate(pair_keys):
 					safe_key = str(key).replace("/", "_").replace(" ", "_")
-					vocoder.save_audio(x0_out[i : i + 1], os.path.join(output_dir, f"{safe_key}_x0.wav"))
+					vocoder.save_audio(cond_mel_out[i : i + 1], os.path.join(output_dir, f"{safe_key}_cond.wav"))
 					vocoder.save_audio(pred_mel_out[i : i + 1], os.path.join(output_dir, f"{safe_key}_pred.wav"))
 					vocoder.save_audio(x1_out[i : i + 1], os.path.join(output_dir, f"{safe_key}_x1.wav"))
 

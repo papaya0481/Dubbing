@@ -271,20 +271,20 @@ class Dataset_CFM_Phase1(Dataset):
 
         # Normalize x0 and x1 with the SAME scale derived from x0,
         # so the model learns in a stable space and we can invert at inference.
-        x0 = stretched_r1_mel.squeeze(0)   # [n_mels, T]
-        x1 = r2_mel.squeeze(0)             # [n_mels, T]
-        x_mean = x0.mean()
-        x_std  = x0.std().clamp(min=1e-5)
-        x0 = (x0 - x_mean) / x_std
+        cond_mel = stretched_r1_mel.squeeze(0)   # [n_mels, T]
+        x1 = r2_mel.squeeze(0)                     # [n_mels, T]
+        x_mean = cond_mel.mean()
+        x_std  = cond_mel.std().clamp(min=1e-5)
+        cond_mel = (cond_mel - x_mean) / x_std
         x1 = (x1 - x_mean) / x_std
 
-        mse = float(torch.mean((x0 - x1) ** 2).item())
+        mse = float(torch.mean((cond_mel - x1) ** 2).item())
 
         text_r1 = self._extract_text(sample.r1_tg, "words")
 
         return {
             "pair_key": sample.pair_key,
-            "x0": x0,
+            "cond_mel": cond_mel,
             "x1": x1,
             "phoneme_ids": phoneme_ids,
             "x_len": torch.tensor(target_frames, dtype=torch.long),
@@ -298,9 +298,9 @@ class Dataset_CFM_Phase1(Dataset):
 def collate_cfm_phase1(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
     lengths = torch.stack([item["x_len"] for item in batch], dim=0)
     max_len = int(lengths.max().item())
-    n_mels = batch[0]["x0"].shape[0]
+    n_mels = batch[0]["cond_mel"].shape[0]
 
-    x0 = torch.zeros(len(batch), n_mels, max_len, dtype=batch[0]["x0"].dtype)
+    cond_mel = torch.zeros(len(batch), n_mels, max_len, dtype=batch[0]["cond_mel"].dtype)
     x1 = torch.zeros(len(batch), n_mels, max_len, dtype=batch[0]["x1"].dtype)
     phoneme_ids = torch.zeros(len(batch), max_len, dtype=torch.long)
     x_mean = torch.stack([item["x_mean"] for item in batch], dim=0)  # [B]
@@ -312,7 +312,7 @@ def collate_cfm_phase1(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.
     text_r2_list = []
     for i, item in enumerate(batch):
         t = int(item["x_len"].item())
-        x0[i, :, :t] = item["x0"][:, :t]
+        cond_mel[i, :, :t] = item["cond_mel"][:, :t]
         x1[i, :, :t] = item["x1"][:, :t]
         phoneme_ids[i, :t] = item["phoneme_ids"][:t]
         pair_keys.append(item["pair_key"])
@@ -321,7 +321,7 @@ def collate_cfm_phase1(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.
 
     return {
         "pair_key": pair_keys,
-        "x0": x0,
+        "cond_mel": cond_mel,
         "x1": x1,
         "phoneme_ids": phoneme_ids,
         "x_lens": lengths,
