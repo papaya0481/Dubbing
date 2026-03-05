@@ -240,7 +240,7 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument("--dataset-root", type=str, default="/home/ruixin/dataset/MELD")
 	parser.add_argument("--dataset-option", type=str, choices=["sent_emo", "dialog"], default="sent_emo")
 	parser.add_argument("--model-dir", type=str, default="/data2/ruixin/index-tts2/checkpoints")
-	parser.add_argument("--index-tts-root", type=str, default="/home/ruixin/Dubbing/index-tts2")
+	parser.add_argument("--index-tts-root", type=str, default="/home/ruixin/Dubbing/dubbing/indextts")
 	parser.add_argument("--spk-audio-prompt", type=str, required=True)
 	parser.add_argument("--output-dir", type=str, required=True)
 	parser.add_argument("--sample-size", type=int, default=None, help="指定则固定随机种子42抽样；不指定则全量合成")

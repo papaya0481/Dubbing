@@ -152,9 +152,10 @@ class Exp_CFM_Phase1_TrainExpand(Exp_CFM_Phase1):
 
 				for i, key in enumerate(pair_keys):
 					safe_key = str(key).replace("/", "_").replace(" ", "_")
-					vocoder.save_audio(cond_mel_out[i : i + 1], os.path.join(output_dir, f"{safe_key}_cond.wav"))
-					vocoder.save_audio(pred_mel_out[i : i + 1], os.path.join(output_dir, f"{safe_key}_pred.wav"))
-					vocoder.save_audio(x1_out[i : i + 1], os.path.join(output_dir, f"{safe_key}_x1.wav"))
+					t = int(x_lens[i].item())
+					vocoder.save_audio(cond_mel_out[i : i + 1, :, :t], os.path.join(output_dir, f"{safe_key}_cond.wav"))
+					vocoder.save_audio(pred_mel_out[i : i + 1, :, :t], os.path.join(output_dir, f"{safe_key}_pred.wav"))
+					vocoder.save_audio(x1_out[i : i + 1, :, :t], os.path.join(output_dir, f"{safe_key}_x1.wav"))
 
 				if j >= max_batches - 1:
 					break
