@@ -28,7 +28,6 @@ sys.path.insert(0, str(_HERE.parent / "modules"))
 
 from infer_v2 import IndexTTS2
 from semantic_transform import SemanticTransformer
-from modules.mfa_alinger import MFAAligner
 
 
 class IndexTTS2Semantic(IndexTTS2):
@@ -48,14 +47,13 @@ class IndexTTS2Semantic(IndexTTS2):
     def __init__(
         self,
         *args,
-        mfa_beam: int = 20,
-        mfa_retry_beam: int = 200,
+        mfa_aligner=None,
         semantic_transformer_device: Optional[str] = None,
         verbose_transform: bool = False,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.mfa_aligner = MFAAligner(beam=mfa_beam, retry_beam=mfa_retry_beam)
+        self.mfa_aligner = mfa_aligner
         _dev = semantic_transformer_device or self.device
         self.semantic_transformer = SemanticTransformer(device=_dev, verbose=verbose_transform)
 

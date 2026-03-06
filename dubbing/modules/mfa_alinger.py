@@ -365,10 +365,7 @@ class MFAAligner:
         cmvn = cmvn_computer.compute_cmvn_from_features([utt.mfccs for utt in utterances])
         for utt in utterances:
             utt.apply_cmvn(cmvn)
-            try:
-                ctm = self._kalpy_aligner.align_utterance(utt)
-            except AlignerError:
-                ctm = self._kalpy_retry_aligner.align_utterance(utt)
+            ctm = self._kalpy_aligner.align_utterance(utt)
             file_ctm.word_intervals.extend(ctm.word_intervals)
 
         if return_textgrid:

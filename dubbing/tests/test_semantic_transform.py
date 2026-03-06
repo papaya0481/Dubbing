@@ -258,7 +258,6 @@ def test_integration_infer_with_semantic_warp():
         cfg_path=CFG_PATH,
         model_dir=CHECKPOINT_DIR,
         is_fp16=False,
-        mfa_aligner=None,
         verbose_transform=True,
     )
     

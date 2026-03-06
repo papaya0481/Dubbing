@@ -212,7 +212,15 @@ def main() -> None:
         cfg_path=str(Path(args.model_dir) / "config.yaml"),
         is_fp16=args.is_fp16,
         use_cuda_kernel=False,
+        mfa_aligner=None,
     )
+    
+    mfa_module  = importlib.import_module("modules.mfa_alinger")
+    MFAAligner  = getattr(mfa_module, "MFAAligner")
+    print("[Init] loading MFAAligner …")
+    mfa_aligner = MFAAligner(beam=20, retry_beam=200)
+    
+    tts.mfa_aligner = mfa_aligner
 
     # ------------------------------------------------------------------
     # 输出 metadata CSV
