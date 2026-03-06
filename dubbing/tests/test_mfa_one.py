@@ -70,11 +70,16 @@ def test_mfa_aligner_with_dub():
     
     aligner = MFAAligner()
     texts = " ".join(texts)
+    import time
+    start_time = time.time()
     align_result = aligner.align_one_wav(
         text=texts,
         wavs=result.wavs,
         text_file_path="mel_convert/test/test_short1_1.txt"
     )
+    end_time = time.time()
+    print(f"Time taken for alignment: {end_time - start_time:.2f} seconds")
+    print("Alignment result:", align_result)
 
 if __name__ == "__main__":
     test_mfa_aligner_with_dub()
