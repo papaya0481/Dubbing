@@ -426,6 +426,13 @@ class IndexTTS2Batch(IndexTTS2):
             for i_local, global_i in enumerate(item_indices):
                 codes_i   = item_codes[i_local]               # [1, T_codes_i]
                 seg_ls    = item_seg_lens_list[i_local]       # per-seg lengths
+
+                # 裁掉 stop_mel_token（8193）及之后的内容，防止 vq2emb 越界
+                # （codebook_size=8192，有效范围 [0,8191]；8192=BOS, 8193=EOS）
+                stop_tok = self.gpt.stop_mel_token  # 8193
+                stop_positions = (codes_i[0] == stop_tok).nonzero(as_tuple=False)
+                if stop_positions.numel() > 0:
+                    codes_i = codes_i[:, :stop_positions[0, 0].item()]
                 out_path  = output_paths[global_i]
                 text_i    = texts[global_i]
 
