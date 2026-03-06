@@ -44,6 +44,9 @@ class MFAAligner:
         self,
         acoustic_model: AcousticModel | str = "english_us_arpa",
         dictionary_model: DictionaryModel | str = "english_us_arpa",
+        config_path=None,
+        g2p_model_path=None,
+        no_tokenization=False,
     ):
         if isinstance(acoustic_model, str):
             self.acoustic_model_path = AcousticModel.get_pretrained_path(acoustic_model)
@@ -53,6 +56,70 @@ class MFAAligner:
             self.dictionary_model_path = DictionaryModel.get_pretrained_path(dictionary_model)
         else:
             self.dictionary_model_path = None
+
+        # ---- 预初始化与输入无关的静态组件，避免每次 align 重复加载 ----
+        self._g2p_model = G2PModel(g2p_model_path) if g2p_model_path else None
+        self._c = PretrainedAligner.parse_parameters(config_path)
+
+        extracted_models_dir = config.TEMPORARY_DIRECTORY.joinpath("extracted_models", "dictionary")
+        dictionary_directory = extracted_models_dir.joinpath(self.dictionary_model_path.stem)
+        dictionary_directory.mkdir(parents=True, exist_ok=True)
+        l_fst_path       = dictionary_directory.joinpath("L.fst")
+        l_align_fst_path = dictionary_directory.joinpath("L_align.fst")
+        words_path       = dictionary_directory.joinpath("words.txt")
+        phones_path      = dictionary_directory.joinpath("phones.txt")
+
+        lexicon_compiler = LexiconCompiler(
+            disambiguation=False,
+            silence_probability=self.acoustic_model.parameters["silence_probability"],
+            initial_silence_probability=self.acoustic_model.parameters["initial_silence_probability"],
+            final_silence_correction=self.acoustic_model.parameters["final_silence_correction"],
+            final_non_silence_correction=self.acoustic_model.parameters["final_non_silence_correction"],
+            silence_phone=self.acoustic_model.parameters["optional_silence_phone"],
+            oov_phone=self.acoustic_model.parameters["oov_phone"],
+            position_dependent_phones=self.acoustic_model.parameters["position_dependent_phones"],
+            phones=self.acoustic_model.parameters["non_silence_phones"],
+            ignore_case=self._c.get("ignore_case", True),
+        )
+        if l_fst_path.exists() and not config.CLEAN:
+            lexicon_compiler.load_l_from_file(l_fst_path)
+            lexicon_compiler.load_l_align_from_file(l_align_fst_path)
+            lexicon_compiler.word_table = pywrapfst.SymbolTable.read_text(words_path)
+            lexicon_compiler.phone_table = pywrapfst.SymbolTable.read_text(phones_path)
+        else:
+            lexicon_compiler.load_pronunciations(self.dictionary_model_path)
+            lexicon_compiler.create_fsts()
+            lexicon_compiler.clear()
+            # 持久化编译结果，下次直接加载
+            lexicon_compiler.fst.write(str(l_fst_path))
+            lexicon_compiler.align_fst.write(str(l_align_fst_path))
+            lexicon_compiler.word_table.write_text(words_path)
+            lexicon_compiler.phone_table.write_text(phones_path)
+        self._lexicon_compiler = lexicon_compiler
+
+        if no_tokenization or self.acoustic_model.language is Language.unknown:
+            self._tokenizer = SimpleTokenizer(
+                word_table=lexicon_compiler.word_table,
+                word_break_markers=self._c.get("word_break_markers", DEFAULT_WORD_BREAK_MARKERS),
+                punctuation=self._c.get("punctuation", DEFAULT_PUNCTUATION),
+                clitic_markers=self._c.get("clitic_markers", DEFAULT_CLITIC_MARKERS),
+                compound_markers=self._c.get("compound_markers", DEFAULT_COMPOUND_MARKERS),
+                brackets=self._c.get("brackets", DEFAULT_BRACKETS),
+                laughter_word=self._c.get("laughter_word", LAUGHTER_WORD),
+                oov_word=self._c.get("oov_word", OOV_WORD),
+                bracketed_word=self._c.get("bracketed_word", BRACKETED_WORD),
+                cutoff_word=self._c.get("cutoff_word", CUTOFF_WORD),
+                ignore_case=self._c.get("ignore_case", True),
+            )
+        else:
+            self._tokenizer = generate_language_tokenizer(self.acoustic_model.language)
+
+        align_options = {
+            k: v for k, v in self._c.items()
+            if k in ["beam", "retry_beam", "acoustic_scale",
+                     "transition_scale", "self_loop_scale", "boost_silence"]
+        }
+        self._kalpy_aligner = KalpyAligner(self.acoustic_model, lexicon_compiler, **align_options)
             
     def _build_utteranceData(self, 
                             text: str,
@@ -251,89 +318,23 @@ class MFAAligner:
     ) -> HierarchicalCtm | tuple[tgt.TextGrid, list[list[tgt.Interval]]]:
         """
         Align a single wavs with a pronunciation dictionary and a pretrained acoustic model.
-        
-        Modified from https://github.com/MontrealCorpusTools/Montreal-Forced-Aligner/blob/main/montreal_forced_aligner/command_line/align_one.py
+        所有与输入无关的组件（acoustic model, lexicon compiler, tokenizer, aligner）
+        均在 __init__ 中预加载，此处只做逐帧特征提取与对齐。
         """
-        config_path = kwargs.get("config_path", None)
-        
-        text_file_path: Path = kwargs.get("text_file_path", None)
-        dictionary_path: Path = self.dictionary_model_path or kwargs.get("dictionary_path", None)
-        acoustic_model_path = self.acoustic_model_path or kwargs.get("acoustic_model_path", None)
-        
-        output_path: Path = kwargs.get("output_path", Path("alignment.TextGrid"))
-        
-        output_format = kwargs.get("output_format", "long_textgrid")
-        no_tokenization = kwargs.get("no_tokenization", False)
-        g2p_model_path = kwargs.get("g2p_model_path", None)
-
-        acoustic_model = AcousticModel(acoustic_model_path)
-        g2p_model = None
-        if g2p_model_path:
-            g2p_model = G2PModel(g2p_model_path)
-            
-        # load aligner
-        c = PretrainedAligner.parse_parameters(config_path)
-        extracted_models_dir = config.TEMPORARY_DIRECTORY.joinpath("extracted_models", "dictionary")
-        dictionary_directory = extracted_models_dir.joinpath(dictionary_path.stem)
-        dictionary_directory.mkdir(parents=True, exist_ok=True)
-        lexicon_compiler = LexiconCompiler(
-            disambiguation=False,
-            silence_probability=acoustic_model.parameters["silence_probability"],
-            initial_silence_probability=acoustic_model.parameters["initial_silence_probability"],
-            final_silence_correction=acoustic_model.parameters["final_silence_correction"],
-            final_non_silence_correction=acoustic_model.parameters["final_non_silence_correction"],
-            silence_phone=acoustic_model.parameters["optional_silence_phone"],
-            oov_phone=acoustic_model.parameters["oov_phone"],
-            position_dependent_phones=acoustic_model.parameters["position_dependent_phones"],
-            phones=acoustic_model.parameters["non_silence_phones"],
-            ignore_case=c.get("ignore_case", True),
-        )
-        l_fst_path = dictionary_directory.joinpath("L.fst")
-        l_align_fst_path = dictionary_directory.joinpath("L_align.fst")
-        words_path = dictionary_directory.joinpath("words.txt")
-        phones_path = dictionary_directory.joinpath("phones.txt")
-        if l_fst_path.exists() and not config.CLEAN:
-            lexicon_compiler.load_l_from_file(l_fst_path)
-            lexicon_compiler.load_l_align_from_file(l_align_fst_path)
-            lexicon_compiler.word_table = pywrapfst.SymbolTable.read_text(words_path)
-            lexicon_compiler.phone_table = pywrapfst.SymbolTable.read_text(phones_path)
-        else:
-            lexicon_compiler.load_pronunciations(dictionary_path)
-            lexicon_compiler.create_fsts()
-            lexicon_compiler.clear()
-
-        if no_tokenization or acoustic_model.language is Language.unknown:
-            tokenizer = SimpleTokenizer(
-                word_table=lexicon_compiler.word_table,
-                word_break_markers=c.get("word_break_markers", DEFAULT_WORD_BREAK_MARKERS),
-                punctuation=c.get("punctuation", DEFAULT_PUNCTUATION),
-                clitic_markers=c.get("clitic_markers", DEFAULT_CLITIC_MARKERS),
-                compound_markers=c.get("compound_markers", DEFAULT_COMPOUND_MARKERS),
-                brackets=c.get("brackets", DEFAULT_BRACKETS),
-                laughter_word=c.get("laughter_word", LAUGHTER_WORD),
-                oov_word=c.get("oov_word", OOV_WORD),
-                bracketed_word=c.get("bracketed_word", BRACKETED_WORD),
-                cutoff_word=c.get("cutoff_word", CUTOFF_WORD),
-                ignore_case=c.get("ignore_case", True),
-            )
-        else:
-            tokenizer = generate_language_tokenizer(acoustic_model.language)
-            
-        # file processing
         wav_length_seconds = wavs.shape[-1] / sampling_rate
-        
-        raw_utteracesData = self._build_utteranceData(
+
+        raw_utterances_data = self._build_utteranceData(
             text=text,
             speaker_name=kwargs.get("speaker_name", None),
             file_name=kwargs.get("file_name", None),
             begin=0.0,
             end=wav_length_seconds,
         )
-        
+
         file_ctm = HierarchicalCtm([])
         utterances = []
         cmvn_computer = CmvnComputer()
-        for utterance in raw_utteracesData:
+        for utterance in raw_utterances_data:
             seg = self._build_Segment(
                 wavs=wavs,
                 sampling_rate=sampling_rate,
@@ -341,46 +342,24 @@ class MFAAligner:
             )
             normalized_text = tokenize_utterance_text(
                 utterance.text,
-                lexicon_compiler,
-                tokenizer,
-                g2p_model,
-                language=acoustic_model.language,
+                self._lexicon_compiler,
+                self._tokenizer,
+                self._g2p_model,
+                language=self.acoustic_model.language,
             )
             utt = KalpyUtterance(seg, normalized_text)
-            utt.generate_mfccs(acoustic_model.mfcc_computer)
+            utt.generate_mfccs(self.acoustic_model.mfcc_computer)
             utterances.append(utt)
 
         cmvn = cmvn_computer.compute_cmvn_from_features([utt.mfccs for utt in utterances])
-        align_options = {
-            k: v
-            for k, v in c.items()
-            if k
-            in [
-                "beam",
-                "retry_beam",
-                "acoustic_scale",
-                "transition_scale",
-                "self_loop_scale",
-                "boost_silence",
-            ]
-        }
-        if g2p_model is not None or not (l_fst_path.exists() and not config.CLEAN):
-            lexicon_compiler.fst.write(str(l_fst_path))
-            lexicon_compiler.align_fst.write(str(l_align_fst_path))
-            lexicon_compiler.word_table.write_text(words_path)
-            lexicon_compiler.phone_table.write_text(phones_path)
-        kalpy_aligner = KalpyAligner(acoustic_model, lexicon_compiler, **align_options)
         for utt in utterances:
             utt.apply_cmvn(cmvn)
-            ctm = kalpy_aligner.align_utterance(utt)
+            ctm = self._kalpy_aligner.align_utterance(utt)
             file_ctm.word_intervals.extend(ctm.word_intervals)
-    
+
         if return_textgrid:
             return self.ctm_to_textgrid_fast(file_ctm)
         return file_ctm
-        # file_ctm.export_textgrid(
-        #     output_path, file_duration=file.wav_info.duration, output_format=output_format
-        # )
         
     @staticmethod
     def ctm_to_textgrid_fast(
