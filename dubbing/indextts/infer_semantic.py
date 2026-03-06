@@ -175,9 +175,12 @@ class IndexTTS2Semantic(IndexTTS2):
 
         # ----------------------------------------------------------
         # 3. MFA 强制对齐：得到 source_textgrid
-        #    去除 "|" 分隔符，MFA 只处理纯文本
+        #    text 可能是 str 或 list[str]，统一拼接成纯文本
         # ----------------------------------------------------------
-        clean_text = " ".join(text).strip()
+        if isinstance(text, str):
+            clean_text = text.strip()
+        else:
+            clean_text = " ".join(text).strip()
         import time
         start_time = time.time()
         mfa_result = aligner.align_one_wav(
