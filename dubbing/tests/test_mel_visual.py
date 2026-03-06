@@ -115,7 +115,7 @@ def save_mel_phoneme_visualization(mel, phoneme_ids, transformer, image_path, ti
 
 def main():
     # ---- 配置输入 ----
-    WAV_PATH    = "/data2/ruixin/datasets/MELD_gen_pairs_semanti/sent_eo/ost/dev_dia0_utt0_r1.wav"
+    WAV_PATH    = "/home/ruixin/Dubbing/checkpoints/cfm_phase1_LipSyncCFM_030521_0b3c_0/test_outputs@test1_0/test_dia167_utt6_cond.wav"
     TEXT        = "You know what I mean"
     BEAM        = 20
     RETRY_BEAM  = 200
