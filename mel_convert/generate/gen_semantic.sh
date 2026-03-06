@@ -1,0 +1,7 @@
+export CUDA_VISIBLE_DEVICES=1
+
+python -m pdb mel_convert/generate/gen_semantic_stretch.py \
+    --metadata-csv /data2/ruixin/datasets/MELD_gen_pairs_semanti/sent_emo/generation_metadata.csv \
+    --output-dir   /data2/ruixin/datasets/MELD_gen_pairs_semanti/semantic_stretch/sent_emo \
+    --model-dir    /data2/ruixin/index-tts2/checkpoints \
+    --index-tts-root /home/ruixin/Dubbing/dubbing

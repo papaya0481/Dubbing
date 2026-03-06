@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pywrapfst
 from kalpy.aligner import KalpyAligner
+from kalpy.exceptions import AlignerError
 import torch
 from kalpy.feat.cmvn import CmvnComputer
 from kalpy.fstext.lexicon import HierarchicalCtm, LexiconCompiler
@@ -47,6 +48,8 @@ class MFAAligner:
         config_path=None,
         g2p_model_path=None,
         no_tokenization=False,
+        beam: int | None = None,
+        retry_beam: int | None = None,
     ):
         if isinstance(acoustic_model, str):
             self.acoustic_model_path = AcousticModel.get_pretrained_path(acoustic_model)
@@ -119,7 +122,15 @@ class MFAAligner:
             if k in ["beam", "retry_beam", "acoustic_scale",
                      "transition_scale", "self_loop_scale", "boost_silence"]
         }
+        if beam is not None:
+            align_options["beam"] = beam
+        if retry_beam is not None:
+            align_options["retry_beam"] = retry_beam
         self._kalpy_aligner = KalpyAligner(self.acoustic_model, lexicon_compiler, **align_options)
+        # 预建 retry aligner（beam = retry_beam）
+        retry_options = dict(align_options)
+        retry_options["beam"] = align_options.get("retry_beam", align_options.get("beam", 400))
+        self._kalpy_retry_aligner = KalpyAligner(self.acoustic_model, lexicon_compiler, **retry_options)
             
     def _build_utteranceData(self, 
                             text: str,
@@ -354,7 +365,10 @@ class MFAAligner:
         cmvn = cmvn_computer.compute_cmvn_from_features([utt.mfccs for utt in utterances])
         for utt in utterances:
             utt.apply_cmvn(cmvn)
-            ctm = self._kalpy_aligner.align_utterance(utt)
+            try:
+                ctm = self._kalpy_aligner.align_utterance(utt)
+            except AlignerError:
+                ctm = self._kalpy_retry_aligner.align_utterance(utt)
             file_ctm.word_intervals.extend(ctm.word_intervals)
 
         if return_textgrid:

@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import tgt as _tgt
 
 # ---------------------------------------------------------------------------
 # Emotion helpers（与 gen.py 保持一致）
@@ -99,18 +100,12 @@ REQUIRED_FIELDS = ["sample_key", "repeat_idx", "text", "source_prompt_wav", "emo
 
 
 def load_rows(metadata_csv: Path) -> list[dict[str, Any]]:
-    """载入 generation_metadata.csv，每行均做必需字段校验。"""
+    """载入 generation_metadata.csv，不做字段校验，由调用方逐条处理。"""
     rows: list[dict[str, Any]] = []
     with metadata_csv.open("r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
-        for lineno, raw_row in enumerate(reader, start=2):   # 2 = header is line 1
-            row = sanitize_row_keys(raw_row)
-            missing = [fld for fld in REQUIRED_FIELDS if not str(row.get(fld, "")).strip()]
-            if missing:
-                raise ValueError(
-                    f"[行 {lineno}] 缺少必需字段：{missing}  (row={dict(list(row.items())[:6])})"
-                )
-            rows.append(row)
+        for raw_row in reader:
+            rows.append(sanitize_row_keys(raw_row))
     return rows
 
 
@@ -211,19 +206,12 @@ def main() -> None:
     infer_semantic_mod = importlib.import_module("indextts.infer_semantic")
     IndexTTS2Semantic  = getattr(infer_semantic_mod, "IndexTTS2Semantic")
 
-    mfa_module   = importlib.import_module("modules.mfa_alinger")
-    MFAAligner   = getattr(mfa_module, "MFAAligner")
-
-    print("[Init] loading MFAAligner …")
-    mfa_aligner = MFAAligner()
-
     print("[Init] loading IndexTTS2Semantic …")
     tts = IndexTTS2Semantic(
         model_dir=args.model_dir,
         cfg_path=str(Path(args.model_dir) / "config.yaml"),
         is_fp16=args.is_fp16,
         use_cuda_kernel=False,
-        mfa_aligner=mfa_aligner,
     )
 
     # ------------------------------------------------------------------
@@ -253,7 +241,26 @@ def main() -> None:
             emo_text   = str(row["emo_text"]).strip()
             source_prompt_wav = Path(str(row["source_prompt_wav"]).strip())
 
-            # ---- 必需输入校验 ----
+            # ---- 必需输入校验，缺少则跳过 ----
+            missing = [fld for fld in REQUIRED_FIELDS if not str(row.get(fld, "")).strip()]
+            if missing:
+                warn = (
+                    f"[{current}/{total}] {sample_key}_r{repeat_idx} -> skipped_missing_fields "
+                    f"{missing}"
+                )
+                print(warn, file=sys.stderr)
+                writer.writerow({
+                    "sample_key": sample_key, "repeat_idx": repeat_idx,
+                    "text": text, "emo_text": emo_text,
+                    "source_prompt_wav": str(row.get("source_prompt_wav", "")),
+                    "target_textgrid": "",
+                    "output_wav": "",
+                    "seg_lens": "", "wav_secs": "",
+                    "status": "skipped_missing_fields", "error": warn,
+                })
+                f.flush()
+                continue
+
             if not text:
                 raise ValueError(f"[{sample_key}_r{repeat_idx}] text 为空")
             if not emo_text:
@@ -265,9 +272,18 @@ def main() -> None:
 
             tg_path = aligned_dir / f"{sample_key}_r{repeat_idx}.TextGrid"
             if not tg_path.exists():
-                raise FileNotFoundError(
-                    f"[{sample_key}_r{repeat_idx}] TextGrid 不存在: {tg_path}"
-                )
+                print(f"[{current}/{total}] {sample_key}_r{repeat_idx} -> skipped_missing_textgrid", flush=True)
+                writer.writerow({
+                    "sample_key": sample_key, "repeat_idx": repeat_idx,
+                    "text": text, "emo_text": emo_text,
+                    "source_prompt_wav": str(source_prompt_wav),
+                    "target_textgrid": str(tg_path),
+                    "output_wav": "",
+                    "seg_lens": "", "wav_secs": "",
+                    "status": "skipped_missing_textgrid", "error": str(tg_path),
+                })
+                current += 1
+                continue
 
             out_wav = output_dir / f"{sample_key}_r{repeat_idx}.wav"
 
@@ -296,6 +312,10 @@ def main() -> None:
             status       = "ok"
             error_msg    = ""
 
+            # 预先读取 TextGrid 目标时长，供后续差值检查
+            _tg_obj = _tgt.read_textgrid(str(tg_path))
+            tg_target_secs: float = float(_tg_obj.end_time)
+
             try:
                 result = tts.infer_with_semantic_warp(
                     spk_audio_prompt=str(source_prompt_wav),
@@ -311,6 +331,24 @@ def main() -> None:
                 _, seg_ls, wav_secs_raw = result
                 seg_lens_str = str(seg_ls)
                 wav_secs_str = str(wav_secs_raw)
+
+                # ---- 时长差值检查 ----
+                dur_diff = abs(float(wav_secs_raw) - tg_target_secs)
+                if dur_diff > 0.02:
+                    warn_msg = (
+                        f"[WARN] 时长偏差过大，丢弃样本："
+                        f"{sample_key}_r{repeat_idx}  "
+                        f"gen={float(wav_secs_raw):.4f}s  "
+                        f"target={tg_target_secs:.4f}s  "
+                        f"diff={dur_diff:.4f}s"
+                    )
+                    print(warn_msg, file=sys.stderr)
+                    if out_wav.exists():
+                        out_wav.unlink()
+                    status    = "discarded"
+                    error_msg = warn_msg
+                    seg_lens_str = ""
+                    wav_secs_str = ""
             except Exception as exc:
                 traceback.print_exc()
                 status    = "failed"

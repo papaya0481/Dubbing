@@ -22,13 +22,13 @@ import torch
 import torchaudio
 import tgt
 
-# ---- 路径：保证能 import 同目录下的 infer_v2 / semantic_transform ----
 _HERE = Path(__file__).resolve().parent
-if str(_HERE) not in sys.path:
-    sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(_HERE.parent / "modules"))
 
-from infer_v2 import IndexTTS2          # noqa: E402
-from semantic_transform import SemanticTransformer   # noqa: E402
+from infer_v2 import IndexTTS2
+from semantic_transform import SemanticTransformer
+from modules.mfa_alinger import MFAAligner
 
 
 class IndexTTS2Semantic(IndexTTS2):
@@ -48,13 +48,14 @@ class IndexTTS2Semantic(IndexTTS2):
     def __init__(
         self,
         *args,
-        mfa_aligner=None,
+        mfa_beam: int = 20,
+        mfa_retry_beam: int = 200,
         semantic_transformer_device: Optional[str] = None,
         verbose_transform: bool = False,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.mfa_aligner = mfa_aligner
+        self.mfa_aligner = MFAAligner(beam=mfa_beam, retry_beam=mfa_retry_beam)
         _dev = semantic_transformer_device or self.device
         self.semantic_transformer = SemanticTransformer(device=_dev, verbose=verbose_transform)
 
@@ -150,11 +151,7 @@ class IndexTTS2Semantic(IndexTTS2):
             - 若 ``output_path`` 非 None：``(output_path, seg_lens, wav_length_final)``
             - 若 ``output_path`` 为 None：``(sampling_rate, wav_ndarray)``
         """
-        aligner = mfa_aligner or self.mfa_aligner
-        if aligner is None:
-            raise ValueError(
-                "需要提供 MFAAligner 实例（通过 mfa_aligner 参数或构造时的 mfa_aligner 参数传入）。"
-            )
+        aligner = mfa_aligner if mfa_aligner is not None else self.mfa_aligner
 
 
         # ----------------------------------------------------------
@@ -174,7 +171,7 @@ class IndexTTS2Semantic(IndexTTS2):
         # ----------------------------------------------------------
         # 2. 加载第一次推理的 wav，准备 MFA 对齐
         # ----------------------------------------------------------
-        wav_out_mono = wav_out.mean(dim=0)                       # (N,)
+        wav_out_mono = wav_out                     # (N,)
         if wav_out_mono.dtype == torch.int16:
             wav_out_mono = wav_out_mono.float() / 32767.0
 
