@@ -103,6 +103,51 @@ class SemanticTransformer:
                     break
         return groups
 
+    def _align_intervals_lcs(
+        self,
+        seq_src: List[tgt.Interval],
+        seq_tgt: List[tgt.Interval],
+    ) -> Tuple[List[tgt.Interval], List[tgt.Interval]]:
+        """LCS 对齐两个 Interval 序列（按 .text 匹配），返回平行的最长公共匹配子序列。
+
+        时间复杂度 O(n*m)，对于典型句子长度（< 100 词 / < 300 音素）完全可接受。
+
+        Returns:
+            ``(matched_src, matched_tgt)``：两个等长的平行列表，仅包含双侧均有对应的 interval。
+        """
+        n, m = len(seq_src), len(seq_tgt)
+
+        # 构建 DP 表（滚动数组可省内存，但此处保留完整以便回溯）
+        dp = [[0] * (m + 1) for _ in range(n + 1)]
+        for i in range(1, n + 1):
+            txt_s = seq_src[i - 1].text.strip().lower()
+            for j in range(1, m + 1):
+                txt_t = seq_tgt[j - 1].text.strip().lower()
+                if txt_s == txt_t:
+                    dp[i][j] = dp[i - 1][j - 1] + 1
+                else:
+                    dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
+
+        # 回溯，逆序收集匹配对
+        matched_s: List[tgt.Interval] = []
+        matched_t: List[tgt.Interval] = []
+        i, j = n, m
+        while i > 0 and j > 0:
+            txt_s = seq_src[i - 1].text.strip().lower()
+            txt_t = seq_tgt[j - 1].text.strip().lower()
+            if txt_s == txt_t:
+                matched_s.append(seq_src[i - 1])
+                matched_t.append(seq_tgt[j - 1])
+                i -= 1
+                j -= 1
+            elif dp[i - 1][j] >= dp[i][j - 1]:
+                i -= 1
+            else:
+                j -= 1
+        matched_s.reverse()
+        matched_t.reverse()
+        return matched_s, matched_t
+
     def _build_phone_groups(
         self,
         tg_src: tgt.TextGrid,
@@ -115,18 +160,56 @@ class SemanticTransformer:
         Optional[List[List[tgt.Interval]]],
         Optional[List[List[tgt.Interval]]],
     ]:
-        """尝试按 words tier 构建 word-guided phone groups，失败时退回音素级别。"""
+        """按 words tier 构建 word-guided phone groups，自动处理长度不等的情况。
+
+        三级降级策略：
+
+        1. **词长相等**：直接一一配对（原行为）。
+        2. **词长不等**：用 LCS 找最长公共匹配子序列，仅保留双侧均有对应的词对作为
+           anchor；未匹配词的时间区间由后续 PCHIP 平滑内插，不会引入错位。
+        3. **无词层 / 异常**：降级到音素级对齐；若音素列表长度也不一致，同样用 LCS。
+        """
         try:
             words_tier_src = tg_src.get_tier_by_name("words")
             words_tier_tgt = tg_tgt.get_tier_by_name("words")
             real_words_src = self.get_real_words(words_tier_src)
             real_words_tgt = self.get_real_words(words_tier_tgt)
-            if len(real_words_src) == len(real_words_tgt) and len(real_words_src) > 0:
-                pg_src = self._group_phones_by_words(phones_src, real_words_src)
-                pg_tgt = self._group_phones_by_words(phones_tgt, real_words_tgt)
-                return real_words_src, real_words_tgt, pg_src, pg_tgt
+
+            if len(real_words_src) > 0 and len(real_words_tgt) > 0:
+                if len(real_words_src) == len(real_words_tgt):
+                    # 长度相等：直接配对，保持原行为
+                    pg_src = self._group_phones_by_words(phones_src, real_words_src)
+                    pg_tgt = self._group_phones_by_words(phones_tgt, real_words_tgt)
+                    return real_words_src, real_words_tgt, pg_src, pg_tgt
+                else:
+                    # 长度不等：LCS 词级对齐，只用匹配词对构 anchor
+                    matched_src, matched_tgt = self._align_intervals_lcs(
+                        real_words_src, real_words_tgt
+                    )
+                    if self.verbose:
+                        print(
+                            f"[SemanticTransformer] word LCS: "
+                            f"src={len(real_words_src)} tgt={len(real_words_tgt)} "
+                            f"matched={len(matched_src)}"
+                        )
+                    if len(matched_src) > 0:
+                        pg_src = self._group_phones_by_words(phones_src, matched_src)
+                        pg_tgt = self._group_phones_by_words(phones_tgt, matched_tgt)
+                        return matched_src, matched_tgt, pg_src, pg_tgt
         except Exception:
             pass
+
+        # 降级：音素级对齐；长度不等时同样用 LCS
+        if len(phones_src) != len(phones_tgt):
+            matched_p_src, matched_p_tgt = self._align_intervals_lcs(phones_src, phones_tgt)
+            if self.verbose:
+                print(
+                    f"[SemanticTransformer] phone LCS fallback: "
+                    f"src={len(phones_src)} tgt={len(phones_tgt)} "
+                    f"matched={len(matched_p_src)}"
+                )
+            if len(matched_p_src) > 0:
+                return matched_p_src, matched_p_tgt, None, None
         return phones_src, phones_tgt, None, None
 
     def build_anchors(
