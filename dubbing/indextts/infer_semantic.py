@@ -123,6 +123,7 @@ class IndexTTS2Semantic(IndexTTS2):
         target_textgrid: Union[str, Path, tgt.TextGrid],
         mfa_aligner=None,
         tier_name: str = "phones",
+        save_mid: bool = False,
         diffusion_steps: int = 25,
         inference_cfg_rate: float = 0.7,
         sampling_rate: int = 22050,
@@ -165,6 +166,16 @@ class IndexTTS2Semantic(IndexTTS2):
         )
         seg_lens, sampling_rate, wav_out, inference_stats = first_result
         S_infer: torch.Tensor = inference_stats["S_infer"].to(self.device)
+
+        # ----------------------------------------------------------
+        # 1b. 保存中间态音频（第一次推理结果）
+        # ----------------------------------------------------------
+        if save_mid and output_path is not None:
+            _p = Path(output_path)
+            mid_path = str(_p.with_stem(_p.stem + "_mid"))
+            os.makedirs(os.path.dirname(os.path.abspath(mid_path)), exist_ok=True)
+            torchaudio.save(mid_path, wav_out.reshape(1, -1).type(torch.int16), sampling_rate)
+            print(f"[save_mid] 中间态音频保存至 {mid_path}")
 
         # ----------------------------------------------------------
         # 2. 加载第一次推理的 wav，准备 MFA 对齐

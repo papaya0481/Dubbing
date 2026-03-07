@@ -115,13 +115,15 @@ def save_mel_phoneme_visualization(mel, phoneme_ids, transformer, image_path, ti
 
 def main():
     # ---- 配置输入 ----
-    WAV_PATH    = "/data2/ruixin/datasets/MELD_gen_pairs_semanti/semantic_stretch/sent_emo/dev_dia1_utt0_r1.wav"
-    TEXT        = "Or! Or, we could go to the bank, close our accounts and cut them off at the source."
+    WAV_PATH    = "/home/ruixin/Dubbing/test_output/test_semantic_warp_mid.wav"
+    TEXT        = "What-You're not serious. I mean she's a very nice woman, but there is no way we can take eight weeks of her. She'll drive us totally crazy."
     BEAM        = 20
     RETRY_BEAM  = 200
 
     wav_path = Path(WAV_PATH)
-    OUTPUT   = str(wav_path.with_suffix(".png"))
+    out_dir  = Path(__file__).resolve().parents[2] / "test_output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    OUTPUT   = str(out_dir / (wav_path.stem + ".png"))
     assert wav_path.exists(), f"音频不存在: {wav_path}"
     wav, sr = torchaudio.load(str(wav_path))
     if wav.shape[0] > 1:

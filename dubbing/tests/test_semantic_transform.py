@@ -24,7 +24,7 @@ if str(project_dubbing_root) not in sys.path:
     sys.path.insert(0, str(project_dubbing_root))
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 import torch
 import tgt
@@ -225,31 +225,61 @@ def test_integration_infer_with_semantic_warp():
     # ---- 路径配置（按实际环境修改）----
     CHECKPOINT_DIR = "/data2/ruixin/index-tts2/checkpoints"
     CFG_PATH       = f"{CHECKPOINT_DIR}/config.yaml"
-    SPK_PROMPT     = "/data2/ruixin/ted-tts/AllInferenceResults/ESD/0001/Angry/0001_000351.wav"
+    SPK_PROMPT     = "/data2/ruixin/datasets/MELD_gen_pairs_semanti/origin/dialog/dev_dia7_row7_r1.wav"
 
     # target_textgrid：使用 test_output/ 里已有的 TextGrid
-    target_root = "/data2/ruixin/datasets/MELD_gen_pairs/"
+    target_root = "/data2/ruixin/datasets/MELD_gen_pairs_semanti/origin/"
     target_base = "dialog"
-    target_name = "dev_dia4_row2_r2"
+    target_name = "dev_dia7_row7_r1"
     TARGET_TG_PATH = (
         Path(target_root) / target_base / "aligned" / f"{target_name}.TextGrid"
     )
     OUTPUT_PATH = str(project_dubbing_root.parent / "test_output" / "test_semantic_warp.wav")
 
-    # read text from ost path
-    ost_txt_path = f"/data2/ruixin/datasets/MELD_gen_pairs/{target_base}/ost/{target_name.replace('_r2', '_r1')}.txt"
-    with open(ost_txt_path, "r") as f:
-        raw_text = f.read().strip()
+    # read text and emotion: prefer generation_metadata.csv, else fallback to txt + random split
+    import csv, re, random
+    metadata_csv = Path(target_root) / target_base / "generation_metadata.csv"
+    # parse sample_key / repeat_idx from target_name (e.g. "dev_dia7_row7_r1")
+    m = re.match(r"^(.+)_r(\d+)$", target_name)
+    sample_key_parsed = m.group(1) if m else target_name
+    repeat_idx_parsed  = m.group(2) if m else "1"
 
-    # 将文本随机分成两段（在单词边界处切割）
-    import random
-    words = raw_text.split()
-    if len(words) <= 1:
-        TEXT = [raw_text, raw_text]
-    else:
-        split_idx = random.randint(1, len(words) - 1)
-        TEXT = [" ".join(words[:split_idx]), " ".join(words[split_idx:])]
-    print(f"[文本分割] 第1段: '{TEXT[0]}' | 第2段: '{TEXT[1]}'")
+    TEXT       = None
+    emo_vector = None
+
+    if metadata_csv.exists():
+        with metadata_csv.open("r", encoding="utf-8-sig", newline="") as _f:
+            for row in csv.DictReader(_f):
+                if (str(row.get("sample_key", "")).strip() == sample_key_parsed and
+                        str(row.get("repeat_idx", "")).strip() == repeat_idx_parsed):
+                    TEXT = str(row["text"]).strip()
+                    emo_labels = str(row["emo_text"]).strip().split("|")
+                    EMOTION_DIMS = ["happy","angry","sad","afraid","disgusted","melancholic","surprised","calm"]
+                    ALIASES = {"joy":"happy","anger":"angry","sadness":"sad","fear":"afraid",
+                               "fearful":"afraid","disgust":"disgusted","surprise":"surprised","neutral":"calm"}
+                    def _emo_vec(e):
+                        e = ALIASES.get(e.lower().strip(), e.lower().strip())
+                        e = e if e in EMOTION_DIMS else "calm"
+                        v = [0.0]*len(EMOTION_DIMS); v[EMOTION_DIMS.index(e)] = 1.0
+                        return v
+                    emo_vector = [_emo_vec(e) for e in emo_labels]
+                    print(f"[metadata.csv] text='{TEXT}', emo={emo_labels}")
+                    break
+
+    if TEXT is None:
+        ost_txt_path = f"/data2/ruixin/datasets/MELD_gen_pairs_semanti/origin/{target_base}/ost/{target_name.replace('_r2', '_r1')}.txt"
+        with open(ost_txt_path, "r") as f:
+            raw_text = f.read().strip()
+        words = raw_text.split()
+        if len(words) <= 1:
+            TEXT = [raw_text, raw_text]
+        else:
+            split_idx = random.randint(1, len(words) - 1)
+            TEXT = [" ".join(words[:split_idx]), " ".join(words[split_idx:])]
+        print(f"[txt fallback] 第1段: '{TEXT[0]}' | 第2段: '{TEXT[1]}'")
+        emo_vector = [[0.0]*8, [0.0]*8]
+        emo_vector[0][0] = 1.0
+        emo_vector[1][1] = 1.0
     
 
     # ---- 初始化 IndexTTS2Semantic ----
@@ -271,9 +301,6 @@ def test_integration_infer_with_semantic_warp():
     model.mfa_aligner = aligner
 
     # ---- 执行语义扭曲推理 ----
-    emo_vector = [[0.0]*8, [0.0]*8]  # 示例情感向量，实际使用时应根据模型需求构造
-    emo_vector[0][0] = 1.0  # 假设第一个维度代表某种情感（如愤怒），这里设置为 1.0 以激活该情感
-    emo_vector[1][1] = 1.0  # 假设第二个维度代表另一种情感（如快乐），这里设置为 1.0 以激活该情感
     result = model.infer_with_semantic_warp(
         spk_audio_prompt=SPK_PROMPT,
         text=TEXT,
@@ -283,6 +310,7 @@ def test_integration_infer_with_semantic_warp():
         emo_audio_prompt=SPK_PROMPT,
         emo_vector=emo_vector,
         verbose=True,
+        save_mid=True,
     )
 
     print(f"\n[集成测试结果] output_path={result[0]}, wav_length={result[2]:.2f}s")
