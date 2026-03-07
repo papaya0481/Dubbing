@@ -674,7 +674,7 @@ REAL_DATA_AVAILABLE = REAL_DATA_DIR.exists()
 
 @pytest.mark.skipif(not REAL_DATA_AVAILABLE, reason="MELD_gen_pairs 不可访问")
 def test_real_data_word_equal():
-    """真实数据：words 长度相等的样本 → 验证 warping_path 对应关系。"""
+    """真实数据：words 长度相等的样本 → 验证 warping_path 对应关系（最多 200 条）。"""
     import os
     sil_tokens = ("", "sp", "sil", "<eps>")
 
@@ -705,7 +705,7 @@ def test_real_data_word_equal():
             label=f"real_word_equal/{stem}"
         )
         tested += 1
-        if tested >= 30:
+        if tested >= 200:
             break
 
     assert tested > 0, "没有找到可测试的 words-equal 样本"
@@ -714,7 +714,7 @@ def test_real_data_word_equal():
 
 @pytest.mark.skipif(not REAL_DATA_AVAILABLE, reason="MELD_gen_pairs 不可访问")
 def test_real_data_word_mismatch():
-    """真实数据：words 长度不等的样本（LCS 路径）→ 验证 warping_path 对应关系。"""
+    """真实数据：words 长度不等的样本（LCS 路径）→ 验证 warping_path 对应关系（遍历全部）。"""
     import os
     sil_tokens = ("", "sp", "sil", "<eps>")
 
@@ -725,6 +725,7 @@ def test_real_data_word_mismatch():
         if f.endswith("_r1.TextGrid")
     ])
     tested = 0
+    skipped = 0
     for fname in files:
         stem = fname.replace("_r1.TextGrid", "")
         p2 = REAL_DATA_DIR / f"{stem}_r2.TextGrid"
@@ -741,16 +742,15 @@ def test_real_data_word_mismatch():
             r1, r2, tier_name="phones"
         )
         if len(words_src) == 0:
+            skipped += 1
             continue  # LCS 无匹配，跳过
         _assert_warp_correspondence(
             warping_path, words_src, words_tgt,
             label=f"real_word_mismatch/{stem}"
         )
         tested += 1
-        if tested >= 10:
-            break
 
-    print(f"  通过 {tested} 条真实 words-mismatch 样本")
+    print(f"  通过 {tested} 条真实 words-mismatch 样本（跳过 LCS 无匹配 {skipped} 条）")
 
 
 # =============================================================================
@@ -777,9 +777,9 @@ if __name__ == "__main__":
     print("  PASSED")
 
     if REAL_DATA_AVAILABLE:
-        print("Real data - words equal:")
+        print("Real data - words equal (最多 200 条):")
         test_real_data_word_equal()
-        print("Real data - words mismatch (LCS):")
+        print("Real data - words mismatch (LCS, 全量):")
         test_real_data_word_mismatch()
     else:
         print("(真实数据路径不存在，跳过)")
