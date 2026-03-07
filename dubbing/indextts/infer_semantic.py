@@ -111,6 +111,45 @@ class IndexTTS2Semantic(IndexTTS2):
         wav = self.bigvgan(vc_target.float()).squeeze().unsqueeze(0)   # (1, N)
         return wav
 
+    @torch.no_grad()
+    def _decode_cond_to_wav(
+        self,
+        cond: torch.Tensor,            # (B, T_mel, D_cond) — 已由 warp_via_lr 生成
+        diffusion_steps: int = 25,
+        inference_cfg_rate: float = 0.7,
+    ) -> torch.Tensor:
+        """跳过 length_regulator，直接将 mel 空间 condition 送入 CFM → BigVGAN。
+
+        配合 :meth:`SemanticTransformer.transform_via_lr` 使用：warp_via_lr 已在内部
+        调用了 length_regulator，此处不应重复调用。
+
+        Returns:
+            wav: shape ``(1, N_samples)``，float32，未 clamp。
+        """
+        prompt_condition = self.cache_s2mel_prompt   # (1, T_prompt, D_cond)
+        ref_mel = self.cache_mel                      # (1, n_mels, T_ref)
+        style = self.cache_s2mel_style                # (1, D_style)
+
+        if prompt_condition is None or ref_mel is None or style is None:
+            raise RuntimeError(
+                "缓存为空，请先调用一次 infer() 以填充 prompt_condition / ref_mel / style。"
+            )
+
+        cat_condition = torch.cat([prompt_condition, cond], dim=1)
+        vc_target = self.s2mel.models["cfm"].inference(
+            cat_condition,
+            torch.LongTensor([cat_condition.size(1)]).to(cat_condition.device),
+            ref_mel,
+            style,
+            None,
+            diffusion_steps,
+            inference_cfg_rate=inference_cfg_rate,
+        )
+        vc_target = vc_target[:, :, ref_mel.size(-1):]   # 去掉 prompt 帧
+
+        wav = self.bigvgan(vc_target.float()).squeeze().unsqueeze(0)   # (1, N)
+        return wav
+
     # ------------------------------------------------------------------
     # 公开接口
     # ------------------------------------------------------------------
@@ -123,6 +162,7 @@ class IndexTTS2Semantic(IndexTTS2):
         target_textgrid: Union[str, Path, tgt.TextGrid],
         mfa_aligner=None,
         tier_name: str = "phones",
+        use_lr_warp: bool = False,
         save_mid: bool = False,
         diffusion_steps: int = 25,
         inference_cfg_rate: float = 0.7,
@@ -208,22 +248,41 @@ class IndexTTS2Semantic(IndexTTS2):
         # ----------------------------------------------------------
         # 4. SemanticTransformer：将 S_infer 扭曲到目标时长
         # ----------------------------------------------------------
-        S_warped, tgt_duration = self.semantic_transformer.transform(
-            s_infer=S_infer,
-            source_textgrid=source_tg,
-            target_textgrid=target_textgrid,
-            tier_name=tier_name,
-        )
+        if use_lr_warp:
+            # warp_via_lr 内部已调用 length_regulator，直接输出 mel 空间 condition
+            cond, tgt_duration = self.semantic_transformer.transform_via_lr(
+                s_infer=S_infer,
+                source_textgrid=source_tg,
+                target_textgrid=target_textgrid,
+                length_regulator=self.s2mel.models["length_regulator"],
+                tier_name=tier_name,
+            )
 
-        # ----------------------------------------------------------
-        # 5. 用 S_warped 重新生成 wav
-        # ----------------------------------------------------------
-        wav_final = self._decode_s_warped_to_wav(
-            s_warped=S_warped,
-            tgt_duration=tgt_duration,
-            diffusion_steps=diffusion_steps,
-            inference_cfg_rate=inference_cfg_rate,
-        )
+            # ----------------------------------------------------------
+            # 5a. cond 已在 mel 空间，直接送 CFM
+            # ----------------------------------------------------------
+            wav_final = self._decode_cond_to_wav(
+                cond=cond,
+                diffusion_steps=diffusion_steps,
+                inference_cfg_rate=inference_cfg_rate,
+            )
+        else:
+            S_warped, tgt_duration = self.semantic_transformer.transform(
+                s_infer=S_infer,
+                source_textgrid=source_tg,
+                target_textgrid=target_textgrid,
+                tier_name=tier_name,
+            )
+
+            # ----------------------------------------------------------
+            # 5b. 用 S_warped 重新生成 wav（内部调用 length_regulator）
+            # ----------------------------------------------------------
+            wav_final = self._decode_s_warped_to_wav(
+                s_warped=S_warped,
+                tgt_duration=tgt_duration,
+                diffusion_steps=diffusion_steps,
+                inference_cfg_rate=inference_cfg_rate,
+            )
 
         wav_final = torch.clamp(32767 * wav_final, -32767.0, 32767.0).cpu()
         wav_length_final = wav_final.shape[-1] / sampling_rate

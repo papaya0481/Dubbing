@@ -115,7 +115,7 @@ def save_mel_phoneme_visualization(mel, phoneme_ids, transformer, image_path, ti
 
 def main():
     # ---- 配置输入 ----
-    WAV_PATH    = "/home/ruixin/Dubbing/test_output/test_semantic_warp_mid.wav"
+    WAV_PATH    = "/home/ruixin/Dubbing/test_output/test_semantic_warp.wav"
     TEXT        = "What-You're not serious. I mean she's a very nice woman, but there is no way we can take eight weeks of her. She'll drive us totally crazy."
     BEAM        = 20
     RETRY_BEAM  = 200

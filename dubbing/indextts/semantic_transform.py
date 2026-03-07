@@ -290,6 +290,56 @@ class SemanticTransformer:
 
         return warped
 
+    def warp_via_lr(
+        self,
+        s_infer: torch.Tensor,          # (B, T_src, D)
+        warping_path: torch.Tensor,     # (T_tgt_codes,) float — PCHIP 导出的码帧映射
+        length_regulator,               # InterpolateRegulator nn.Module
+        target_mel_len: int,            # 目标 mel 帧数（由 tgt_duration * sr / hop 计算）
+        silence_mask: Optional[torch.Tensor] = None,  # (T_tgt_codes,) bool
+        n_quantizers: int = 3,
+    ) -> torch.Tensor:                  # (B, target_mel_len, D_cond)
+        """nearest-neighbor 码帧对齐 + length_regulator，直接输出 mel 空间 condition。
+
+        与 :meth:`warp` 相比：
+        - **对齐**：用 ``torch.gather``（最近邻）而非 ``F.grid_sample``（双线性），
+          与 ``InterpolateRegulator`` 内部 ``F.interpolate(mode='nearest')`` 行为一致。
+        - **输出空间**：直接输出 mel 帧空间的 condition ``(B, T_mel, D_cond)``，
+          调用方无需再单独调用 ``length_regulator``。
+        - **无 for 循环**：对齐与 LR 推理均全向量化。
+
+        典型调用（在 ``infer_semantic.py`` 中替代 ``warp + LR`` 两步）::
+
+            _MEL_SR, _MEL_HOP = 22050, 256
+            target_mel_len = max(1, int(round(tgt_duration * _MEL_SR / _MEL_HOP)))
+            cond = transformer.warp_via_lr(
+                S_infer, warping_path,
+                self.s2mel.models["length_regulator"],
+                target_mel_len,
+                silence_mask=silence_mask,
+            )
+        """
+        B, T_src, D = s_infer.shape
+        T_tgt = warping_path.shape[0]
+
+        # ---- 最近邻码帧重排（torch.gather，全向量化）----
+        src_idx = warping_path.round().long().clamp(0, T_src - 1)          # (T_tgt,)
+        idx_exp = src_idx.view(1, T_tgt, 1).expand(B, T_tgt, D)            # (B, T_tgt, D)
+        warped_codes = torch.gather(s_infer.to(self.device), dim=1,
+                                    index=idx_exp.to(self.device))          # (B, T_tgt, D)
+
+        # ---- 静音帧置零 ----
+        if silence_mask is not None and silence_mask.any():
+            warped_codes[:, silence_mask.to(warped_codes.device), :] = 0.0
+
+        # ---- length_regulator: codes → mel condition ----
+        ylens = torch.LongTensor([target_mel_len]).to(warped_codes.device)
+        cond = length_regulator(
+            warped_codes, ylens=ylens, n_quantizers=n_quantizers, f0=None
+        )[0]                                                                 # (B, T_mel, D_cond)
+
+        return cond
+
     # ------------------------------------------------------------------
     # 高层接口
     # ------------------------------------------------------------------
@@ -360,3 +410,77 @@ class SemanticTransformer:
         warped = self.warp(s_infer.to(self.device), warping_path, silence_mask)
 
         return warped, tgt_duration
+
+    def transform_via_lr(
+        self,
+        s_infer: torch.Tensor,                             # (B, T_src, D)
+        source_textgrid: Union[str, Path, tgt.TextGrid],
+        target_textgrid: Union[str, Path, tgt.TextGrid],
+        length_regulator,                                   # InterpolateRegulator
+        tier_name: str = "phones",
+        n_quantizers: int = 3,
+        mel_sr: int = 22050,
+        mel_hop: int = 256,
+    ) -> Tuple[torch.Tensor, float]:
+        """与 :meth:`transform` 相同的 anchor 对齐逻辑，但最终调用 :meth:`warp_via_lr`
+        直接输出 mel 空间 condition，调用方**不需要**再单独调用 ``length_regulator``。
+
+        ``target_mel_len`` 由 ``tgt_duration * mel_sr / mel_hop`` 内部计算，与
+        :meth:`_decode_s_warped_to_wav` 的逻辑保持一致。
+
+        Returns:
+            ``(cond, tgt_duration)``
+
+            - ``cond``: shape ``(B, target_mel_len, D_cond)``，可直接拼 prompt_condition 送 CFM。
+            - ``tgt_duration``: 目标时长（秒）。
+        """
+        def _as_tg(x: Union[str, Path, tgt.TextGrid]) -> tgt.TextGrid:
+            return x if isinstance(x, tgt.TextGrid) else tgt.io.read_textgrid(str(x))
+
+        def _duration(tier: tgt.IntervalTier) -> float:
+            return tier.end_time if len(tier) > 0 else 0.0
+
+        tg_src = _as_tg(source_textgrid)
+        tg_tgt = _as_tg(target_textgrid)
+
+        tier_src = tg_src.get_tier_by_name(tier_name)
+        tier_tgt = tg_tgt.get_tier_by_name(tier_name)
+
+        phones_src = self.get_real_words(tier_src)
+        phones_tgt = self.get_real_words(tier_tgt)
+        src_duration = _duration(tier_src)
+        tgt_duration = _duration(tier_tgt)
+
+        if tier_name == "phones":
+            words_src, words_tgt, pg_src, pg_tgt = self._build_phone_groups(
+                tg_src, tg_tgt, phones_src, phones_tgt
+            )
+        else:
+            words_src, words_tgt = phones_src, phones_tgt
+            pg_src = pg_tgt = None
+
+        src_anchors, tgt_anchors = self.build_anchors(
+            words_src, words_tgt,
+            src_duration, tgt_duration,
+            phone_groups_src=pg_src,
+            phone_groups_tgt=pg_tgt,
+        )
+
+        total_tgt_frames = max(1, int(round(self._sec_to_frame(tgt_duration))))
+        target_mel_len = max(1, int(round(tgt_duration * mel_sr / mel_hop)))
+
+        if self.verbose:
+            print(
+                f"[SemanticTransformer.transform_via_lr] src_dur={src_duration:.3f}s → "
+                f"tgt_dur={tgt_duration:.3f}s, src_frames={s_infer.shape[1]}, "
+                f"tgt_frames={total_tgt_frames}, target_mel_len={target_mel_len}"
+            )
+
+        warping_path = self.calculate_warping_path(src_anchors, tgt_anchors, total_tgt_frames)
+        silence_mask = self._detect_silence_mask(src_anchors, tgt_anchors, total_tgt_frames)
+        cond = self.warp_via_lr(
+            s_infer, warping_path, length_regulator,
+            target_mel_len, silence_mask=silence_mask, n_quantizers=n_quantizers,
+        )
+
+        return cond, tgt_duration
