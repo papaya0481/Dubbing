@@ -66,7 +66,7 @@ def make_synthetic_textgrid(
 
 def test_warp_shape():
     """验证 warp() 输出 shape 正确。"""
-    from indextts.semantic_transform import SemanticTransformer
+    from dubbing.modules.semantic_stretch.semantic_transform import SemanticTransformer
 
     transformer = SemanticTransformer(device="cpu", verbose=True)
 
@@ -83,7 +83,7 @@ def test_warp_shape():
 
 def test_warp_identity():
     """恒等映射：warp(s, identity_path) ≈ s（双线性插值误差）。"""
-    from indextts.semantic_transform import SemanticTransformer
+    from dubbing.modules.semantic_stretch.semantic_transform import SemanticTransformer
 
     transformer = SemanticTransformer(device="cpu")
 
@@ -100,7 +100,7 @@ def test_warp_identity():
 
 def test_silence_mask():
     """静音 mask：对应帧应被置零。"""
-    from indextts.semantic_transform import SemanticTransformer
+    from dubbing.modules.semantic_stretch.semantic_transform import SemanticTransformer
 
     transformer = SemanticTransformer(device="cpu")
 
@@ -120,7 +120,7 @@ def test_silence_mask():
 
 def test_transform_shape_and_duration():
     """transform() 输出形状与 tgt_duration 应与目标 TextGrid 一致。"""
-    from indextts.semantic_transform import SemanticTransformer
+    from dubbing.modules.semantic_stretch.semantic_transform import SemanticTransformer
 
     transformer = SemanticTransformer(device="cpu", verbose=True)
 
@@ -165,7 +165,7 @@ def test_transform_shape_and_duration():
 
 def test_transform_word_tier():
     """使用 words tier 时，transform() 应正常工作。"""
-    from indextts.semantic_transform import SemanticTransformer
+    from dubbing.modules.semantic_stretch.semantic_transform import SemanticTransformer
 
     transformer = SemanticTransformer(device="cpu")
 
@@ -195,7 +195,7 @@ def test_transform_word_tier():
 
 def test_vectorized_no_for_loop():
     """简单验证：大 batch 下 warp() 返回正确 batch size。"""
-    from indextts.semantic_transform import SemanticTransformer
+    from dubbing.modules.semantic_stretch.semantic_transform import SemanticTransformer
 
     transformer = SemanticTransformer(device="cpu")
 
@@ -379,7 +379,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("可视化演示（合成数据）")
     print("=" * 60)
-    from indextts.semantic_transform import SemanticTransformer
+    from dubbing.modules.semantic_stretch.semantic_transform import SemanticTransformer
 
     transformer = SemanticTransformer(device="cpu", verbose=True)
 

@@ -873,6 +873,7 @@ class IndexTTS2:
             "s2mel_time": s2mel_time,
             "bigvgan_time": bigvgan_time,
             "S_infer": S_infer.cpu(),
+            "semantic_cond": cond.cpu(),
         }
         self.logger.print_time_stats(time_stats, total_inference_time, wav_length)
 

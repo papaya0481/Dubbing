@@ -27,7 +27,7 @@ sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_HERE.parent / "modules"))
 
 from infer_v2 import IndexTTS2
-from semantic_transform import SemanticTransformer
+from dubbing.modules.semantic_stretch.semantic_transform import SemanticTransformer
 
 
 class IndexTTS2Semantic(IndexTTS2):
