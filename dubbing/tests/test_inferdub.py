@@ -9,7 +9,7 @@ if str(project_dubbing_root) not in sys.path:
     sys.path.insert(0, str(project_dubbing_root))
     
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 from indextts.inferDub import IndexTTS2ForDub
 import torchaudio
@@ -23,7 +23,7 @@ if __name__ == "__main__":
         cfg_path=f"{checkpoint_path}/config.yaml",
         is_fp16=False
     )
-    spk_prompt = "/data2/ruixin/datasets/MELD_raw_audio/test_dia2_utt6.wav"
+    spk_prompt = "/data2/ruixin/datasets/MELD_raw/audios/ost/dev_dia0_utt0.wav"
 
     texts = ['I left my guitar in their apartment.', 'Well you can let me in later.']
 

@@ -167,7 +167,7 @@ class CFM(BASECFM):
         x1: torch.Tensor,
         x_lens: torch.Tensor,
         prompt_lens: torch.Tensor,
-        mu: torch.Tensor,
+        cond: torch.Tensor,
         style: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Training forward pass (conditional flow matching loss).
@@ -176,28 +176,33 @@ class CFM(BASECFM):
             x1:          Ground-truth mel [B, 80, T].
             x_lens:      Valid frame lengths [B].
             prompt_lens: Prompt (reference) frame lengths [B].
-            mu:          Semantic condition [B, T, 512].
+            cond:        Semantic condition [B, T, 512].
             style:       Speaker embedding [B, 192].
         Returns:
             (loss, estimator_output + sigma_correction)
         """
-        b, _, _ = x1.shape
-        t = torch.rand([b, 1, 1], device=mu.device, dtype=x1.dtype)
+        b, _, T = x1.shape
+        t = torch.rand([b, 1, 1], device=cond.device, dtype=x1.dtype)
         z = torch.randn_like(x1)
 
-        y = (1 - (1 - self.sigma_min) * t) * z + t * x1
+        xt = (1 - (1 - self.sigma_min) * t) * z + t * x1
         u = x1 - (1 - self.sigma_min) * z
 
-        prompt = torch.zeros_like(x1)
-        for i in range(b):
-            prompt[i, :, : prompt_lens[i]] = x1[i, :, : prompt_lens[i]]
-            y[i, :, : prompt_lens[i]] = 0.0
-            if self.zero_prompt_speech_token:
-                mu[i, :, : prompt_lens[i]] = 0.0
+        # 向量化构建 prompt mask，替代逐样本循环
+        # prompt_mask: [B, T]，prompt 区域为 True
+        frame_idx = torch.arange(T, device=x1.device)               # [T]
+        prompt_mask = frame_idx.unsqueeze(0) < prompt_lens.unsqueeze(1)  # [B, T]
+        prompt_mask_mel = prompt_mask.unsqueeze(1)                   # [B, 1, T]
+
+        prompt = x1 * prompt_mask_mel                                # [B, 80, T]
+        xt = xt.masked_fill(prompt_mask_mel, 0.0)
+        if self.zero_prompt_speech_token:
+            cond = cond.clone()
+            cond = cond.masked_fill(prompt_mask.unsqueeze(2), 0.0)  # [B, T, 512]
 
         estimator_out = self.estimator(
-            y, prompt, x_lens,
-            t.squeeze(1).squeeze(1), style, mu, prompt_lens,
+            xt, prompt, x_lens,
+            t.squeeze(1).squeeze(1), style, cond, prompt_lens,
         )
         loss = sum(
             self.criterion(

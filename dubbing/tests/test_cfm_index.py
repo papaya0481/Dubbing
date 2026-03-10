@@ -384,6 +384,19 @@ def run_test(args: argparse.Namespace) -> None:
     print("\n[Build] 初始化 ConditionBuilder（加载冻结子模型）…")
     builder = ConditionBuilder(cfg, MODEL_DIR, device)
 
+    # ---- 加载 BigVGAN（用于将 result1 转换回音频）--------------------
+    print("\n[Build] 加载 BigVGAN vocoder …")
+    from indextts.s2mel.modules.bigvgan import bigvgan
+    bigvgan_name = cfg.vocoder.name
+    bigvgan_model = bigvgan.BigVGAN.from_pretrained(bigvgan_name, use_cuda_kernel=False)
+    bigvgan_model = bigvgan_model.to(device)
+    bigvgan_model.remove_weight_norm()
+    bigvgan_model.eval()
+    print(f"  BigVGAN 加载完成：{bigvgan_name}")
+
+    output_dir = PROJ_ROOT / "test_output"
+    output_dir.mkdir(exist_ok=True)
+
     # mel_fn 直接从 builder 复用
     mel_fn  = builder._mel_fn
 
@@ -400,6 +413,7 @@ def run_test(args: argparse.Namespace) -> None:
     print("=" * 70)
 
     all_r1r2, all_r1r3, all_r2r3 = [], [], []
+    first_sample_done = False
 
     for sample in samples:
         # 加载 S_infer
@@ -458,6 +472,16 @@ def run_test(args: argparse.Namespace) -> None:
             all_r2r3.append(l1_r2r3)
 
         print(f"{sample.stem:<30} {l1_r1r2:>12.6f} {l1_r1r3:>12.6f} {l1_r2r3:>12.6f}")
+
+        # ---- 第一个样本：将 result1 经 BigVGAN 声码器保存为音频 ------
+        if not first_sample_done:
+            first_sample_done = True
+            with torch.no_grad():
+                wav = bigvgan_model(result1.float()).squeeze(1)  # [1, T_wav]
+            wav = torch.clamp(32767 * wav, -32767.0, 32767.0).cpu().to(torch.int16)
+            out_wav_path = output_dir / f"{sample.stem}.wav"
+            torchaudio.save(str(out_wav_path), wav, 22050)
+            print(f"  [Audio] result1 已保存 → {out_wav_path}")
 
     # ---- 汇总统计 -------------------------------------------------------
     print("=" * 70)
