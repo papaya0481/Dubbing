@@ -48,6 +48,8 @@ def parse_args() -> argparse.Namespace:
                         help="CSV 中音频路径的列名（默认 audio_path）")
     parser.add_argument("--text-col", type=str, default="Utterance",
                         help="CSV 中文本的列名（默认 text）")
+    parser.add_argument("--drop-cols", type=str, default="Video_Filename,Video_Path",
+                        help="逗号分隔的要从输出 CSV 中删除的列名（默认去掉 video 列）")
     parser.add_argument("--test", action="store_true", default=False,
                         help="测试模式：只生成前 20 个样本")
     return parser.parse_args()
@@ -56,6 +58,37 @@ def parse_args() -> argparse.Namespace:
 # --------------------------------------------------------------------------- #
 #  数据加载                                                                     #
 # --------------------------------------------------------------------------- #
+
+def save_metadata_csv(csv_path: str, output_dir: Path, audio_col: str, drop_cols: set) -> None:
+    """将输入 CSV 增强后（绝对路径 + 输出路径列，去掉 video 列）保存到 output_dir/metadata.csv"""
+    csv_base     = Path(csv_path).parent
+    audios_dir   = output_dir / "audios"
+    semantic_dir = output_dir / "semantic"
+    out_csv      = output_dir / "metadata.csv"
+
+    rows: list[dict] = []
+    fieldnames: list[str] = []
+    with open(csv_path, encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        orig_fields = [c for c in (reader.fieldnames or []) if c not in drop_cols]
+        fieldnames = orig_fields + ["prompt_audio_path", "out_wav", "out_pt"]
+        for row in reader:
+            audio_path = str(row.get(audio_col, "")).strip()
+            if audio_path and not Path(audio_path).is_absolute():
+                audio_path = str((csv_base / audio_path).resolve())
+            stem = Path(audio_path).stem if audio_path else ""
+            new_row = {k: v for k, v in row.items() if k not in drop_cols}
+            new_row["prompt_audio_path"] = audio_path
+            new_row["out_wav"] = str(audios_dir   / f"{stem}.wav") if stem else ""
+            new_row["out_pt"]  = str(semantic_dir / f"{stem}.pt")  if stem else ""
+            rows.append(new_row)
+
+    with open(out_csv, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"[CSV] metadata saved → {out_csv}  ({len(rows)} rows)")
+
 
 def load_work_items(csv_path: str, output_dir: Path, audio_col: str = "audio_path", text_col: str = "text") -> list[dict]:
     csv_base = Path(csv_path).parent
@@ -156,6 +189,8 @@ def main() -> None:
     # audios/ 和 semantic/ 子目录由 load_work_items 创建
 
     items = load_work_items(args.csv, output_dir, args.audio_col, args.text_col)
+    drop_cols = {c.strip() for c in args.drop_cols.split(",") if c.strip()}
+    save_metadata_csv(args.csv, output_dir, args.audio_col, drop_cols)
     if args.test:
         items = items[:20]
         print(f"[Test] 测试模式，截取前 20 个样本")
