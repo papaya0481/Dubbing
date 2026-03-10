@@ -15,11 +15,49 @@ import argparse
 import csv
 import os
 import sys
+import threading
+import time
 import traceback
+import unicodedata
 from pathlib import Path
 
 import torch
 import torch.multiprocessing as mp
+
+
+_UNICODE_TO_ASCII: dict[int, str] = {
+    0x2018: "'",  # ‘
+    0x2019: "'",  # ’
+    0x02BC: "'",  # ʼ
+    0x201C: '"',  # “
+    0x201D: '"',  # ”
+    0x2013: "-",  # en dash
+    0x2014: "-",  # em dash
+    0x2012: "-",  # figure dash
+    0x00A0: " ",
+    0x202F: " ",
+    0x3000: " ",
+    0x0091: "'",  # CP-1252 left single quotation mark
+    0x0092: "'",  # CP-1252 right single quotation mark / apostrophe
+    0x0093: '"',  # CP-1252 left double quotation mark
+    0x0094: '"',  # CP-1252 right double quotation mark
+    0x0096: "-",  # CP-1252 en dash
+    0x0097: "-",  # CP-1252 em dash
+}
+_ZERO_WIDTH = {0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0x2060, 0xFEFF, 0x00AD}
+
+
+def sanitize_text(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text)
+    chars: list[str] = []
+    for ch in text:
+        cp = ord(ch)
+        if cp in _ZERO_WIDTH:
+            continue
+        replacement = _UNICODE_TO_ASCII.get(cp)
+        chars.append(replacement if replacement is not None else ch)
+    text = "".join(chars)
+    return text.encode("ascii", errors="ignore").decode("ascii")
 
 
 # --------------------------------------------------------------------------- #
@@ -52,8 +90,6 @@ def parse_args() -> argparse.Namespace:
                         help="逗号分隔的要从输出 CSV 中删除的列名（默认去掉 video 列）")
     parser.add_argument("--test", action="store_true", default=False,
                         help="测试模式：只生成前 20 个样本")
-    parser.add_argument("--mfa-config", type=str, default=None,
-                        help="MFAAligner 配置文件路径（可选）")
     return parser.parse_args()
 
 
@@ -76,7 +112,7 @@ def save_metadata_csv(csv_path: str, output_dir: Path, audio_col: str, drop_cols
     with open(csv_path, encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         orig_fields = [c for c in (reader.fieldnames or []) if c not in drop_cols]
-        fieldnames = orig_fields + ["prompt_audio_path", "out_wav", "out_pt", "out_aligned", "gen_error", "align_error"]
+        fieldnames = orig_fields + ["prompt_audio_path", "out_wav", "out_pt", "gen_error"]
         for row in reader:
             audio_path = str(row.get(audio_col, "")).strip()
             if audio_path and not Path(audio_path).is_absolute():
@@ -86,17 +122,13 @@ def save_metadata_csv(csv_path: str, output_dir: Path, audio_col: str, drop_cols
             new_row["prompt_audio_path"] = audio_path
             if results is not None and stem in results:
                 r = results[stem]
-                new_row["out_wav"]     = r.get("out_wav", "")
-                new_row["out_pt"]      = r.get("out_pt", "")
-                new_row["out_aligned"] = r.get("out_aligned", "")
-                new_row["gen_error"]   = r.get("gen_error", "")
-                new_row["align_error"] = r.get("align_error", "")
+                new_row["out_wav"]   = r.get("out_wav", "")
+                new_row["out_pt"]    = r.get("out_pt", "")
+                new_row["gen_error"] = r.get("gen_error", "")
             else:
-                new_row["out_wav"]     = ""
-                new_row["out_pt"]      = ""
-                new_row["out_aligned"] = ""
-                new_row["gen_error"]   = ""
-                new_row["align_error"] = ""
+                new_row["out_wav"]   = ""
+                new_row["out_pt"]    = ""
+                new_row["gen_error"] = ""
             rows.append(new_row)
 
     with open(out_csv, "w", encoding="utf-8", newline="") as f:
@@ -108,12 +140,10 @@ def save_metadata_csv(csv_path: str, output_dir: Path, audio_col: str, drop_cols
 
 def load_work_items(csv_path: str, output_dir: Path, audio_col: str = "audio_path", text_col: str = "text") -> list[dict]:
     csv_base = Path(csv_path).parent
-    audios_dir   = output_dir / "audios"
+    audios_dir   = output_dir / "audios" / "ost"
     semantic_dir = output_dir / "semantic"
-    aligned_dir  = output_dir / "aligned"
     audios_dir.mkdir(parents=True, exist_ok=True)
     semantic_dir.mkdir(parents=True, exist_ok=True)
-    aligned_dir.mkdir(parents=True, exist_ok=True)
     items: list[dict] = []
     with open(csv_path, encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
@@ -125,19 +155,20 @@ def load_work_items(csv_path: str, output_dir: Path, audio_col: str = "audio_pat
                 audio_path = str((csv_base / audio_path).resolve())
             if not audio_path or not text:
                 continue
+            text = sanitize_text(text)
             stem = Path(audio_path).stem
-            out_wav     = audios_dir   / f"{stem}.wav"
-            out_pt      = semantic_dir / f"{stem}.pt"
-            out_aligned = aligned_dir  / f"{stem}.TextGrid"
-            if out_wav.exists() and out_pt.exists() and out_aligned.exists():
+            out_wav = audios_dir   / f"{stem}.wav"
+            out_txt = audios_dir   / f"{stem}.txt"
+            out_pt  = semantic_dir / f"{stem}.pt"
+            if out_wav.exists() and out_txt.exists() and out_pt.exists():
                 continue  # 三者都已生成则跳过
             items.append({
-                "audio_path":  audio_path,
-                "text":        text,
-                "stem":        stem,
-                "out_wav":     str(out_wav),
-                "out_pt":      str(out_pt),
-                "out_aligned": str(out_aligned),
+                "audio_path": audio_path,
+                "text":       text,
+                "stem":       stem,
+                "out_wav":    str(out_wav),
+                "out_txt":    str(out_txt),
+                "out_pt":     str(out_pt),
             })
     return items
 
@@ -156,8 +187,6 @@ def worker(rank: int, gpu_id: int, items: list[dict], args: argparse.Namespace,
 
     sys.path.insert(0, str(Path(args.index_tts_root)))
     import importlib
-    import torchaudio
-    import tgt
     infer_mod = importlib.import_module("indextts.infer_v2")
     IndexTTS2 = getattr(infer_mod, "IndexTTS2")
 
@@ -172,19 +201,12 @@ def worker(rank: int, gpu_id: int, items: list[dict], args: argparse.Namespace,
         use_cuda_kernel=False,
     )
 
-    # 加载 MFAAligner（只初始化一次）
-    from modules.mfa_alinger import MFAAligner
-    aligner = MFAAligner()
-
     total = len(items)
     for idx, item in enumerate(items, start=1):
         gen_error = ""
-        align_error = ""
         out_wav_result = ""
         out_pt_result  = ""
-        out_aligned_result = ""
         try:
-            # --- TTS 生成（如果 wav+pt 已存在则跳过）---
             if not Path(item["out_wav"]).exists() or not Path(item["out_pt"]).exists():
                 result = tts.infer(
                     spk_audio_prompt=item["audio_path"],
@@ -204,42 +226,68 @@ def worker(rank: int, gpu_id: int, items: list[dict], args: argparse.Namespace,
                     s_infer = inference_stats.get("S_infer")
                     if s_infer is not None:
                         torch.save(s_infer, item["out_pt"])
+            # 写入 transcript txt
+            Path(item["out_txt"]).write_text(item["text"], encoding="utf-8")
             out_wav_result = item["out_wav"]
             out_pt_result  = item["out_pt"]
+            print(f"[rank {rank}][{idx}/{total}] {item['stem']} -> ok")
         except Exception as exc:
             traceback.print_exc()
             gen_error = str(exc)
-            print(f"[rank {rank}][{idx}/{total}] {item['stem']} -> tts failed: {exc}")
+            print(f"[rank {rank}][{idx}/{total}] {item['stem']} -> failed: {exc}")
 
-        # --- MFA Align（仅在 wav 存在且 TextGrid 未生成时执行）---
-        if not gen_error and Path(item["out_wav"]).exists():
-            try:
-                if not Path(item["out_aligned"]).exists():
-                    wavs, sr = torchaudio.load(item["out_wav"])
-                    wavs = wavs[0]  # mono
-                    textgrid, _ = aligner.align_one_wav(
-                        wavs=wavs,
-                        sampling_rate=sr,
-                        text=item["text"],
-                        return_textgrid=True,
-                    )
-                    tgt.io.write_to_file(textgrid, item["out_aligned"], format="long")
-                out_aligned_result = item["out_aligned"]
-            except Exception as exc:
-                traceback.print_exc()
-                align_error = str(exc)
-                print(f"[rank {rank}][{idx}/{total}] {item['stem']} -> align failed: {exc}")
-
-        status = "ok" if not gen_error and not align_error else ("tts_failed" if gen_error else "align_failed")
-        print(f"[rank {rank}][{idx}/{total}] {item['stem']} -> {status}")
         result_queue.put({
-            "stem":        item["stem"],
-            "out_wav":     out_wav_result,
-            "out_pt":      out_pt_result,
-            "out_aligned": out_aligned_result,
-            "gen_error":   gen_error,
-            "align_error": align_error,
+            "stem":      item["stem"],
+            "out_wav":   out_wav_result,
+            "out_pt":    out_pt_result,
+            "gen_error": gen_error,
         })
+
+
+# --------------------------------------------------------------------------- #
+#  进度监控                                                                     #
+# --------------------------------------------------------------------------- #
+
+def _fmt_seconds(s: float) -> str:
+    """将秒数格式化为 HH:MM:SS 字符串。"""
+    s = max(0.0, s)
+    h = int(s // 3600)
+    m = int((s % 3600) // 60)
+    sec = int(s % 60)
+    return f"{h:02d}:{m:02d}:{sec:02d}"
+
+
+def _progress_monitor(
+    q: "mp.Queue",
+    total_items: int,
+    out_results: dict,
+    stop_event: threading.Event,
+) -> None:
+    """运行在独立线程中，持续从 result_queue 读取结果并打印进度。"""
+    completed = 0
+    start = time.time()
+    while completed < total_items and not stop_event.is_set():
+        try:
+            r = q.get(timeout=1.0)
+            out_results[r["stem"]] = r
+            completed += 1
+            elapsed = time.time() - start
+            avg = elapsed / completed
+            remaining = avg * (total_items - completed)
+            status = "ok" if not r["gen_error"] else "FAIL"
+            print(
+                f"\r[进度] {completed}/{total_items} "
+                f"({100.0 * completed / total_items:.1f}%) "
+                f"| 已用时 {_fmt_seconds(elapsed)} "
+                f"| 预计剩余 {_fmt_seconds(remaining)} "
+                f"| 最新: {r['stem']} [{status}]   ",
+                end="",
+                flush=True,
+            )
+        except Exception:
+            pass  # queue.get 超时，继续等待
+    if completed >= total_items:
+        print()  # 全部完成后换行
 
 
 # --------------------------------------------------------------------------- #
@@ -278,14 +326,31 @@ def main() -> None:
         p.start()
         processes.append(p)
 
+    # 启动进度监控线程（同时负责收集结果）
+    results: dict[str, dict] = {}
+    stop_monitor = threading.Event()
+    monitor_thread = threading.Thread(
+        target=_progress_monitor,
+        args=(result_queue, len(items), results, stop_monitor),
+        daemon=True,
+    )
+    monitor_thread.start()
+
     for p in processes:
         p.join()
 
-    # 汇总结果
-    results: dict[str, dict] = {}
-    while not result_queue.empty():
-        r = result_queue.get()
-        results[r["stem"]] = r
+    # 等待监控线程处理完所有队列项（最多 30 s）
+    stop_monitor.set()
+    monitor_thread.join(timeout=30)
+    if monitor_thread.is_alive():
+        print()  # 确保换行
+        # 兜底：手动排空剩余队列
+        while not result_queue.empty():
+            try:
+                r = result_queue.get_nowait()
+                results[r["stem"]] = r
+            except Exception:
+                break
 
     save_metadata_csv(args.csv, output_dir, args.audio_col, drop_cols, results)
 

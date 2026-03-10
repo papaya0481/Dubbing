@@ -91,8 +91,9 @@ class Transformer(nn.Module):
         self.config = config
         self.layers = nn.ModuleList(TransformerBlock(config) for _ in range(config.n_layer))
         self.norm = AdaptiveLayerNorm(config.dim, RMSNorm(config.dim, eps=config.norm_eps))
-        self.freqs_cis: Optional[Tensor] = None
-        self.mask_cache: Optional[Tensor] = None
+        # 使用 register_buffer 使 freqs_cis / causal_mask 随 .to(device) 自动迁移
+        self.register_buffer("freqs_cis", None, persistent=False)
+        self.register_buffer("causal_mask", None, persistent=False)
         self.max_batch_size = -1
         self.max_seq_length = -1
 
@@ -118,8 +119,8 @@ class Transformer(nn.Module):
             self.config.rope_base, dtype,
         ).to(device)
         self.causal_mask = torch.tril(
-            torch.ones(self.max_seq_length, self.max_seq_length, dtype=torch.bool)
-        ).to(device)
+            torch.ones(self.max_seq_length, self.max_seq_length, dtype=torch.bool, device=device)
+        )
         self.use_kv_cache = use_kv_cache
         self.uvit_skip_connection = self.config.uvit_skip_connection
         if self.uvit_skip_connection:
@@ -141,14 +142,18 @@ class Transformer(nn.Module):
         cross_attention_mask: Optional[Tensor] = None,
     ) -> Tensor:
         assert self.freqs_cis is not None, "Caches must be initialized first"
+        # 确保 freqs_cis / causal_mask 与 input_pos 在同一设备（setup_caches 可能在 CPU 上调用）
+        tgt_device = input_pos.device
+        freqs_cis_t = self.freqs_cis.to(tgt_device)
+        causal_mask_t = self.causal_mask.to(tgt_device)
         if mask is None:
             if not self.training and self.use_kv_cache:
-                mask = self.causal_mask[None, None, input_pos]
+                mask = causal_mask_t[None, None, input_pos]
             else:
-                mask = self.causal_mask[None, None, input_pos]
+                mask = causal_mask_t[None, None, input_pos]
                 mask = mask[..., input_pos]
-        freqs_cis = self.freqs_cis[input_pos]
-        context_freqs_cis = self.freqs_cis[context_input_pos] if context is not None else None
+        freqs_cis = freqs_cis_t[input_pos]
+        context_freqs_cis = freqs_cis_t[context_input_pos] if context is not None else None
 
         skip_in_x_list = []
         for i, layer in enumerate(self.layers):
