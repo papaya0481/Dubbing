@@ -193,6 +193,8 @@ class CFM(BASECFM):
         frame_idx = torch.arange(T, device=x1.device)               # [T]
         prompt_mask = frame_idx.unsqueeze(0) < prompt_lens.unsqueeze(1)  # [B, T]
         prompt_mask_mel = prompt_mask.unsqueeze(1)                   # [B, 1, T]
+        # valid region: frames in [prompt_lens, x_lens)
+        valid_mask = (~prompt_mask) & (frame_idx.unsqueeze(0) < x_lens.unsqueeze(1))  # [B, T]
 
         prompt = x1 * prompt_mask_mel                                # [B, 80, T]
         xt = xt.masked_fill(prompt_mask_mel, 0.0)
@@ -204,12 +206,7 @@ class CFM(BASECFM):
             xt, prompt, x_lens,
             t.squeeze(1).squeeze(1), style, cond, prompt_lens,
         )
-        loss = sum(
-            self.criterion(
-                estimator_out[i, :, prompt_lens[i] : x_lens[i]],
-                u[i, :, prompt_lens[i] : x_lens[i]],
-            )
-            for i in range(b)
-        ) / b
+        valid_mask_mel = valid_mask.unsqueeze(1).expand_as(estimator_out)  # [B, 80, T]
+        loss = self.criterion(estimator_out[valid_mask_mel], u[valid_mask_mel])
 
         return loss, estimator_out + (1 - self.sigma_min) * z
