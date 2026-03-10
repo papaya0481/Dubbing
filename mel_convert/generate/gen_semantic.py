@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
                         help="输出目录（wav + pt 都存这里）")
     parser.add_argument("--model-dir", type=str, required=True,
                         help="IndexTTS2 模型目录（含 config.yaml）")
-    parser.add_argument("--index-tts-root", type=str, required=True,
+    parser.add_argument("--index-tts-root", type=str, default="./dubbing",
                         help="dubbing/ 目录的路径（含 indextts 包）")
     parser.add_argument("--gpus", type=str, default="0",
                         help="逗号分隔的 GPU 编号，如 '0,1'")
@@ -44,6 +44,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-text-tokens-per-sentence", type=int, default=200)
     parser.add_argument("--max-mel-tokens", type=int, default=2000)
     parser.add_argument("--is-fp16", action="store_true", default=False)
+    parser.add_argument("--audio-col", type=str, default="Audio_Path",
+                        help="CSV 中音频路径的列名（默认 audio_path）")
+    parser.add_argument("--text-col", type=str, default="Utterance",
+                        help="CSV 中文本的列名（默认 text）")
+    parser.add_argument("--test", action="store_true", default=False,
+                        help="测试模式：只生成前 20 个样本")
     return parser.parse_args()
 
 
@@ -51,7 +57,8 @@ def parse_args() -> argparse.Namespace:
 #  数据加载                                                                     #
 # --------------------------------------------------------------------------- #
 
-def load_work_items(csv_path: str, output_dir: Path) -> list[dict]:
+def load_work_items(csv_path: str, output_dir: Path, audio_col: str = "audio_path", text_col: str = "text") -> list[dict]:
+    csv_base = Path(csv_path).parent
     audios_dir   = output_dir / "audios"
     semantic_dir = output_dir / "semantic"
     audios_dir.mkdir(parents=True, exist_ok=True)
@@ -60,8 +67,11 @@ def load_work_items(csv_path: str, output_dir: Path) -> list[dict]:
     with open(csv_path, encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            audio_path = str(row.get("audio_path", "")).strip()
-            text = str(row.get("text", "")).strip()
+            audio_path = str(row.get(audio_col, "")).strip()
+            text = str(row.get(text_col, "")).strip()
+            # 相对路径 → 相对 CSV 所在目录解析为绝对路径
+            if audio_path and not Path(audio_path).is_absolute():
+                audio_path = str((csv_base / audio_path).resolve())
             if not audio_path or not text:
                 continue
             stem = Path(audio_path).stem
@@ -117,6 +127,9 @@ def worker(rank: int, gpu_id: int, items: list[dict], args: argparse.Namespace) 
                 emo_vectors=None,        # 不使用文本情感向量
                 verbose=False,
                 num_beams=args.num_beams,
+                
+                method="hmm",
+                
                 max_text_tokens_per_sentence=args.max_text_tokens_per_sentence,
                 max_mel_tokens=args.max_mel_tokens,
                 return_stats=True,
@@ -142,7 +155,10 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     # audios/ 和 semantic/ 子目录由 load_work_items 创建
 
-    items = load_work_items(args.csv, output_dir)
+    items = load_work_items(args.csv, output_dir, args.audio_col, args.text_col)
+    if args.test:
+        items = items[:20]
+        print(f"[Test] 测试模式，截取前 20 个样本")
     print(f"[Plan] {len(items)} items to generate (skipped existing)")
     if not items:
         print("Nothing to do.")
