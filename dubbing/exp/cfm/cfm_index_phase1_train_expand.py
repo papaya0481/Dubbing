@@ -31,6 +31,37 @@ from exp.basic import Exp_Basic
 from data_provider.data_factory import data_provider
 from logger import get_logger
 
+
+def _assemble_cond(
+    prompt_cond: torch.Tensor,
+    infer_cond: torch.Tensor,
+    prompt_lens: torch.Tensor,
+    infer_lens: torch.Tensor,
+) -> torch.Tensor:
+    """Assemble full condition tensor from separate prompt / infer parts.
+
+    Parameters
+    ----------
+    prompt_cond : [B, T_ref_max, 512]  (zero-padded)
+    infer_cond  : [B, T_gen_max, 512]  (zero-padded)
+    prompt_lens : [B]  actual T_ref per sample
+    infer_lens  : [B]  actual T_gen per sample
+
+    Returns
+    -------
+    cond : [B, max(T_ref + T_gen), 512]  zero-padded, on same device as inputs
+    """
+    B      = prompt_cond.size(0)
+    device = prompt_cond.device
+    T_max  = int((prompt_lens + infer_lens).max())
+    cond   = torch.zeros(B, T_max, 512, device=device, dtype=prompt_cond.dtype)
+    for i in range(B):
+        T_r = int(prompt_lens[i])
+        T_g = int(infer_lens[i])
+        cond[i, :T_r, :]      = prompt_cond[i, :T_r, :]
+        cond[i, T_r:T_r+T_g, :] = infer_cond[i, :T_g, :]
+    return cond
+
 logger = get_logger("dubbing.exp.cfm_index")
 
 # ---------------------------------------------------------------------------
@@ -99,11 +130,17 @@ class Exp_CFM_Index_Phase1_TrainExpand(Exp_Basic):
         with ctx:
             progress = tqdm(loader, desc=stage, leave=False, dynamic_ncols=True)
             for batch in progress:
-                x1          = batch["x1_full"].to(self.device)
-                cond        = batch["cond"].to(self.device)
-                style       = batch["style"].to(self.device)
-                x_lens      = batch["x_lens"].to(self.device)
-                prompt_lens = batch["prompt_lens"].to(self.device)
+                dev = self.device
+                x1          = batch["x1_full"].to(dev)
+                style       = batch["style"].to(dev)
+                x_lens      = batch["x_lens"].to(dev)
+                prompt_lens = batch["prompt_lens"].to(dev)
+                infer_lens  = batch["infer_lens"].to(dev)
+                cond        = _assemble_cond(
+                    batch["prompt_cond"].to(dev),
+                    batch["infer_cond"].to(dev),
+                    prompt_lens, infer_lens,
+                )
 
                 if train:
                     self.optimizer.zero_grad(set_to_none=True)
@@ -297,12 +334,18 @@ class Exp_CFM_Index_Phase1_TrainExpand(Exp_Basic):
                 if j >= max_batches:
                     break
 
-                x1          = batch["x1_full"].to(self.device)     # [B, num_mels, T_max]
-                cond        = batch["cond"].to(self.device)         # [B, T_max, 512]
-                style       = batch["style"].to(self.device)        # [B, 192]
-                x_lens      = batch["x_lens"].to(self.device)       # [B]
-                prompt_lens = batch["prompt_lens"].to(self.device)  # [B]
-                ref_mels    = batch["ref_mels"].to(self.device)     # [B, num_mels, T_ref_max]
+                dev         = self.device
+                x1          = batch["x1_full"].to(dev)              # [B, num_mels, T_max]
+                style       = batch["style"].to(dev)                # [B, 192]
+                x_lens      = batch["x_lens"].to(dev)               # [B]
+                prompt_lens = batch["prompt_lens"].to(dev)          # [B]
+                infer_lens  = batch["infer_lens"].to(dev)           # [B]
+                ref_mels    = batch["ref_mels"].to(dev)             # [B, num_mels, T_ref_max]
+                cond        = _assemble_cond(
+                    batch["prompt_cond"].to(dev),
+                    batch["infer_cond"].to(dev),
+                    prompt_lens, infer_lens,
+                )                                                    # [B, T_max, 512]
                 stems       = batch["stems"]
                 B = x1.size(0)
 

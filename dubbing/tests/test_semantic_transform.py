@@ -24,7 +24,6 @@ if str(project_dubbing_root) not in sys.path:
     sys.path.insert(0, str(project_dubbing_root))
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 import torch
 import tgt
@@ -225,12 +224,12 @@ def test_integration_infer_with_semantic_warp():
     # ---- 路径配置（按实际环境修改）----
     CHECKPOINT_DIR = "/data2/ruixin/index-tts2/checkpoints"
     CFG_PATH       = f"{CHECKPOINT_DIR}/config.yaml"
-    SPK_PROMPT     = "/data2/ruixin/datasets/MELD_gen_pairs_semanti/origin/dialog/dev_dia7_row7_r1.wav"
+    SPK_PROMPT     = "/data2/ruixin/datasets/MELD_raw/audios/ost/dev_dia0_utt0.wav"
 
     # target_textgrid：使用 test_output/ 里已有的 TextGrid
-    target_root = "/data2/ruixin/datasets/MELD_gen_pairs_semanti/origin/"
-    target_base = "dialog"
-    target_name = "dev_dia7_row7_r1"
+    target_root = "/data2/ruixin/datasets/MELD_raw/audios/"
+    target_base = "ost"
+    target_name = "dev_dia0_utt0"
     TARGET_TG_PATH = (
         Path(target_root) / target_base / "aligned" / f"{target_name}.TextGrid"
     )
@@ -267,7 +266,7 @@ def test_integration_infer_with_semantic_warp():
                     break
 
     if TEXT is None:
-        ost_txt_path = f"/data2/ruixin/datasets/MELD_gen_pairs_semanti/origin/{target_base}/ost/{target_name.replace('_r2', '_r1')}.txt"
+        ost_txt_path = f"{target_root}/{target_base}/{target_name}.txt"
         with open(ost_txt_path, "r") as f:
             raw_text = f.read().strip()
         words = raw_text.split()

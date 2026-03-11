@@ -49,6 +49,7 @@ def data_provider(args, flag: str):
             max_gen_sec=args.data.max_gen_sec,
             max_code_len=args.data.max_code_len,
             cache_dir=getattr(args.data, "cache_dir", None),
+            cache_batch_size=getattr(args.preprocess, "cache_batch_size", 16),
         )
     else:
         data_set = Data(

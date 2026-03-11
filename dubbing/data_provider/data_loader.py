@@ -398,6 +398,281 @@ def collate_cfm_phase1(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.
 
 
 # =============================================================================
+# CFMIndexCacheBuilder  –  standalone batched cache builder
+# =============================================================================
+
+
+class CFMIndexCacheBuilder:
+    """Build per-sample ``.pt`` cache files for Dataset_CFM_Index_Phase1.
+
+    Heavy frozen-model inference (w2v-bert, CAMPPlus) is **batched** for speed.
+    The length_regulator is run per-sample to avoid variable-length padding
+    artefacts in the interpolated output.
+
+    Speedup over the old per-sample approach comes primarily from batching the
+    w2v-bert encoder (the dominant bottleneck) and CAMPPlus.
+
+    Cache format (``<cache_dir>/<stem>.pt``):
+      - ``ref_mel``     : [num_mels, T_ref]   reference mel spectrogram
+      - ``style``       : [192]               CAMPPlus speaker embedding
+      - ``prompt_cond`` : [T_ref, 512]        length_regulator(S_ref)
+      - ``infer_cond``  : [T_gen, 512]        length_regulator(S_infer)
+      - ``x1_mel``      : [num_mels, T_gen]   target mel spectrogram
+    """
+
+    def __init__(
+        self,
+        preprocess,
+        mel_h,
+        cache_dir,
+        sr_ref_16k: int = 16000,
+        max_ref_sec: float = 15.0,
+        max_gen_sec: float = 10.0,
+        max_code_len: int = 500,
+        batch_size: int = 16,
+    ):
+        self.preprocess   = preprocess
+        self.mel_h        = mel_h
+        self.cache_dir    = Path(cache_dir)
+        self.sr_22k       = int(mel_h.sampling_rate)
+        self.sr_ref_16k   = int(sr_ref_16k)
+        self.max_ref_sec  = max_ref_sec
+        self.max_gen_sec  = max_gen_sec
+        self.max_code_len = max_code_len
+        self.batch_size   = batch_size
+        self._models: Optional[Dict] = None
+        self.device: Optional[torch.device] = None
+
+    def cache_path(self, stem: str) -> Path:
+        return self.cache_dir / f"{stem}.pt"
+
+    # ------------------------------------------------------------------
+    # Public entry point
+    # ------------------------------------------------------------------
+
+    def build(self, samples: List[Dict]) -> None:
+        """Build cache for *samples* (those not yet cached)."""
+        self._ensure_importable()
+        self._load_models()
+        try:
+            batches = [
+                samples[i: i + self.batch_size]
+                for i in range(0, len(samples), self.batch_size)
+            ]
+            for batch_items in tqdm(batches, desc="Building CFM condition cache"):
+                try:
+                    self._process_batch(batch_items)
+                except Exception as e:
+                    logger.warning(
+                        f"[Cache] Batch failed ({e!r}), falling back to per-sample"
+                    )
+                    for item in batch_items:
+                        try:
+                            self._process_batch([item])
+                        except Exception as e2:
+                            logger.warning(
+                                f"[Cache] Skipping {item['stem']}: {e2!r}"
+                            )
+        finally:
+            self._release_models()
+
+    # ------------------------------------------------------------------
+    # Model loading / release
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _ensure_importable():
+        _proj  = Path(__file__).resolve().parents[2]
+        _index = _proj / "index-tts2"
+        for _p in [str(_index), str(_proj)]:
+            if _p not in sys.path:
+                sys.path.insert(0, _p)
+
+    def _load_models(self):
+        from omegaconf import OmegaConf
+        from transformers import SeamlessM4TFeatureExtractor
+        from indextts.utils.maskgct_utils import build_semantic_model, build_semantic_codec
+        from indextts.s2mel.modules.campplus.DTDNN import CAMPPlus
+        from indextts.s2mel.modules.commons import MyModel, load_checkpoint2
+        from huggingface_hub import hf_hub_download
+        import safetensors
+
+        pre    = self.preprocess
+        mdl    = Path(pre.model_dir)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info(f"[Cache] device={device}")
+
+        idx_cfg = OmegaConf.load(str(mdl / "config.yaml"))
+
+        logger.info("[Cache] Loading SeamlessM4TFeatureExtractor …")
+        feat_extractor = SeamlessM4TFeatureExtractor.from_pretrained(
+            "facebook/w2v-bert-2.0"
+        )
+
+        logger.info("[Cache] Loading w2v-bert-2.0 …")
+        sem_model, sem_mean, sem_std = build_semantic_model(str(mdl / pre.w2v_stat))
+        sem_model = sem_model.to(device).eval()
+        sem_mean  = sem_mean.to(device)
+        sem_std   = sem_std.to(device)
+
+        logger.info("[Cache] Loading semantic_codec …")
+        codec = build_semantic_codec(idx_cfg.semantic_codec)
+        codec_ckpt = hf_hub_download(
+            "amphion/MaskGCT", filename="semantic_codec/model.safetensors"
+        )
+        safetensors.torch.load_model(codec, codec_ckpt)
+        sem_codec = codec.to(device).eval()
+
+        logger.info("[Cache] Loading CAMPPlus …")
+        campplus_ckpt = hf_hub_download(
+            "funasr/campplus", filename="campplus_cn_common.bin"
+        )
+        campplus = CAMPPlus(feat_dim=80, embedding_size=192)
+        campplus.load_state_dict(torch.load(campplus_ckpt, map_location="cpu"))
+        campplus = campplus.to(device).eval()
+
+        logger.info("[Cache] Loading length_regulator …")
+        s2mel_model = MyModel(idx_cfg.s2mel, use_gpt_latent=False)
+        s2mel_model, _, _, _ = load_checkpoint2(
+            s2mel_model, None, str(mdl / pre.s2mel_checkpoint),
+            load_only_params=True, ignore_modules=[], is_distributed=False,
+        )
+        len_reg = s2mel_model.models["length_regulator"].to(device).eval()
+
+        self.device  = device
+        self._models = dict(
+            feat_extractor=feat_extractor,
+            sem_model=sem_model, sem_mean=sem_mean, sem_std=sem_std,
+            sem_codec=sem_codec, campplus=campplus, len_reg=len_reg,
+        )
+        logger.info("[Cache] Frozen models ready.")
+
+    def _release_models(self):
+        if self._models is None:
+            return
+        del self._models
+        self._models = None
+        self.device  = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        logger.info("[Cache] Frozen models released.")
+
+    # ------------------------------------------------------------------
+    # Audio loading helper
+    # ------------------------------------------------------------------
+
+    def _load_audio(self, path: str, sr: int, max_sec: float) -> torch.Tensor:
+        wav, orig_sr = torchaudio.load(str(path))
+        if wav.dim() == 2 and wav.size(0) > 1:
+            wav = wav.mean(0, keepdim=True)
+        wav = wav.squeeze(0)
+        if orig_sr != sr:
+            wav = torchaudio.functional.resample(wav, orig_sr, sr)
+        return wav[: int(max_sec * sr)].float()
+
+    # ------------------------------------------------------------------
+    # Core: batched processing
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def _process_batch(self, items: List[Dict]) -> None:
+        dev = self.device
+        m   = self._models
+        B   = len(items)
+
+        # ── 1. Load audio ────────────────────────────────────────────────
+        ref_22k = [self._load_audio(it["prompt_audio_path"], self.sr_22k,     self.max_ref_sec) for it in items]
+        ref_16k = [self._load_audio(it["prompt_audio_path"], self.sr_ref_16k, self.max_ref_sec) for it in items]
+        x1_wavs = [self._load_audio(it["out_wav"],           self.sr_22k,     self.max_gen_sec) for it in items]
+
+        # ── 2. Mel (per-sample; fast) ─────────────────────────────────
+        ref_mels = [
+            get_mel_spectrogram(w.unsqueeze(0).to(dev), self.mel_h).squeeze(0).cpu()
+            for w in ref_22k
+        ]
+        x1_mels = [
+            get_mel_spectrogram(w.unsqueeze(0).to(dev), self.mel_h).squeeze(0).cpu()
+            for w in x1_wavs
+        ]
+        T_refs = [rm.size(-1) for rm in ref_mels]
+        T_gens = [xm.size(-1) for xm in x1_mels]
+
+        # ── 3. Batched fbank → CAMPPlus ──────────────────────────────
+        fbanks = []
+        for w16 in ref_16k:
+            fb = torchaudio.compliance.kaldi.fbank(
+                w16.unsqueeze(0).to(dev),
+                num_mel_bins=80, dither=0, sample_frequency=self.sr_ref_16k,
+            )
+            fbanks.append(fb - fb.mean(0, keepdim=True))
+        max_fb = max(f.size(0) for f in fbanks)
+        fb_pad = torch.zeros(B, max_fb, 80, device=dev)
+        for i, fb in enumerate(fbanks):
+            fb_pad[i, :fb.size(0)] = fb
+        styles = m["campplus"](fb_pad).cpu()   # [B, 192]
+
+        # ── 4. Batched w2v-bert encoder ──────────────────────────────
+        inputs  = m["feat_extractor"](
+            [w.numpy() for w in ref_16k],
+            sampling_rate=self.sr_ref_16k,
+            return_tensors="pt",
+            padding=True,
+        )
+        feat_in = inputs["input_features"].to(dev)
+        attn_m  = inputs["attention_mask"].to(dev)
+        out     = m["sem_model"](
+            input_features=feat_in, attention_mask=attn_m, output_hidden_states=True
+        )
+        spk_embs = (out.hidden_states[17] - m["sem_mean"]) / m["sem_std"]
+        # attention_mask frames ≡ hidden-state frames for w2v-bert-2.0
+        T_feats  = attn_m.sum(dim=1).tolist()
+
+        # Batched semantic_codec quantize; padding positions are discarded per sample
+        _, S_refs_padded = m["sem_codec"].quantize(spk_embs)   # [B, T_feat_max, 1024]
+
+        # ── 5. Per-sample len_reg → prompt_cond ───────────────────────
+        prompt_conds = []
+        for i in range(B):
+            T_f     = int(T_feats[i])
+            s_ref_i = S_refs_padded[i:i+1, :T_f, :]   # [1, T_feat_i, 1024]
+            pc = m["len_reg"](
+                s_ref_i,
+                ylens=torch.LongTensor([T_refs[i]]).to(dev),
+                n_quantizers=3, f0=None,
+            )[0].squeeze(0).cpu()                       # [T_ref_i, 512]
+            prompt_conds.append(pc)
+
+        # ── 6. Per-sample S_infer → len_reg → infer_cond ───────────────
+        infer_conds = []
+        for i, item in enumerate(items):
+            s = torch.load(item["out_pt"], map_location="cpu")
+            if s.dim() == 3 and s.size(0) == 1:
+                s = s.squeeze(0)
+            s = s.float()
+            if s.size(0) > self.max_code_len:
+                s = s[: self.max_code_len]
+            ic = m["len_reg"](
+                s.unsqueeze(0).to(dev),
+                ylens=torch.LongTensor([T_gens[i]]).to(dev),
+                n_quantizers=3, f0=None,
+            )[0].squeeze(0).cpu()                       # [T_gen_i, 512]
+            infer_conds.append(ic)
+
+        # ── 7. Save per-sample cache ─────────────────────────────────
+        for i, item in enumerate(items):
+            torch.save(
+                {
+                    "ref_mel":     ref_mels[i],
+                    "style":       styles[i],
+                    "prompt_cond": prompt_conds[i],
+                    "infer_cond":  infer_conds[i],
+                    "x1_mel":      x1_mels[i],
+                },
+                self.cache_path(item["stem"]),
+            )
+
+
+# =============================================================================
 # Dataset_CFM_Index_Phase1
 # =============================================================================
 
@@ -411,19 +686,17 @@ class Dataset_CFM_Index_Phase1(Dataset):
       - ``out_wav``           : ground-truth target audio
       - ``gen_error``         : non-empty rows are skipped
 
-    On first instantiation (or when cache files are missing), the dataset
-    loads IndexTTS2 frozen sub-models (w2v-bert, semantic_codec, CAMPPlus,
-    length_regulator) and pre-computes per-sample CFM conditions, saving
-    each as ``<cache_dir>/<stem>.pt``.  Subsequent runs skip this step and
-    load directly from cache.
+    On first instantiation (or when cache files are missing) a
+    ``CFMIndexCacheBuilder`` is created to compute and persist per-sample
+    conditions.  Subsequent runs load directly from cache.
 
     Each ``__getitem__`` returns CPU tensors:
       - ``stem``        : str
-      - ``ref_mel``     : [num_mels, T_ref]   reference mel (prompt)
-      - ``style``       : [192]               CAMPPlus speaker embedding
-      - ``prompt_cond`` : [T_ref, 512]        length_regulator output for S_ref
-      - ``infer_cond``  : [T_gen, 512]        length_regulator output for S_infer
-      - ``x1_mel``      : [num_mels, T_gen]   target log-mel spectrogram
+      - ``ref_mel``     : [num_mels, T_ref]
+      - ``style``       : [192]
+      - ``prompt_cond`` : [T_ref, 512]
+      - ``infer_cond``  : [T_gen, 512]
+      - ``x1_mel``      : [num_mels, T_gen]
     """
 
     def __init__(
@@ -439,19 +712,21 @@ class Dataset_CFM_Index_Phase1(Dataset):
         max_gen_sec: float = 10.0,
         max_code_len: int = 500,
         cache_dir: Optional[str] = None,
+        cache_batch_size: int = 16,
     ):
         super().__init__()
-        self.csv_path     = Path(csv_path)
-        self.data_root    = self.csv_path.parent
-        self.split        = split
-        self.mel_h        = mel_h
-        self.preprocess   = preprocess
-        self.sr_22k       = int(mel_h.sampling_rate)
-        self.sr_ref_16k   = int(sr_ref_16k)
-        self.max_ref_sec  = max_ref_sec
-        self.max_gen_sec  = max_gen_sec
-        self.max_code_len = max_code_len
-        self.cache_dir    = (
+        self.csv_path         = Path(csv_path)
+        self.data_root        = self.csv_path.parent
+        self.split            = split
+        self.mel_h            = mel_h
+        self.preprocess       = preprocess
+        self.sr_22k           = int(mel_h.sampling_rate)
+        self.sr_ref_16k       = int(sr_ref_16k)
+        self.max_ref_sec      = max_ref_sec
+        self.max_gen_sec      = max_gen_sec
+        self.max_code_len     = max_code_len
+        self.cache_batch_size = cache_batch_size
+        self.cache_dir        = (
             Path(cache_dir) if cache_dir
             else self.data_root / "cfm_index_cache"
         )
@@ -470,7 +745,7 @@ class Dataset_CFM_Index_Phase1(Dataset):
         self._ensure_cache()
 
     # ------------------------------------------------------------------
-    # CSV loading / splitting (unchanged)
+    # CSV loading / splitting
     # ------------------------------------------------------------------
 
     def _load_csv(self) -> List[Dict]:
@@ -523,192 +798,33 @@ class Dataset_CFM_Index_Phase1(Dataset):
         return samples[val_end:]
 
     # ------------------------------------------------------------------
-    # Cache management
+    # Cache
     # ------------------------------------------------------------------
-
-    def _cache_path(self, stem: str) -> Path:
-        return self.cache_dir / f"{stem}.pt"
 
     def _ensure_cache(self):
         missing = [
             s for s in self.samples
-            if not self._cache_path(s["stem"]).exists()
+            if not (self.cache_dir / f"{s['stem']}.pt").exists()
         ]
         if not missing:
             logger.info(
-                f"[Cache] All {len(self.samples)} samples already cached "
-                f"in {self.cache_dir}"
+                f"[Cache] All {len(self.samples)} samples already cached"
             )
             return
         logger.info(
-            f"[Cache] Building cache for {len(missing)}/{len(self.samples)} "
-            f"samples → {self.cache_dir}"
+            f"[Cache] Building {len(missing)}/{len(self.samples)} missing "
+            f"entries → {self.cache_dir}"
         )
-        self._build_cache(missing)
-
-    def _build_cache(self, samples: List[Dict]):
-        """Load IndexTTS2 frozen models, compute conditions for *samples*,
-        save each as a .pt file, then release models."""
-        # Ensure index-tts2 is importable
-        _proj_root  = Path(__file__).resolve().parents[2]
-        _index_root = _proj_root / "index-tts2"
-        for _p in [str(_index_root), str(_proj_root)]:
-            if _p not in sys.path:
-                sys.path.insert(0, _p)
-
-        from omegaconf import OmegaConf
-        from transformers import SeamlessM4TFeatureExtractor
-        from indextts.utils.maskgct_utils import build_semantic_model, build_semantic_codec
-        from indextts.s2mel.modules.campplus.DTDNN import CAMPPlus
-        from indextts.s2mel.modules.commons import MyModel, load_checkpoint2
-        from huggingface_hub import hf_hub_download
-        import safetensors
-
-        pre    = self.preprocess
-        mdl    = Path(pre.model_dir)
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info(f"[Cache] Using device: {device}")
-
-        idx_cfg = OmegaConf.load(str(mdl / "config.yaml"))
-
-        logger.info("[Cache] Loading SeamlessM4TFeatureExtractor …")
-        feat_extractor = SeamlessM4TFeatureExtractor.from_pretrained(
-            "facebook/w2v-bert-2.0"
-        )
-
-        logger.info("[Cache] Loading w2v-bert-2.0 …")
-        sem_model, sem_mean, sem_std = build_semantic_model(str(mdl / pre.w2v_stat))
-        sem_model = sem_model.to(device).eval()
-        sem_mean  = sem_mean.to(device)
-        sem_std   = sem_std.to(device)
-
-        logger.info("[Cache] Loading semantic_codec …")
-        codec = build_semantic_codec(idx_cfg.semantic_codec)
-        codec_ckpt = hf_hub_download(
-            "amphion/MaskGCT", filename="semantic_codec/model.safetensors"
-        )
-        safetensors.torch.load_model(codec, codec_ckpt)
-        sem_codec = codec.to(device).eval()
-
-        logger.info("[Cache] Loading CAMPPlus …")
-        campplus_ckpt = hf_hub_download(
-            "funasr/campplus", filename="campplus_cn_common.bin"
-        )
-        campplus = CAMPPlus(feat_dim=80, embedding_size=192)
-        campplus.load_state_dict(torch.load(campplus_ckpt, map_location="cpu"))
-        campplus = campplus.to(device).eval()
-
-        logger.info("[Cache] Loading length_regulator from s2mel.pth …")
-        s2mel_model = MyModel(idx_cfg.s2mel, use_gpt_latent=False)
-        s2mel_model, _, _, _ = load_checkpoint2(
-            s2mel_model, None, str(mdl / pre.s2mel_checkpoint),
-            load_only_params=True, ignore_modules=[], is_distributed=False,
-        )
-        len_reg = s2mel_model.models["length_regulator"].to(device).eval()
-
-        frozen = dict(
-            feat_extractor=feat_extractor,
-            sem_model=sem_model, sem_mean=sem_mean, sem_std=sem_std,
-            sem_codec=sem_codec, campplus=campplus, len_reg=len_reg,
-            device=device,
-        )
-
-        for item in tqdm(samples, desc="Building CFM condition cache"):
-            try:
-                self._cache_one(item, frozen)
-            except Exception as e:
-                logger.warning(f"[Cache] Failed for {item['stem']}: {e}")
-
-        # Release GPU memory
-        del frozen, sem_model, sem_codec, campplus, len_reg
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        logger.info("[Cache] Done. Frozen models released.")
-
-    @torch.no_grad()
-    def _cache_one(self, item: Dict, frozen: Dict):
-        """Compute and save CFM conditions for one sample."""
-        device = frozen["device"]
-
-        # ---- Load audio -------------------------------------------------
-        def _load(path, sr, max_sec):
-            wav, orig_sr = torchaudio.load(str(path))
-            if wav.dim() == 2 and wav.size(0) > 1:
-                wav = wav.mean(dim=0, keepdim=True)
-            wav = wav.squeeze(0)
-            if orig_sr != sr:
-                wav = torchaudio.functional.resample(wav, orig_sr, sr)
-            return wav[: int(max_sec * sr)].float()
-
-        ref_22k = _load(item["prompt_audio_path"], self.sr_22k,    self.max_ref_sec)
-        ref_16k = _load(item["prompt_audio_path"], self.sr_ref_16k, self.max_ref_sec)
-        x1_wav  = _load(item["out_wav"],           self.sr_22k,    self.max_gen_sec)
-
-        # ---- ref_mel [num_mels, T_ref] ----------------------------------
-        ref_mel = get_mel_spectrogram(
-            ref_22k.unsqueeze(0).to(device), self.mel_h
-        ).squeeze(0).cpu()   # [num_mels, T_ref]
-        T_ref = ref_mel.size(-1)
-
-        # ---- x1_mel [num_mels, T_gen] -----------------------------------
-        x1_mel = get_mel_spectrogram(
-            x1_wav.unsqueeze(0).to(device), self.mel_h
-        ).squeeze(0).cpu()   # [num_mels, T_gen]
-        T_gen = x1_mel.size(-1)
-
-        # ---- style (CAMPPlus) [192] -------------------------------------
-        fbank = torchaudio.compliance.kaldi.fbank(
-            ref_16k.unsqueeze(0).to(device),
-            num_mel_bins=80, dither=0, sample_frequency=self.sr_ref_16k,
-        )
-        fbank = fbank - fbank.mean(dim=0, keepdim=True)
-        style = frozen["campplus"](fbank.unsqueeze(0)).squeeze(0).cpu()  # [192]
-
-        # ---- S_ref: w2v-bert → semantic_codec --------------------------
-        inputs  = frozen["feat_extractor"](
-            ref_16k.numpy(), sampling_rate=self.sr_ref_16k, return_tensors="pt"
-        )
-        feat_in = inputs["input_features"].to(device)
-        attn_m  = inputs["attention_mask"].to(device)
-        out     = frozen["sem_model"](
-            input_features=feat_in, attention_mask=attn_m, output_hidden_states=True
-        )
-        spk_emb = (out.hidden_states[17] - frozen["sem_mean"]) / frozen["sem_std"]
-        _, S_ref = frozen["sem_codec"].quantize(spk_emb)
-
-        # ---- prompt_cond [T_ref, 512] -----------------------------------
-        prompt_cond = frozen["len_reg"](
-            S_ref,
-            ylens=torch.LongTensor([T_ref]).to(device),
-            n_quantizers=3, f0=None,
-        )[0].squeeze(0).cpu()   # [T_ref, 512]
-
-        # ---- S_infer: load .pt ------------------------------------------
-        s_infer = torch.load(item["out_pt"], map_location="cpu")
-        if s_infer.dim() == 3 and s_infer.size(0) == 1:
-            s_infer = s_infer.squeeze(0)
-        s_infer = s_infer.float()
-        if s_infer.size(0) > self.max_code_len:
-            s_infer = s_infer[: self.max_code_len, :]
-
-        # ---- infer_cond [T_gen, 512] (target length from x1_mel) --------
-        infer_cond = frozen["len_reg"](
-            s_infer.unsqueeze(0).to(device),
-            ylens=torch.LongTensor([T_gen]).to(device),
-            n_quantizers=3, f0=None,
-        )[0].squeeze(0).cpu()   # [T_gen, 512]
-
-        # ---- Save cache -------------------------------------------------
-        torch.save(
-            {
-                "ref_mel":     ref_mel,      # [num_mels, T_ref]
-                "style":       style,        # [192]
-                "prompt_cond": prompt_cond,  # [T_ref, 512]
-                "infer_cond":  infer_cond,   # [T_gen, 512]
-                "x1_mel":      x1_mel,       # [num_mels, T_gen]
-            },
-            self._cache_path(item["stem"]),
-        )
+        CFMIndexCacheBuilder(
+            preprocess=self.preprocess,
+            mel_h=self.mel_h,
+            cache_dir=self.cache_dir,
+            sr_ref_16k=self.sr_ref_16k,
+            max_ref_sec=self.max_ref_sec,
+            max_gen_sec=self.max_gen_sec,
+            max_code_len=self.max_code_len,
+            batch_size=self.cache_batch_size,
+        ).build(missing)
 
     # ------------------------------------------------------------------
     # Dataset interface
@@ -718,9 +834,11 @@ class Dataset_CFM_Index_Phase1(Dataset):
         return len(self.samples)
 
     def __getitem__(self, index: int) -> Dict:
-        item  = self.samples[index]
-        data  = torch.load(
-            self._cache_path(item["stem"]), map_location="cpu", weights_only=True
+        item = self.samples[index]
+        data = torch.load(
+            self.cache_dir / f"{item['stem']}.pt",
+            map_location="cpu",
+            weights_only=True,
         )
         data["stem"] = item["stem"]
         return data
@@ -729,48 +847,60 @@ class Dataset_CFM_Index_Phase1(Dataset):
 def collate_cfm_index_phase1(batch: List[Dict]) -> Dict:
     """Collate pre-computed CFM conditions from Dataset_CFM_Index_Phase1.
 
-    Builds padded batch tensors ready for CFM.forward / CFM.inference:
-      - x1_full    [B, num_mels, T_max]   ref_mel ++ x1_mel, padded
-      - cond       [B, T_max, 512]        prompt_cond ++ infer_cond, padded
-      - ref_mels   [B, num_mels, T_ref_max]  reference mel for CFM.inference
-      - style      [B, 192]
-      - x_lens     [B]  T_ref + T_gen per sample
-      - prompt_lens[B]  T_ref per sample
+    ``prompt_cond`` and ``infer_cond`` are returned as **separate** padded
+    tensors.  The Exp is responsible for assembling the full condition tensor
+    (e.g. via ``_assemble_cond``) before calling CFM.forward / CFM.inference.
+
+    Keys returned
+    -------------
+    x1_full     [B, num_mels, T_max]       ref_mel ++ x1_mel, zero-padded
+    ref_mels    [B, num_mels, T_ref_max]   reference mel for CFM.inference
+    prompt_cond [B, T_ref_max, 512]        length_regulator(S_ref), zero-padded
+    infer_cond  [B, T_gen_max, 512]        length_regulator(S_infer), zero-padded
+    style       [B, 192]
+    x_lens      [B]   T_ref + T_gen per sample  (total CFM sequence length)
+    prompt_lens [B]   T_ref per sample
+    infer_lens  [B]   T_gen per sample
     """
     B        = len(batch)
     num_mels = batch[0]["ref_mel"].size(0)
 
-    T_refs   = [item["ref_mel"].size(-1)   for item in batch]
-    T_gens   = [item["x1_mel"].size(-1)    for item in batch]
+    T_refs   = [item["ref_mel"].size(-1) for item in batch]
+    T_gens   = [item["x1_mel"].size(-1)  for item in batch]
     T_totals = [r + g for r, g in zip(T_refs, T_gens)]
 
     T_ref_max   = max(T_refs)
+    T_gen_max   = max(T_gens)
     T_total_max = max(T_totals)
 
-    x1_full  = torch.zeros(B, num_mels, T_total_max)
-    cond     = torch.zeros(B, T_total_max, 512)
-    ref_mels = torch.zeros(B, num_mels, T_ref_max)
+    x1_full     = torch.zeros(B, num_mels, T_total_max)
+    ref_mels    = torch.zeros(B, num_mels, T_ref_max)
+    prompt_cond = torch.zeros(B, T_ref_max, 512)
+    infer_cond  = torch.zeros(B, T_gen_max, 512)
 
     for i, item in enumerate(batch):
         T_r = T_refs[i]
         T_g = T_gens[i]
-        x1_full[i, :, :T_r]       = item["ref_mel"]
+        x1_full[i, :, :T_r]        = item["ref_mel"]
         x1_full[i, :, T_r:T_r+T_g] = item["x1_mel"]
-        cond[i, :T_r, :]          = item["prompt_cond"]
-        cond[i, T_r:T_r+T_g, :]  = item["infer_cond"]
-        ref_mels[i, :, :T_r]      = item["ref_mel"]
+        ref_mels[i, :, :T_r]       = item["ref_mel"]
+        prompt_cond[i, :T_r, :]    = item["prompt_cond"]
+        infer_cond[i, :T_g, :]     = item["infer_cond"]
 
-    style       = torch.stack([item["style"] for item in batch], dim=0)  # [B, 192]
+    style       = torch.stack([item["style"] for item in batch])   # [B, 192]
     x_lens      = torch.tensor(T_totals, dtype=torch.long)
     prompt_lens = torch.tensor(T_refs,   dtype=torch.long)
+    infer_lens  = torch.tensor(T_gens,   dtype=torch.long)
     stems       = [item["stem"] for item in batch]
 
     return {
         "stems":       stems,
         "x1_full":     x1_full,
-        "cond":        cond,
         "ref_mels":    ref_mels,
+        "prompt_cond": prompt_cond,
+        "infer_cond":  infer_cond,
         "style":       style,
         "x_lens":      x_lens,
         "prompt_lens": prompt_lens,
+        "infer_lens":  infer_lens,
     }

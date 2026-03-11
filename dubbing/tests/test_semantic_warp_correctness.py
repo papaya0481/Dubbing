@@ -47,9 +47,10 @@ import tgt
 # ---- 路径 ----
 _HERE = Path(__file__).resolve().parent
 _DUBBING_ROOT = _HERE.parent
-sys.path.insert(0, str(_DUBBING_ROOT / "indextts"))
+if str(_DUBBING_ROOT) not in sys.path:
+    sys.path.insert(0, str(_DUBBING_ROOT))
 
-from semantic_transform import SemanticTransformer
+from modules.semantic_stretch.semantic_transform import SemanticTransformer
 
 # ---- 全局常量 ----
 FPS = 50.0          # 语义码帧率
