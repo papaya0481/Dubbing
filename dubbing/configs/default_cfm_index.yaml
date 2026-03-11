@@ -23,6 +23,10 @@ itr: 1
 data:
   # Path to the metadata CSV (columns: prompt_audio_path, out_pt, out_wav, gen_error)
   csv_path: /data2/ruixin/datasets/flow_dataset/MELD_semantic/metadata.csv
+  # Cache directory for pre-computed CFM conditions.
+  # null  → <csv_dir>/cfm_index_cache  (auto)
+  # str   → explicit absolute path
+  cache_dir: null
   dataset: cfm_index_phase1
   train_split_ratio: 0.9
   batch_size: 4

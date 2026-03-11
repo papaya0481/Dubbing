@@ -2,11 +2,14 @@ import csv
 import os
 import re
 import json
+import sys
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
+
+from tqdm.auto import tqdm
 
 import pandas as pd
 import tgt
@@ -400,30 +403,34 @@ def collate_cfm_phase1(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.
 
 
 class Dataset_CFM_Index_Phase1(Dataset):
-    """Dataset for training IndexTTS2-CFM (Phase 1).
+    """Dataset for training IndexTTS2-CFM (Phase 1) with condition caching.
 
-    Reads a ``metadata.csv`` file with the following columns:
-      - ``prompt_audio_path`` : reference speaker audio (absolute or relative to csv dir)
-      - ``out_pt``            : path to pre-computed S_infer .pt file  [1?, T_codes, 1024]
-      - ``out_wav``           : path to target audio (ground truth for training)
-      - ``gen_error``         : if non-empty the row is skipped
+    Reads a ``metadata.csv`` file with columns:
+      - ``prompt_audio_path`` : reference speaker audio
+      - ``out_pt``            : pre-computed S_infer .pt file  [1?, T_codes, 1024]
+      - ``out_wav``           : ground-truth target audio
+      - ``gen_error``         : non-empty rows are skipped
 
-    Each ``__getitem__`` returns a dict with CPU tensors:
-      - ``stem``              : sample identifier string
-      - ``s_infer``           : [T_codes, 1024] GPT semantic features
-      - ``s_infer_len``       : scalar LongTensor
-      - ``ref_audio_22k``     : [T_22k]  reference audio at 22050 Hz
-      - ``ref_audio_22k_len`` : scalar LongTensor
-      - ``ref_audio_16k``     : [T_16k]  reference audio at 16000 Hz
-      - ``ref_audio_16k_len`` : scalar LongTensor
-      - ``x1_mel``            : [num_mels, T_gen] log-mel spectrogram of target audio
-      - ``x1_len``            : scalar LongTensor
+    On first instantiation (or when cache files are missing), the dataset
+    loads IndexTTS2 frozen sub-models (w2v-bert, semantic_codec, CAMPPlus,
+    length_regulator) and pre-computes per-sample CFM conditions, saving
+    each as ``<cache_dir>/<stem>.pt``.  Subsequent runs skip this step and
+    load directly from cache.
+
+    Each ``__getitem__`` returns CPU tensors:
+      - ``stem``        : str
+      - ``ref_mel``     : [num_mels, T_ref]   reference mel (prompt)
+      - ``style``       : [192]               CAMPPlus speaker embedding
+      - ``prompt_cond`` : [T_ref, 512]        length_regulator output for S_ref
+      - ``infer_cond``  : [T_gen, 512]        length_regulator output for S_infer
+      - ``x1_mel``      : [num_mels, T_gen]   target log-mel spectrogram
     """
 
     def __init__(
         self,
         csv_path: str,
         mel_h,
+        preprocess,
         sr_ref_16k: int = 16000,
         split: str = "train",
         split_ratio: float = 0.9,
@@ -431,17 +438,24 @@ class Dataset_CFM_Index_Phase1(Dataset):
         max_ref_sec: float = 15.0,
         max_gen_sec: float = 10.0,
         max_code_len: int = 500,
+        cache_dir: Optional[str] = None,
     ):
         super().__init__()
-        self.csv_path    = Path(csv_path)
-        self.data_root   = self.csv_path.parent
-        self.split       = split
-        self.mel_h       = mel_h
-        self.sr_22k      = int(mel_h.sampling_rate)
-        self.sr_ref_16k  = int(sr_ref_16k)
-        self.max_ref_sec = max_ref_sec
-        self.max_gen_sec = max_gen_sec
+        self.csv_path     = Path(csv_path)
+        self.data_root    = self.csv_path.parent
+        self.split        = split
+        self.mel_h        = mel_h
+        self.preprocess   = preprocess
+        self.sr_22k       = int(mel_h.sampling_rate)
+        self.sr_ref_16k   = int(sr_ref_16k)
+        self.max_ref_sec  = max_ref_sec
+        self.max_gen_sec  = max_gen_sec
         self.max_code_len = max_code_len
+        self.cache_dir    = (
+            Path(cache_dir) if cache_dir
+            else self.data_root / "cfm_index_cache"
+        )
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         all_samples = self._load_csv()
         self.samples = self._split_samples(all_samples, split, split_ratio, seed)
@@ -453,9 +467,10 @@ class Dataset_CFM_Index_Phase1(Dataset):
         logger.info(
             f"Dataset_CFM_Index_Phase1 [{split}]: {len(self.samples)} samples"
         )
+        self._ensure_cache()
 
     # ------------------------------------------------------------------
-    # Data loading helpers
+    # CSV loading / splitting (unchanged)
     # ------------------------------------------------------------------
 
     def _load_csv(self) -> List[Dict]:
@@ -470,7 +485,6 @@ class Dataset_CFM_Index_Phase1(Dataset):
                 prompt  = row.get("prompt_audio_path", "").strip()
                 if not (out_pt and out_wav and prompt):
                     continue
-                # Resolve relative paths
                 if out_pt and not Path(out_pt).is_absolute():
                     out_pt = str((self.data_root / out_pt).resolve())
                 if out_wav and not Path(out_wav).is_absolute():
@@ -478,10 +492,10 @@ class Dataset_CFM_Index_Phase1(Dataset):
                 if not Path(out_pt).exists() or not Path(out_wav).exists():
                     continue
                 samples.append({
-                    "stem":               Path(out_pt).stem,
-                    "prompt_audio_path":  prompt,
-                    "out_pt":             out_pt,
-                    "out_wav":            out_wav,
+                    "stem":              Path(out_pt).stem,
+                    "prompt_audio_path": prompt,
+                    "out_pt":            out_pt,
+                    "out_wav":           out_wav,
                 })
         return samples
 
@@ -492,120 +506,271 @@ class Dataset_CFM_Index_Phase1(Dataset):
         n = len(samples)
         if n == 0:
             return samples
-
-        rng   = torch.Generator().manual_seed(seed)
-        perm  = torch.randperm(n, generator=rng).tolist()
+        rng     = torch.Generator().manual_seed(seed)
+        perm    = torch.randperm(n, generator=rng).tolist()
         samples = [samples[i] for i in perm]
-
         train_n   = max(1, min(int(n * split_ratio), n))
         remaining = n - train_n
         vt_n      = remaining // 2
         if vt_n == 0:
             vt_n = 1 if n >= 3 else 0
-
         train_end = n - 2 * vt_n
         val_end   = train_end + vt_n
-
         if split == "train":
             return samples[:train_end]
         if split == "val":
             return samples[train_end:val_end]
-        return samples[val_end:]  # test
+        return samples[val_end:]
 
-    def _load_audio(self, path: str, target_sr: int, max_sec: float) -> torch.Tensor:
-        """Load and resample audio; returns [T] float32 (mono, truncated)."""
-        wav, sr = torchaudio.load(str(path))
-        if wav.dim() == 2 and wav.size(0) > 1:
-            wav = wav.mean(dim=0, keepdim=True)
-        wav = wav.squeeze(0)
-        if sr != target_sr:
-            wav = torchaudio.functional.resample(wav, sr, target_sr)
-        max_len = int(max_sec * target_sr)
-        return wav[:max_len].float()
+    # ------------------------------------------------------------------
+    # Cache management
+    # ------------------------------------------------------------------
+
+    def _cache_path(self, stem: str) -> Path:
+        return self.cache_dir / f"{stem}.pt"
+
+    def _ensure_cache(self):
+        missing = [
+            s for s in self.samples
+            if not self._cache_path(s["stem"]).exists()
+        ]
+        if not missing:
+            logger.info(
+                f"[Cache] All {len(self.samples)} samples already cached "
+                f"in {self.cache_dir}"
+            )
+            return
+        logger.info(
+            f"[Cache] Building cache for {len(missing)}/{len(self.samples)} "
+            f"samples → {self.cache_dir}"
+        )
+        self._build_cache(missing)
+
+    def _build_cache(self, samples: List[Dict]):
+        """Load IndexTTS2 frozen models, compute conditions for *samples*,
+        save each as a .pt file, then release models."""
+        # Ensure index-tts2 is importable
+        _proj_root  = Path(__file__).resolve().parents[2]
+        _index_root = _proj_root / "index-tts2"
+        for _p in [str(_index_root), str(_proj_root)]:
+            if _p not in sys.path:
+                sys.path.insert(0, _p)
+
+        from omegaconf import OmegaConf
+        from transformers import SeamlessM4TFeatureExtractor
+        from indextts.utils.maskgct_utils import build_semantic_model, build_semantic_codec
+        from indextts.s2mel.modules.campplus.DTDNN import CAMPPlus
+        from indextts.s2mel.modules.commons import MyModel, load_checkpoint2
+        from huggingface_hub import hf_hub_download
+        import safetensors
+
+        pre    = self.preprocess
+        mdl    = Path(pre.model_dir)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info(f"[Cache] Using device: {device}")
+
+        idx_cfg = OmegaConf.load(str(mdl / "config.yaml"))
+
+        logger.info("[Cache] Loading SeamlessM4TFeatureExtractor …")
+        feat_extractor = SeamlessM4TFeatureExtractor.from_pretrained(
+            "facebook/w2v-bert-2.0"
+        )
+
+        logger.info("[Cache] Loading w2v-bert-2.0 …")
+        sem_model, sem_mean, sem_std = build_semantic_model(str(mdl / pre.w2v_stat))
+        sem_model = sem_model.to(device).eval()
+        sem_mean  = sem_mean.to(device)
+        sem_std   = sem_std.to(device)
+
+        logger.info("[Cache] Loading semantic_codec …")
+        codec = build_semantic_codec(idx_cfg.semantic_codec)
+        codec_ckpt = hf_hub_download(
+            "amphion/MaskGCT", filename="semantic_codec/model.safetensors"
+        )
+        safetensors.torch.load_model(codec, codec_ckpt)
+        sem_codec = codec.to(device).eval()
+
+        logger.info("[Cache] Loading CAMPPlus …")
+        campplus_ckpt = hf_hub_download(
+            "funasr/campplus", filename="campplus_cn_common.bin"
+        )
+        campplus = CAMPPlus(feat_dim=80, embedding_size=192)
+        campplus.load_state_dict(torch.load(campplus_ckpt, map_location="cpu"))
+        campplus = campplus.to(device).eval()
+
+        logger.info("[Cache] Loading length_regulator from s2mel.pth …")
+        s2mel_model = MyModel(idx_cfg.s2mel, use_gpt_latent=False)
+        s2mel_model, _, _, _ = load_checkpoint2(
+            s2mel_model, None, str(mdl / pre.s2mel_checkpoint),
+            load_only_params=True, ignore_modules=[], is_distributed=False,
+        )
+        len_reg = s2mel_model.models["length_regulator"].to(device).eval()
+
+        frozen = dict(
+            feat_extractor=feat_extractor,
+            sem_model=sem_model, sem_mean=sem_mean, sem_std=sem_std,
+            sem_codec=sem_codec, campplus=campplus, len_reg=len_reg,
+            device=device,
+        )
+
+        for item in tqdm(samples, desc="Building CFM condition cache"):
+            try:
+                self._cache_one(item, frozen)
+            except Exception as e:
+                logger.warning(f"[Cache] Failed for {item['stem']}: {e}")
+
+        # Release GPU memory
+        del frozen, sem_model, sem_codec, campplus, len_reg
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        logger.info("[Cache] Done. Frozen models released.")
+
+    @torch.no_grad()
+    def _cache_one(self, item: Dict, frozen: Dict):
+        """Compute and save CFM conditions for one sample."""
+        device = frozen["device"]
+
+        # ---- Load audio -------------------------------------------------
+        def _load(path, sr, max_sec):
+            wav, orig_sr = torchaudio.load(str(path))
+            if wav.dim() == 2 and wav.size(0) > 1:
+                wav = wav.mean(dim=0, keepdim=True)
+            wav = wav.squeeze(0)
+            if orig_sr != sr:
+                wav = torchaudio.functional.resample(wav, orig_sr, sr)
+            return wav[: int(max_sec * sr)].float()
+
+        ref_22k = _load(item["prompt_audio_path"], self.sr_22k,    self.max_ref_sec)
+        ref_16k = _load(item["prompt_audio_path"], self.sr_ref_16k, self.max_ref_sec)
+        x1_wav  = _load(item["out_wav"],           self.sr_22k,    self.max_gen_sec)
+
+        # ---- ref_mel [num_mels, T_ref] ----------------------------------
+        ref_mel = get_mel_spectrogram(
+            ref_22k.unsqueeze(0).to(device), self.mel_h
+        ).squeeze(0).cpu()   # [num_mels, T_ref]
+        T_ref = ref_mel.size(-1)
+
+        # ---- x1_mel [num_mels, T_gen] -----------------------------------
+        x1_mel = get_mel_spectrogram(
+            x1_wav.unsqueeze(0).to(device), self.mel_h
+        ).squeeze(0).cpu()   # [num_mels, T_gen]
+        T_gen = x1_mel.size(-1)
+
+        # ---- style (CAMPPlus) [192] -------------------------------------
+        fbank = torchaudio.compliance.kaldi.fbank(
+            ref_16k.unsqueeze(0).to(device),
+            num_mel_bins=80, dither=0, sample_frequency=self.sr_ref_16k,
+        )
+        fbank = fbank - fbank.mean(dim=0, keepdim=True)
+        style = frozen["campplus"](fbank.unsqueeze(0)).squeeze(0).cpu()  # [192]
+
+        # ---- S_ref: w2v-bert → semantic_codec --------------------------
+        inputs  = frozen["feat_extractor"](
+            ref_16k.numpy(), sampling_rate=self.sr_ref_16k, return_tensors="pt"
+        )
+        feat_in = inputs["input_features"].to(device)
+        attn_m  = inputs["attention_mask"].to(device)
+        out     = frozen["sem_model"](
+            input_features=feat_in, attention_mask=attn_m, output_hidden_states=True
+        )
+        spk_emb = (out.hidden_states[17] - frozen["sem_mean"]) / frozen["sem_std"]
+        _, S_ref = frozen["sem_codec"].quantize(spk_emb)
+
+        # ---- prompt_cond [T_ref, 512] -----------------------------------
+        prompt_cond = frozen["len_reg"](
+            S_ref,
+            ylens=torch.LongTensor([T_ref]).to(device),
+            n_quantizers=3, f0=None,
+        )[0].squeeze(0).cpu()   # [T_ref, 512]
+
+        # ---- S_infer: load .pt ------------------------------------------
+        s_infer = torch.load(item["out_pt"], map_location="cpu")
+        if s_infer.dim() == 3 and s_infer.size(0) == 1:
+            s_infer = s_infer.squeeze(0)
+        s_infer = s_infer.float()
+        if s_infer.size(0) > self.max_code_len:
+            s_infer = s_infer[: self.max_code_len, :]
+
+        # ---- infer_cond [T_gen, 512] (target length from x1_mel) --------
+        infer_cond = frozen["len_reg"](
+            s_infer.unsqueeze(0).to(device),
+            ylens=torch.LongTensor([T_gen]).to(device),
+            n_quantizers=3, f0=None,
+        )[0].squeeze(0).cpu()   # [T_gen, 512]
+
+        # ---- Save cache -------------------------------------------------
+        torch.save(
+            {
+                "ref_mel":     ref_mel,      # [num_mels, T_ref]
+                "style":       style,        # [192]
+                "prompt_cond": prompt_cond,  # [T_ref, 512]
+                "infer_cond":  infer_cond,   # [T_gen, 512]
+                "x1_mel":      x1_mel,       # [num_mels, T_gen]
+            },
+            self._cache_path(item["stem"]),
+        )
+
+    # ------------------------------------------------------------------
+    # Dataset interface
+    # ------------------------------------------------------------------
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, index: int) -> Dict:
-        item = self.samples[index]
-
-        # ---- S_infer (pre-computed GPT semantic features) ---------------
-        s_infer = torch.load(item["out_pt"], map_location="cpu")
-        if s_infer.dim() == 3 and s_infer.size(0) == 1:
-            s_infer = s_infer.squeeze(0)     # [T_codes, 1024]
-        s_infer = s_infer.float()
-        if s_infer.size(0) > self.max_code_len:
-            s_infer = s_infer[: self.max_code_len, :]
-
-        # ---- Reference audio --------------------------------------------
-        ref_22k = self._load_audio(item["prompt_audio_path"], self.sr_22k,     self.max_ref_sec)
-        ref_16k = self._load_audio(item["prompt_audio_path"], self.sr_ref_16k, self.max_ref_sec)
-
-        # ---- Target mel (x1) -------------------------------------------
-        x1_wav = self._load_audio(item["out_wav"], self.sr_22k, self.max_gen_sec)
-        x1_mel = get_mel_spectrogram(
-            x1_wav.unsqueeze(0), self.mel_h
-        ).squeeze(0)  # [num_mels, T_gen]
-
-        return {
-            "stem":               item["stem"],
-            "s_infer":            s_infer,
-            "s_infer_len":        torch.tensor(s_infer.size(0),  dtype=torch.long),
-            "ref_audio_22k":      ref_22k,
-            "ref_audio_22k_len":  torch.tensor(ref_22k.size(0),  dtype=torch.long),
-            "ref_audio_16k":      ref_16k,
-            "ref_audio_16k_len":  torch.tensor(ref_16k.size(0),  dtype=torch.long),
-            "x1_mel":             x1_mel,
-            "x1_len":             torch.tensor(x1_mel.size(-1),  dtype=torch.long),
-        }
+        item  = self.samples[index]
+        data  = torch.load(
+            self._cache_path(item["stem"]), map_location="cpu", weights_only=True
+        )
+        data["stem"] = item["stem"]
+        return data
 
 
 def collate_cfm_index_phase1(batch: List[Dict]) -> Dict:
-    """Pad and collate a batch from Dataset_CFM_Index_Phase1."""
-    B = len(batch)
+    """Collate pre-computed CFM conditions from Dataset_CFM_Index_Phase1.
 
-    max_codes  = max(item["s_infer_len"].item()       for item in batch)
-    max_r22    = max(item["ref_audio_22k_len"].item()  for item in batch)
-    max_r16    = max(item["ref_audio_16k_len"].item()  for item in batch)
-    max_gen    = max(item["x1_len"].item()             for item in batch)
-    n_mels     = batch[0]["x1_mel"].size(0)
+    Builds padded batch tensors ready for CFM.forward / CFM.inference:
+      - x1_full    [B, num_mels, T_max]   ref_mel ++ x1_mel, padded
+      - cond       [B, T_max, 512]        prompt_cond ++ infer_cond, padded
+      - ref_mels   [B, num_mels, T_ref_max]  reference mel for CFM.inference
+      - style      [B, 192]
+      - x_lens     [B]  T_ref + T_gen per sample
+      - prompt_lens[B]  T_ref per sample
+    """
+    B        = len(batch)
+    num_mels = batch[0]["ref_mel"].size(0)
 
-    s_infer       = torch.zeros(B, max_codes, 1024)
-    ref_audio_22k = torch.zeros(B, max_r22)
-    ref_audio_16k = torch.zeros(B, max_r16)
-    x1_mel        = torch.zeros(B, n_mels, max_gen)
+    T_refs   = [item["ref_mel"].size(-1)   for item in batch]
+    T_gens   = [item["x1_mel"].size(-1)    for item in batch]
+    T_totals = [r + g for r, g in zip(T_refs, T_gens)]
 
-    s_infer_lens      = torch.zeros(B, dtype=torch.long)
-    ref_audio_22k_lens = torch.zeros(B, dtype=torch.long)
-    ref_audio_16k_lens = torch.zeros(B, dtype=torch.long)
-    x1_lens            = torch.zeros(B, dtype=torch.long)
-    stems: List[str]   = []
+    T_ref_max   = max(T_refs)
+    T_total_max = max(T_totals)
+
+    x1_full  = torch.zeros(B, num_mels, T_total_max)
+    cond     = torch.zeros(B, T_total_max, 512)
+    ref_mels = torch.zeros(B, num_mels, T_ref_max)
 
     for i, item in enumerate(batch):
-        tc  = item["s_infer_len"].item()
-        t22 = item["ref_audio_22k_len"].item()
-        t16 = item["ref_audio_16k_len"].item()
-        tg  = item["x1_len"].item()
+        T_r = T_refs[i]
+        T_g = T_gens[i]
+        x1_full[i, :, :T_r]       = item["ref_mel"]
+        x1_full[i, :, T_r:T_r+T_g] = item["x1_mel"]
+        cond[i, :T_r, :]          = item["prompt_cond"]
+        cond[i, T_r:T_r+T_g, :]  = item["infer_cond"]
+        ref_mels[i, :, :T_r]      = item["ref_mel"]
 
-        s_infer[i, :tc, :]      = item["s_infer"][:tc, :]
-        ref_audio_22k[i, :t22]  = item["ref_audio_22k"][:t22]
-        ref_audio_16k[i, :t16]  = item["ref_audio_16k"][:t16]
-        x1_mel[i, :, :tg]       = item["x1_mel"][:, :tg]
-
-        s_infer_lens[i]       = tc
-        ref_audio_22k_lens[i] = t22
-        ref_audio_16k_lens[i] = t16
-        x1_lens[i]            = tg
-        stems.append(item["stem"])
+    style       = torch.stack([item["style"] for item in batch], dim=0)  # [B, 192]
+    x_lens      = torch.tensor(T_totals, dtype=torch.long)
+    prompt_lens = torch.tensor(T_refs,   dtype=torch.long)
+    stems       = [item["stem"] for item in batch]
 
     return {
-        "stems":              stems,
-        "s_infer":            s_infer,
-        "s_infer_lens":       s_infer_lens,
-        "ref_audio_22k":      ref_audio_22k,
-        "ref_audio_22k_lens": ref_audio_22k_lens,
-        "ref_audio_16k":      ref_audio_16k,
-        "ref_audio_16k_lens": ref_audio_16k_lens,
-        "x1_mel":             x1_mel,
-        "x1_lens":            x1_lens,
+        "stems":       stems,
+        "x1_full":     x1_full,
+        "cond":        cond,
+        "ref_mels":    ref_mels,
+        "style":       style,
+        "x_lens":      x_lens,
+        "prompt_lens": prompt_lens,
     }

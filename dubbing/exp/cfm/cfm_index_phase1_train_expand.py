@@ -2,30 +2,17 @@
 
 Training & testing experiment for the IndexTTS2-style CFM (Phase 1).
 
-Key differences from Exp_CFM_Phase1_TrainExpand:
-  - Model:  dubbing.modules.cfm_index.CFM  (DiT-based, s2mel architecture)
-  - Data:   Dataset_CFM_Index_Phase1 (loads from metadata.csv with S_infer .pt)
-  - Frozen: w2v-bert-2.0, semantic_codec (RepCodec), CAMPPlus, length_regulator
-            are loaded once and used to build per-batch CFM conditions
+Condition building is fully delegated to Dataset_CFM_Index_Phase1 (with
+file-level caching).  The Exp class only trains / evaluates the CFM model
+using pre-computed batch tensors supplied by the DataLoader:
 
-Condition building (per batch, under torch.no_grad()):
-  For each sample i:
-    1. ref_audio_16k  → w2v-bert → semantic_codec.quantize → S_ref
-    2. S_ref          → length_regulator(ylens=T_ref_mel)  → prompt_cond [1, T_ref, 512]
-    3. ref_audio_22k  → mel_spectrogram                    → ref_mel  [1, 80, T_ref]
-    4. ref_audio_16k  → CAMPPlus fbank                     → style    [1, 192]
-    5. s_infer        → length_regulator(ylens=T_gen)      → infer_cond [1, T_gen, 512]
-    6. cat([prompt_cond, infer_cond], dim=1)               → cond  [1, T_total, 512]
-    7. cat([ref_mel,   x1_mel_i],    dim=2)                → x1    [1, 80, T_total]
-
-  Batched output (after padding):
-    x1        [B, 80, T_max]   – concat of ref mel + target mel, padded
-    cond      [B, T_max, 512]  – cat_condition, padded
-    style     [B, 192]
-    x_lens    [B]              – total (ref + gen) frame count per sample
-    prompt_lens [B]            – ref frame count per sample (= ref_mel.size(-1))
-
-  CFM.forward(x1, x_lens, prompt_lens, cond, style) → (loss, _)
+  batch keys (from collate_cfm_index_phase1):
+    x1_full     [B, num_mels, T_max]   ref_mel ++ target_mel (padded)
+    cond        [B, T_max, 512]        prompt_cond ++ infer_cond (padded)
+    ref_mels    [B, num_mels, T_ref_max]  reference mel for inference
+    style       [B, 192]
+    x_lens      [B]  total frame counts (ref + gen)
+    prompt_lens [B]  ref frame counts
 """
 
 from __future__ import annotations
@@ -34,7 +21,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import torch
 import torchaudio
@@ -42,7 +29,6 @@ from tqdm.auto import tqdm
 
 from exp.basic import Exp_Basic
 from data_provider.data_factory import data_provider
-from modules.mel_strech.meldataset import get_mel_spectrogram
 from logger import get_logger
 
 logger = get_logger("dubbing.exp.cfm_index")
@@ -65,7 +51,6 @@ class Exp_CFM_Index_Phase1_TrainExpand(Exp_Basic):
         self.best_ckpt_path = None
         self._bigvgan = None
         super().__init__(args)
-        self._load_frozen_models()
 
     # ------------------------------------------------------------------
     # Model construction
@@ -79,201 +64,9 @@ class Exp_CFM_Index_Phase1_TrainExpand(Exp_Basic):
             model = torch.nn.DataParallel(model, device_ids=self.args.system.device_ids)
         num_params = sum(p.numel() for p in model.parameters())
         logger.info(f"CFM (cfm_index) parameters: {num_params:,}")
-        # Pre-allocate KV-cache; use model directly if wrapped in DataParallel
         core = model.module if isinstance(model, torch.nn.DataParallel) else model
         core.estimator.setup_caches(max_batch_size=8, max_seq_length=8192)
         return model
-
-    # ------------------------------------------------------------------
-    # Frozen sub-models (w2v-bert, codec, campplus, length_regulator)
-    # ------------------------------------------------------------------
-
-    def _load_frozen_models(self):
-        """Load IndexTTS2 sub-models needed to build CFM conditions.
-
-        All models are frozen (eval mode, no-grad). They are loaded from
-        ``args.preprocess.model_dir``.
-        """
-        from omegaconf import OmegaConf
-        from transformers import SeamlessM4TFeatureExtractor
-        from indextts.utils.maskgct_utils import build_semantic_model, build_semantic_codec
-        from indextts.s2mel.modules.campplus.DTDNN import CAMPPlus
-        from indextts.s2mel.modules.commons import MyModel, load_checkpoint2
-        from huggingface_hub import hf_hub_download
-        import safetensors
-
-        pre  = self.args.preprocess
-        mdl  = Path(pre.model_dir)
-        dev  = self.device
-
-        # Load IndexTTS2 config to construct length_regulator
-        idx_cfg = OmegaConf.load(str(mdl / "config.yaml"))
-
-        logger.info("[FrozenModels] Loading SeamlessM4TFeatureExtractor …")
-        self._feat_extractor = SeamlessM4TFeatureExtractor.from_pretrained(
-            "facebook/w2v-bert-2.0"
-        )
-
-        logger.info("[FrozenModels] Loading w2v-bert-2.0 semantic model …")
-        stat_path = str(mdl / pre.w2v_stat)
-        self._sem_model, self._sem_mean, self._sem_std = build_semantic_model(stat_path)
-        self._sem_model = self._sem_model.to(dev).eval()
-        self._sem_mean  = self._sem_mean.to(dev)
-        self._sem_std   = self._sem_std.to(dev)
-
-        logger.info("[FrozenModels] Loading semantic_codec (RepCodec) …")
-        codec = build_semantic_codec(idx_cfg.semantic_codec)
-        ckpt_path = hf_hub_download(
-            "amphion/MaskGCT", filename="semantic_codec/model.safetensors"
-        )
-        safetensors.torch.load_model(codec, ckpt_path)
-        self._sem_codec = codec.to(dev).eval()
-
-        logger.info("[FrozenModels] Loading CAMPPlus …")
-        campplus_ckpt = hf_hub_download(
-            "funasr/campplus", filename="campplus_cn_common.bin"
-        )
-        campplus = CAMPPlus(feat_dim=80, embedding_size=192)
-        campplus.load_state_dict(torch.load(campplus_ckpt, map_location="cpu"))
-        self._campplus = campplus.to(dev).eval()
-
-        logger.info("[FrozenModels] Loading length_regulator from s2mel.pth …")
-        s2mel_path = str(mdl / pre.s2mel_checkpoint)
-        s2mel_model = MyModel(idx_cfg.s2mel, use_gpt_latent=False)
-        s2mel_model, _, _, _ = load_checkpoint2(
-            s2mel_model, None, s2mel_path,
-            load_only_params=True, ignore_modules=[], is_distributed=False,
-        )
-        self._len_reg = s2mel_model.models["length_regulator"].to(dev).eval()
-
-        self._mel_ratio = float(pre.mel_ratio)   # ≈ 1.7227
-        self._mel_h = pre.mel                    # SimpleNamespace with mel params
-        logger.info("[FrozenModels] All frozen sub-models loaded.")
-
-    # ------------------------------------------------------------------
-    # Per-sample condition builder (no_grad)
-    # ------------------------------------------------------------------
-
-    @torch.no_grad()
-    def _get_sem_emb(self, input_features, attention_mask) -> torch.Tensor:
-        out = self._sem_model(
-            input_features=input_features,
-            attention_mask=attention_mask,
-            output_hidden_states=True,
-        )
-        feat = out.hidden_states[17]   # [B, T, 1024]
-        return (feat - self._sem_mean) / self._sem_std
-
-    @torch.no_grad()
-    def _build_conditions(self, batch: Dict) -> tuple:
-        """Build CFM conditions for a full batch.
-
-        For each sample a reference mel + semantic condition are computed from
-        the reference audio, then concatenated with the semantic condition of
-        the target (s_infer) to form cat_condition.
-
-        Returns
-        -------
-        x1_full   : [B, 80, T_max_total]   ref_mel ++ target_mel (padded)
-        cond      : [B, T_max_total, 512]  cat_condition          (padded)
-        style     : [B, 192]               CAMPPlus embeddings
-        x_lens    : [B]  LongTensor        total (ref+gen) frame counts
-        prompt_lens: [B] LongTensor        ref frame counts
-        """
-        dev = self.device
-        B   = len(batch["stems"])
-
-        s_infer      = batch["s_infer"].to(dev)           # [B, T_codes, 1024]
-        s_infer_lens = batch["s_infer_lens"]               # [B]
-        ref_22k      = batch["ref_audio_22k"]              # [B, T_22k]  CPU
-        ref_22k_lens = batch["ref_audio_22k_lens"]         # [B]
-        ref_16k      = batch["ref_audio_16k"]              # [B, T_16k]  CPU
-        ref_16k_lens = batch["ref_audio_16k_lens"]         # [B]
-        x1_mel       = batch["x1_mel"].to(dev)             # [B, 80, T_gen]
-        x1_lens      = batch["x1_lens"]                    # [B]
-
-        x1_full_list  : List[torch.Tensor] = []   # each [80, T_total_i]
-        cond_list     : List[torch.Tensor] = []   # each [T_total_i, 512]
-        style_list    : List[torch.Tensor] = []   # each [1, 192]
-        x_lens_list   : List[int]          = []
-        prompt_lens_list: List[int]        = []
-
-        for i in range(B):
-            tc  = s_infer_lens[i].item()
-            t22 = ref_22k_lens[i].item()
-            t16 = ref_16k_lens[i].item()
-            tg  = x1_lens[i].item()
-
-            # ---- ref_mel [1, num_mels, T_ref] ---------------------------
-            wav_22 = ref_22k[i, :t22].unsqueeze(0).to(dev)
-            ref_mel = get_mel_spectrogram(wav_22, self._mel_h)  # [1, num_mels, T_ref]
-            T_ref   = ref_mel.size(-1)
-
-            # ---- style (CAMPPlus) [1, 192] ------------------------------
-            wav_16 = ref_16k[i, :t16].unsqueeze(0).to(dev)
-            fbank  = torchaudio.compliance.kaldi.fbank(
-                wav_16, num_mel_bins=80, dither=0, sample_frequency=16000
-            )
-            fbank  = fbank - fbank.mean(dim=0, keepdim=True)
-            style_i = self._campplus(fbank.unsqueeze(0))   # [1, 192]
-            style_list.append(style_i)
-
-            # ---- w2v-bert → semantic_codec → S_ref ----------------------
-            inputs = self._feat_extractor(
-                ref_16k[i, :t16].numpy(),
-                sampling_rate=16000,
-                return_tensors="pt",
-            )
-            feat_in = inputs["input_features"].to(dev)
-            attn_m  = inputs["attention_mask"].to(dev)
-            spk_emb = self._get_sem_emb(feat_in, attn_m)     # [1, T_feat, 1024]
-            _, S_ref = self._sem_codec.quantize(spk_emb)
-
-            # ---- prompt_cond [1, T_ref, 512] ----------------------------
-            ylens_ref  = torch.LongTensor([T_ref]).to(dev)
-            prompt_cond = self._len_reg(
-                S_ref, ylens=ylens_ref, n_quantizers=3, f0=None
-            )[0]  # [1, T_ref, 512]
-
-            # ---- infer_cond [1, T_gen, 512] (use actual target length) --
-            s_inf_i    = s_infer[i, :tc, :].unsqueeze(0)    # [1, T_codes, 1024]
-            ylens_gen  = torch.LongTensor([tg]).to(dev)
-            infer_cond = self._len_reg(
-                s_inf_i, ylens=ylens_gen, n_quantizers=3, f0=None
-            )[0]  # [1, T_gen, 512]
-
-            # ---- concatenate -------------------------------------------
-            cat_cond = torch.cat([prompt_cond, infer_cond], dim=1)   # [1, T_total, 512]
-            T_total  = T_ref + tg
-
-            # ---- x1 full (ref_mel ++ target_mel) [80, T_total] ----------
-            x1_gen_i = x1_mel[i, :, :tg]                  # [80, T_gen]
-            x1_full_i = torch.cat(
-                [ref_mel.squeeze(0), x1_gen_i], dim=-1
-            )  # [80, T_total]
-
-            x1_full_list.append(x1_full_i)
-            cond_list.append(cat_cond.squeeze(0))   # [T_total, 512]
-            x_lens_list.append(T_total)
-            prompt_lens_list.append(T_ref)
-
-        # ---- Pad to batch max lengths -----------------------------------
-        T_max  = max(x_lens_list)
-        n_mels = x1_full_list[0].size(0)
-
-        x1_full = torch.zeros(B, n_mels, T_max, device=dev)
-        cond    = torch.zeros(B, T_max, 512, device=dev)
-        style   = torch.cat(style_list, dim=0)              # [B, 192]
-
-        for i in range(B):
-            T = x_lens_list[i]
-            x1_full[i, :, :T] = x1_full_list[i][:, :T]
-            cond[i, :T, :]    = cond_list[i][:T, :]
-
-        x_lens      = torch.tensor(x_lens_list,    dtype=torch.long, device=dev)
-        prompt_lens = torch.tensor(prompt_lens_list, dtype=torch.long, device=dev)
-
-        return x1_full, cond, style, x_lens, prompt_lens
 
     # ------------------------------------------------------------------
     # Data
@@ -306,12 +99,11 @@ class Exp_CFM_Index_Phase1_TrainExpand(Exp_Basic):
         with ctx:
             progress = tqdm(loader, desc=stage, leave=False, dynamic_ncols=True)
             for batch in progress:
-                # Build CFM conditions (frozen models, always no_grad)
-                try:
-                    x1, cond, style, x_lens, prompt_lens = self._build_conditions(batch)
-                except Exception as e:
-                    logger.warning(f"[{stage}] condition build failed: {e}")
-                    continue
+                x1          = batch["x1_full"].to(self.device)
+                cond        = batch["cond"].to(self.device)
+                style       = batch["style"].to(self.device)
+                x_lens      = batch["x_lens"].to(self.device)
+                prompt_lens = batch["prompt_lens"].to(self.device)
 
                 if train:
                     self.optimizer.zero_grad(set_to_none=True)
@@ -505,49 +297,39 @@ class Exp_CFM_Index_Phase1_TrainExpand(Exp_Basic):
                 if j >= max_batches:
                     break
 
-                try:
-                    x1, cond, style, x_lens, prompt_lens = self._build_conditions(batch)
-                except Exception as e:
-                    logger.warning(f"[{stage_name}] condition build failed: {e}")
-                    continue
-
-                stems = batch["stems"]
+                x1          = batch["x1_full"].to(self.device)     # [B, num_mels, T_max]
+                cond        = batch["cond"].to(self.device)         # [B, T_max, 512]
+                style       = batch["style"].to(self.device)        # [B, 192]
+                x_lens      = batch["x_lens"].to(self.device)       # [B]
+                prompt_lens = batch["prompt_lens"].to(self.device)  # [B]
+                ref_mels    = batch["ref_mels"].to(self.device)     # [B, num_mels, T_ref_max]
+                stems       = batch["stems"]
                 B = x1.size(0)
 
-                # Build ref_mel per sample for passing to CFM.inference
-                ref_mels: List[torch.Tensor] = []
                 for i in range(B):
-                    t22 = batch["ref_audio_22k_lens"][i].item()
-                    w22 = batch["ref_audio_22k"][i, :t22].unsqueeze(0).to(self.device)
-                    ref_mels.append(get_mel_spectrogram(w22, self._mel_h))  # [1, num_mels, T_ref_i]
-
-                for i in range(B):
-                    ref_mel_i  = ref_mels[i]               # [1, 80, T_ref_i]
-                    T_ref_i    = ref_mel_i.size(-1)
-                    T_total_i  = int(x_lens[i].item())
-                    cond_i     = cond[i:i+1, :T_total_i, :]  # [1, T_total, 512]
-                    xl_i       = x_lens[i:i+1]
-                    style_i    = style[i:i+1]                 # [1, 192]
+                    T_ref_i   = int(prompt_lens[i].item())
+                    T_total_i = int(x_lens[i].item())
+                    ref_mel_i = ref_mels[i:i+1, :, :T_ref_i]         # [1, num_mels, T_ref]
+                    cond_i    = cond[i:i+1, :T_total_i, :]            # [1, T_total, 512]
+                    style_i   = style[i:i+1]                          # [1, 192]
 
                     pred_full = core.inference(
                         mu=cond_i,
-                        x_lens=xl_i,
+                        x_lens=x_lens[i:i+1],
                         prompt=ref_mel_i,
                         style=style_i,
                         f0=None,
                         n_timesteps=tr.inference_steps,
                         inference_cfg_rate=tr.inference_cfg_rate,
-                    )  # [1, 80, T_total]
+                    )  # [1, num_mels, T_total]
 
-                    pred_mel = pred_full[:, :, T_ref_i:]  # [1, 80, T_gen]
-                    x1_gt    = x1[i:i+1, :, T_ref_i: T_total_i]  # [1, 80, T_gen]
+                    pred_mel = pred_full[:, :, T_ref_i:]               # [1, num_mels, T_gen]
+                    x1_gt    = x1[i:i+1, :, T_ref_i:T_total_i]       # [1, num_mels, T_gen]
 
-                    # Save predicted and ground-truth audio
                     safe_key = str(stems[i]).replace("/", "_").replace(" ", "_")
                     for tag, mel_t in [("pred", pred_mel), ("ref", x1_gt)]:
-                        wav = vocoder(mel_t.float()).squeeze(1)  # [1, T_wav]
+                        wav = vocoder(mel_t.float()).squeeze(1)         # [1, T_wav]
                         wav = torch.clamp(32767 * wav, -32767.0, 32767.0).cpu().to(torch.int16)
-                        out_path = os.path.join(output_dir, f"{safe_key}_{tag}.wav")
-                        torchaudio.save(out_path, wav, 22050)
-
-        logger.info(f"[{stage_name}] {min(j+1, max_batches)} batches saved to {output_dir}")
+                        torchaudio.save(
+                            os.path.join(output_dir, f"{safe_key}_{tag}.wav"), wav, 22050
+                        )

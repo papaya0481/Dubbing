@@ -40,6 +40,7 @@ def data_provider(args, flag: str):
         data_set = Data(
             csv_path=args.data.csv_path,
             mel_h=args.preprocess.mel,
+            preprocess=args.preprocess,
             sr_ref_16k=args.preprocess.sr_ref_16k,
             split=flag,
             split_ratio=args.data.train_split_ratio,
@@ -47,6 +48,7 @@ def data_provider(args, flag: str):
             max_ref_sec=args.data.max_ref_sec,
             max_gen_sec=args.data.max_gen_sec,
             max_code_len=args.data.max_code_len,
+            cache_dir=getattr(args.data, "cache_dir", None),
         )
     else:
         data_set = Data(
