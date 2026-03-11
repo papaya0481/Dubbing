@@ -39,6 +39,8 @@ def data_provider(args, flag: str):
     if dataset_name == "cfm_index_phase1":
         data_set = Data(
             csv_path=args.data.csv_path,
+            mel_h=args.preprocess.mel,
+            sr_ref_16k=args.preprocess.sr_ref_16k,
             split=flag,
             split_ratio=args.data.train_split_ratio,
             seed=args.system.seed,

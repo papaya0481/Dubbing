@@ -43,6 +43,17 @@ preprocess:
   # Conversion factor: S_infer token count → mel frame count
   # mel_ratio = sample_rate / (token_rate * hop_length) = 22050 / (50 * 256) ≈ 1.7227
   mel_ratio: 1.72265625
+  # Sample rate for reference audio used by w2v-bert / CAMPPlus (16 kHz)
+  sr_ref_16k: 16000
+  # Mel spectrogram parameters (passed to get_mel_spectrogram from meldataset.py)
+  mel:
+    n_fft: 1024
+    num_mels: 80
+    sampling_rate: 22050
+    hop_size: 256
+    win_size: 1024
+    fmin: 0
+    fmax: null
 
 # --- IndexTTS2 s2mel CFM model architecture ---
 # Taken verbatim from index-tts2/checkpoints/config.yaml → s2mel block.

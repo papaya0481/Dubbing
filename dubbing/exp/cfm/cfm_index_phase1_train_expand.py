@@ -37,12 +37,12 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import torch
-import torch.nn.functional as F
 import torchaudio
 from tqdm.auto import tqdm
 
 from exp.basic import Exp_Basic
 from data_provider.data_factory import data_provider
+from modules.mel_strech.meldataset import get_mel_spectrogram
 from logger import get_logger
 
 logger = get_logger("dubbing.exp.cfm_index")
@@ -56,54 +56,6 @@ _INDEX_ROOT = _PROJ_ROOT / "index-tts2"
 for _p in [str(_INDEX_ROOT), str(_PROJ_ROOT)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
-
-
-# ---------------------------------------------------------------------------
-# Mel spectrogram helper (matches indextts.s2mel.modules.audio.mel_spectrogram)
-# ---------------------------------------------------------------------------
-
-_mel_basis: dict  = {}
-_hann_window: dict = {}
-
-def _mel_spectrogram(
-    wav: torch.Tensor,
-    n_fft: int = 1024,
-    num_mels: int = 80,
-    sr: int = 22050,
-    hop_size: int = 256,
-    win_size: int = 1024,
-    fmin: float = 0.0,
-    fmax=None,
-    center: bool = False,
-) -> torch.Tensor:
-    """GPU/CPU log-mel spectrogram identical to indextts audio.mel_spectrogram."""
-    import librosa
-
-    global _mel_basis, _hann_window  # noqa: PLW0603
-
-    cache_key = f"{sr}_{fmax}_{wav.device}"
-    if cache_key not in _mel_basis:
-        mel_fb = torch.from_numpy(
-            librosa.filters.mel(sr=sr, n_fft=n_fft, n_mels=num_mels, fmin=fmin, fmax=fmax)
-        ).float().to(wav.device)
-        _mel_basis[cache_key]  = mel_fb
-        _hann_window[f"{sr}_{wav.device}"] = torch.hann_window(win_size).to(wav.device)
-
-    pad = (n_fft - hop_size) // 2
-    if wav.dim() == 1:
-        wav = wav.unsqueeze(0)
-    wav_p = F.pad(wav.unsqueeze(1), (pad, pad), mode="reflect").squeeze(1)
-
-    spec = torch.view_as_real(
-        torch.stft(
-            wav_p, n_fft=n_fft, hop_length=hop_size, win_length=win_size,
-            window=_hann_window[f"{sr}_{wav.device}"],
-            center=center, normalized=False, onesided=True, return_complex=True,
-        )
-    )  # [..., n_fft//2+1, T, 2]
-    spec = torch.sqrt(spec.pow(2).sum(-1) + 1e-9)   # [..., n_fft//2+1, T]
-    spec = torch.matmul(_mel_basis[cache_key], spec)  # [..., num_mels, T]
-    return torch.log(torch.clamp(spec, min=1e-5))
 
 
 class Exp_CFM_Index_Phase1_TrainExpand(Exp_Basic):
@@ -195,6 +147,7 @@ class Exp_CFM_Index_Phase1_TrainExpand(Exp_Basic):
         self._len_reg = s2mel_model.models["length_regulator"].to(dev).eval()
 
         self._mel_ratio = float(pre.mel_ratio)   # ≈ 1.7227
+        self._mel_h = pre.mel                    # SimpleNamespace with mel params
         logger.info("[FrozenModels] All frozen sub-models loaded.")
 
     # ------------------------------------------------------------------
@@ -251,9 +204,9 @@ class Exp_CFM_Index_Phase1_TrainExpand(Exp_Basic):
             t16 = ref_16k_lens[i].item()
             tg  = x1_lens[i].item()
 
-            # ---- ref_mel [1, 80, T_ref] ---------------------------------
+            # ---- ref_mel [1, num_mels, T_ref] ---------------------------
             wav_22 = ref_22k[i, :t22].unsqueeze(0).to(dev)
-            ref_mel = _mel_spectrogram(wav_22)        # [1, 80, T_ref]
+            ref_mel = get_mel_spectrogram(wav_22, self._mel_h)  # [1, num_mels, T_ref]
             T_ref   = ref_mel.size(-1)
 
             # ---- style (CAMPPlus) [1, 192] ------------------------------
@@ -566,7 +519,7 @@ class Exp_CFM_Index_Phase1_TrainExpand(Exp_Basic):
                 for i in range(B):
                     t22 = batch["ref_audio_22k_lens"][i].item()
                     w22 = batch["ref_audio_22k"][i, :t22].unsqueeze(0).to(self.device)
-                    ref_mels.append(_mel_spectrogram(w22))   # [1, 80, T_ref_i]
+                    ref_mels.append(get_mel_spectrogram(w22, self._mel_h))  # [1, num_mels, T_ref_i]
 
                 for i in range(B):
                     ref_mel_i  = ref_mels[i]               # [1, 80, T_ref_i]

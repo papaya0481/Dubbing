@@ -398,63 +398,6 @@ def collate_cfm_phase1(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.
 # Dataset_CFM_Index_Phase1
 # =============================================================================
 
-def _mel_spectrogram_cpu(
-    wav: torch.Tensor,
-    n_fft: int = 1024,
-    num_mels: int = 80,
-    sr: int = 22050,
-    hop_size: int = 256,
-    win_size: int = 1024,
-    fmin: float = 0.0,
-    fmax=None,
-) -> torch.Tensor:
-    """Compute log-mel spectrogram on CPU.
-
-    Matches the behaviour of ``indextts.s2mel.modules.audio.mel_spectrogram``:
-    librosa mel filter bank, reflect-padded STFT, log(clamp(x, min=1e-5)).
-
-    Args:
-        wav: [1, T] or [T] float32 waveform at *sr* Hz.
-    Returns:
-        [num_mels, T_mel] float32 log-mel spectrogram.
-    """
-    import librosa
-
-    if wav.dim() == 1:
-        wav = wav.unsqueeze(0)  # [1, T]
-
-    # Mel filter bank derived by librosa (matches indextts exactly)
-    mel_fb = torch.from_numpy(
-        librosa.filters.mel(sr=sr, n_fft=n_fft, n_mels=num_mels, fmin=fmin, fmax=fmax)
-    ).float()  # [num_mels, n_fft//2+1]
-
-    window = torch.hann_window(win_size)
-
-    # Reflect-pad to match indextts (centre=False behaviour)
-    pad = (n_fft - hop_size) // 2
-    wav_p = torch.nn.functional.pad(
-        wav.unsqueeze(1), (pad, pad), mode="reflect"
-    ).squeeze(1)  # [1, T+2*pad]
-
-    spec = torch.stft(
-        wav_p,
-        n_fft=n_fft,
-        hop_length=hop_size,
-        win_length=win_size,
-        window=window,
-        center=False,
-        normalized=False,
-        onesided=True,
-        return_complex=True,
-    )  # [1, n_fft//2+1, T_mel]
-
-    spec = torch.view_as_real(spec)
-    spec = torch.sqrt(spec.pow(2).sum(-1) + 1e-9)  # magnitude [1, n_fft//2+1, T_mel]
-
-    mel = torch.matmul(mel_fb, spec)               # [1, num_mels, T_mel]
-    mel = torch.log(torch.clamp(mel, min=1e-5))    # log-mel
-    return mel.squeeze(0)                          # [num_mels, T_mel]
-
 
 class Dataset_CFM_Index_Phase1(Dataset):
     """Dataset for training IndexTTS2-CFM (Phase 1).
@@ -473,21 +416,15 @@ class Dataset_CFM_Index_Phase1(Dataset):
       - ``ref_audio_22k_len`` : scalar LongTensor
       - ``ref_audio_16k``     : [T_16k]  reference audio at 16000 Hz
       - ``ref_audio_16k_len`` : scalar LongTensor
-      - ``x1_mel``            : [80, T_gen] log-mel spectrogram of target audio
+      - ``x1_mel``            : [num_mels, T_gen] log-mel spectrogram of target audio
       - ``x1_len``            : scalar LongTensor
     """
-
-    MEL_SR    = 22050
-    MEL_SR16  = 16000
-    MEL_N_FFT = 1024
-    MEL_WIN   = 1024
-    MEL_HOP   = 256
-    MEL_MELS  = 80
-    MEL_FMIN  = 0.0
 
     def __init__(
         self,
         csv_path: str,
+        mel_h,
+        sr_ref_16k: int = 16000,
         split: str = "train",
         split_ratio: float = 0.9,
         seed: int = 2026,
@@ -499,6 +436,9 @@ class Dataset_CFM_Index_Phase1(Dataset):
         self.csv_path    = Path(csv_path)
         self.data_root   = self.csv_path.parent
         self.split       = split
+        self.mel_h       = mel_h
+        self.sr_22k      = int(mel_h.sampling_rate)
+        self.sr_ref_16k  = int(sr_ref_16k)
         self.max_ref_sec = max_ref_sec
         self.max_gen_sec = max_gen_sec
         self.max_code_len = max_code_len
@@ -598,17 +538,14 @@ class Dataset_CFM_Index_Phase1(Dataset):
             s_infer = s_infer[: self.max_code_len, :]
 
         # ---- Reference audio --------------------------------------------
-        ref_22k = self._load_audio(item["prompt_audio_path"], self.MEL_SR,   self.max_ref_sec)
-        ref_16k = self._load_audio(item["prompt_audio_path"], self.MEL_SR16, self.max_ref_sec)
+        ref_22k = self._load_audio(item["prompt_audio_path"], self.sr_22k,     self.max_ref_sec)
+        ref_16k = self._load_audio(item["prompt_audio_path"], self.sr_ref_16k, self.max_ref_sec)
 
         # ---- Target mel (x1) -------------------------------------------
-        x1_wav = self._load_audio(item["out_wav"], self.MEL_SR, self.max_gen_sec)
-        x1_mel = _mel_spectrogram_cpu(
-            x1_wav,
-            n_fft=self.MEL_N_FFT, num_mels=self.MEL_MELS,
-            sr=self.MEL_SR, hop_size=self.MEL_HOP, win_size=self.MEL_WIN,
-            fmin=self.MEL_FMIN,
-        )  # [80, T_gen]
+        x1_wav = self._load_audio(item["out_wav"], self.sr_22k, self.max_gen_sec)
+        x1_mel = get_mel_spectrogram(
+            x1_wav.unsqueeze(0), self.mel_h
+        ).squeeze(0)  # [num_mels, T_gen]
 
         return {
             "stem":               item["stem"],
