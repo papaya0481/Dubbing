@@ -91,6 +91,28 @@ class Exp_CFM_Index_Phase1_TrainExpand(Exp_Basic):
         from modules.cfm_index.flow_matching import CFM
 
         model = CFM(self.args.model)
+
+        # Load pre-trained IndexTTS2 s2mel weights (CFM sub-module only)
+        s2mel_path = Path(self.args.preprocess.model_dir) / self.args.preprocess.s2mel_checkpoint
+        if s2mel_path.exists():
+            logger.info(f"[CFM] Loading pre-trained weights from {s2mel_path} …")
+            state = torch.load(str(s2mel_path), map_location="cpu", weights_only=False)
+            cfm_state = state["net"]["cfm"]
+            missing, unexpected = model.load_state_dict(cfm_state, strict=False)
+            if missing:
+                logger.warning(
+                    f"[CFM] Missing keys ({len(missing)}): "
+                    f"{missing[:5]}{'…' if len(missing) > 5 else ''}"
+                )
+            if unexpected:
+                logger.warning(
+                    f"[CFM] Unexpected keys ({len(unexpected)}): "
+                    f"{unexpected[:5]}{'…' if len(unexpected) > 5 else ''}"
+                )
+            logger.info(f"[CFM] Pre-trained weights loaded (strict=False).")
+        else:
+            logger.warning(f"[CFM] s2mel checkpoint not found at {s2mel_path}, training from scratch.")
+
         if self.args.system.use_multi_gpu and self.args.system.use_gpu:
             model = torch.nn.DataParallel(model, device_ids=self.args.system.device_ids)
         num_params = sum(p.numel() for p in model.parameters())
