@@ -184,11 +184,11 @@ class ConditionBuilder:
         self.length_regulator = s2mel_model.models["length_regulator"].to(device).eval()
 
         # ---- mel_spectrogram 函数 ----------------------------------------
-        from indextts.s2mel.modules.audio import mel_spectrogram
+        from dubbing.modules.mel_strech.meldataset import get_mel_spectrogram
+        from types import SimpleNamespace
         sp = cfg.s2mel.preprocess_params.spect_params
         fmax_val = None if str(sp.get("fmax", "None")) == "None" else 8000
-        self._mel_fn = lambda wav: mel_spectrogram(
-            wav,
+        _mel_h = SimpleNamespace(
             n_fft=sp.n_fft,
             num_mels=sp.n_mels,
             sampling_rate=cfg.s2mel.preprocess_params.sr,
@@ -196,8 +196,8 @@ class ConditionBuilder:
             win_size=sp.win_length,
             fmin=sp.get("fmin", 0),
             fmax=fmax_val,
-            center=False,
         )
+        self._mel_fn = lambda wav: get_mel_spectrogram(wav, _mel_h)
 
         print("[ConditionBuilder] 全部冻结子模型加载完成。")
 
