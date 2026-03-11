@@ -13,7 +13,7 @@
 # =============================================================================
 
 # --- Experiment identity ---
-model_id: cfm_index_phase1
+model_id: phase1
 model_name: CFM_Index
 exp_name: null          # null = auto-generate from timestamp + hash
 is_training: 1

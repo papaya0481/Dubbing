@@ -204,7 +204,7 @@ class CFM(BASECFM):
 
         estimator_out = self.estimator(
             xt, prompt, x_lens,
-            t.squeeze(1).squeeze(1), style, cond, prompt_lens,
+            t.squeeze(1).squeeze(1), style, cond,
         )
         valid_mask_mel = valid_mask.unsqueeze(1).expand_as(estimator_out)  # [B, 80, T]
         loss = self.criterion(estimator_out[valid_mask_mel], u[valid_mask_mel])
