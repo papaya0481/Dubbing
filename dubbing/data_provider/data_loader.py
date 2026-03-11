@@ -750,6 +750,7 @@ class Dataset_CFM_Index_Phase1(Dataset):
 
     def _load_csv(self) -> List[Dict]:
         samples: List[Dict] = []
+        seen_stems: set = set()
         with open(self.csv_path, encoding="utf-8-sig", newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
@@ -766,8 +767,12 @@ class Dataset_CFM_Index_Phase1(Dataset):
                     out_wav = str((self.data_root / out_wav).resolve())
                 if not Path(out_pt).exists() or not Path(out_wav).exists():
                     continue
+                stem = Path(out_pt).stem
+                if stem in seen_stems:
+                    continue
+                seen_stems.add(stem)
                 samples.append({
-                    "stem":              Path(out_pt).stem,
+                    "stem":              stem,
                     "prompt_audio_path": prompt,
                     "out_pt":            out_pt,
                     "out_wav":           out_wav,

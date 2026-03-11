@@ -213,7 +213,8 @@ def test_cfm_index_phase1_batch_keys_and_shapes():
     _, loader = data_provider(args, "train")
     batch = next(iter(loader))
 
-    required = {"stems", "x1_full", "cond", "ref_mels", "style", "x_lens", "prompt_lens"}
+    required = {"stems", "x1_full", "prompt_cond", "infer_cond",
+                "ref_mels", "style", "x_lens", "prompt_lens", "infer_lens"}
     missing  = required - batch.keys()
     assert not missing, f"Batch missing keys: {missing}"
 
@@ -221,35 +222,44 @@ def test_cfm_index_phase1_batch_keys_and_shapes():
     assert B >= 1
 
     x1_full     = batch["x1_full"]
-    cond        = batch["cond"]
+    prompt_cond = batch["prompt_cond"]
+    infer_cond  = batch["infer_cond"]
     ref_mels    = batch["ref_mels"]
     style       = batch["style"]
     x_lens      = batch["x_lens"]
     prompt_lens = batch["prompt_lens"]
+    infer_lens  = batch["infer_lens"]
 
     # shape checks
-    assert x1_full.ndim   == 3,      "x1_full must be 3-D (B, 80, T_max)"
-    assert x1_full.shape[1] == 80,   "x1_full mel dim must be 80"
-    assert cond.ndim      == 3,      "cond must be 3-D (B, T_max, 512)"
-    assert cond.shape[2]  == 512,    "cond last dim must be 512"
-    assert ref_mels.ndim  == 3,      "ref_mels must be 3-D (B, 80, T_ref_max)"
+    assert x1_full.ndim      == 3,   "x1_full must be 3-D (B, 80, T_max)"
+    assert x1_full.shape[1]  == 80,  "x1_full mel dim must be 80"
+    assert prompt_cond.ndim  == 3,   "prompt_cond must be 3-D (B, T_ref_max, 512)"
+    assert prompt_cond.shape[2] == 512, "prompt_cond last dim must be 512"
+    assert infer_cond.ndim   == 3,   "infer_cond must be 3-D (B, T_gen_max, 512)"
+    assert infer_cond.shape[2] == 512,  "infer_cond last dim must be 512"
+    assert ref_mels.ndim     == 3,   "ref_mels must be 3-D (B, 80, T_ref_max)"
     assert ref_mels.shape[1] == 80
     assert style.shape    == (B, 192), f"style shape {style.shape} != ({B}, 192)"
-    assert x_lens.shape   == (B,)
+    assert x_lens.shape      == (B,)
     assert prompt_lens.shape == (B,)
+    assert infer_lens.shape  == (B,)
 
-    # logical consistency
-    assert (prompt_lens <= x_lens).all(), "prompt_lens must not exceed x_lens"
-    assert int(x_lens.max()) <= x1_full.shape[2], "x_lens exceeds padded time dim"
-    assert int(prompt_lens.max()) <= ref_mels.shape[2], \
-        "prompt_lens exceeds ref_mels padded time dim"
+    # logical consistency: x_lens == prompt_lens + infer_lens
+    assert (prompt_lens + infer_lens == x_lens).all(), \
+        "x_lens must equal prompt_lens + infer_lens"
+    assert int(x_lens.max())      <= x1_full.shape[2],     "x_lens exceeds padded time dim"
+    assert int(prompt_lens.max()) <= prompt_cond.shape[1], "prompt_lens exceeds prompt_cond padded dim"
+    assert int(infer_lens.max())  <= infer_cond.shape[1],  "infer_lens exceeds infer_cond padded dim"
+    assert int(prompt_lens.max()) <= ref_mels.shape[2],    "prompt_lens exceeds ref_mels padded dim"
 
     # dtype checks
-    assert x1_full.dtype    == torch.float32
-    assert cond.dtype       == torch.float32
-    assert style.dtype      == torch.float32
-    assert x_lens.dtype     == torch.long
+    assert x1_full.dtype     == torch.float32
+    assert prompt_cond.dtype == torch.float32
+    assert infer_cond.dtype  == torch.float32
+    assert style.dtype       == torch.float32
+    assert x_lens.dtype      == torch.long
     assert prompt_lens.dtype == torch.long
+    assert infer_lens.dtype  == torch.long
 
 
 @_SKIP_INDEX
@@ -277,4 +287,3 @@ def test_cfm_index_phase1_splits_cover_all_samples():
     val_ds,   _ = data_provider(args, "val")
     test_ds,  _ = data_provider(args, "test")
     assert len(train_ds) + len(val_ds) + len(test_ds) > 0
-    test_with_testset("./test_output")

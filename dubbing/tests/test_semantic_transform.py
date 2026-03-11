@@ -226,12 +226,24 @@ def test_integration_infer_with_semantic_warp():
     CFG_PATH       = f"{CHECKPOINT_DIR}/config.yaml"
     SPK_PROMPT     = "/data2/ruixin/datasets/MELD_raw/audios/ost/dev_dia0_utt0.wav"
 
+    # Skip when required resources are absent
+    _required = [
+        Path(CHECKPOINT_DIR),
+        Path(CFG_PATH),
+        Path(SPK_PROMPT),
+    ]
+    if not all(p.exists() for p in _required):
+        pytest.skip(
+            "Skipping integration test: one or more required paths not found: "
+            + str([str(p) for p in _required if not p.exists()])
+        )
+
     # target_textgrid：使用 test_output/ 里已有的 TextGrid
-    target_root = "/data2/ruixin/datasets/MELD_raw/audios/"
-    target_base = "ost"
+    target_root = "/data2/ruixin/datasets/MELD_raw/audios"
+    target_base = "aligned"
     target_name = "dev_dia0_utt0"
     TARGET_TG_PATH = (
-        Path(target_root) / target_base / "aligned" / f"{target_name}.TextGrid"
+        Path(target_root) / target_base / f"{target_name}.TextGrid"
     )
     OUTPUT_PATH = str(project_dubbing_root.parent / "test_output" / "test_semantic_warp.wav")
 
@@ -266,7 +278,7 @@ def test_integration_infer_with_semantic_warp():
                     break
 
     if TEXT is None:
-        ost_txt_path = f"{target_root}/{target_base}/{target_name}.txt"
+        ost_txt_path = f"{target_root}/ost/{target_name}.txt"
         with open(ost_txt_path, "r") as f:
             raw_text = f.read().strip()
         words = raw_text.split()

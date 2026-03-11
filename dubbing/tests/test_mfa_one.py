@@ -131,8 +131,8 @@ def test_mfa_aligner_result_has_intervals():
         use_emo_text=False,
         verbose=False,
         method="hmm",
-        do_sample=False,
-        num_beams=1,
+        do_sample=True,
+        num_beams=3,
         max_mel_tokens=1000,
         return_stats=True,
     )
