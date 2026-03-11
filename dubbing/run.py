@@ -9,7 +9,13 @@ import torch
 
 from config import apply_overrides, config_to_dict, load_config
 from exp.cfm.phase1_train_expand import Exp_CFM_Phase1_TrainExpand
+from exp.cfm.cfm_index_phase1_train_expand import Exp_CFM_Index_Phase1_TrainExpand
 from logger import get_logger, set_log_level, show_setting
+
+EXP_MAP = {
+    "LipSyncCFM": Exp_CFM_Phase1_TrainExpand,
+    "CFM_Index":  Exp_CFM_Index_Phase1_TrainExpand,
+}
 
 logger = get_logger("dubbing.run")
 
@@ -65,7 +71,12 @@ if __name__ == "__main__":
 
 	logger.info(f"Config:\n{config_to_dict(cfg)}")
 
-	Exp = Exp_CFM_Phase1_TrainExpand
+	Exp = EXP_MAP.get(cfg.model_name)
+	if Exp is None:
+		raise ValueError(
+			f"Unknown model_name '{cfg.model_name}'. "
+			f"Available: {list(EXP_MAP.keys())}"
+		)
 
 	if cfg.is_training:
 		for ii in range(cfg.itr):

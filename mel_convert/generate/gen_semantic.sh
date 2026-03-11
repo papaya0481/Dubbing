@@ -5,5 +5,4 @@ python mel_convert/generate/gen_semantic.py \
     --output-dir /data2/ruixin/datasets/flow_dataset/MELD_semantic \
     --model-dir /data2/ruixin/index-tts2/checkpoints \
     --gpus 0 \
-    --num-process 2 \
-    --test
+    --num-process 2

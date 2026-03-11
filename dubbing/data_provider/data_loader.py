@@ -1,3 +1,4 @@
+import csv
 import os
 import re
 import json
@@ -390,4 +391,284 @@ def collate_cfm_phase1(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.
         "x_std": x_std,
         "mse": mse_list,
         "text_r1": text_r1_list,
+    }
+
+
+# =============================================================================
+# Dataset_CFM_Index_Phase1
+# =============================================================================
+
+def _mel_spectrogram_cpu(
+    wav: torch.Tensor,
+    n_fft: int = 1024,
+    num_mels: int = 80,
+    sr: int = 22050,
+    hop_size: int = 256,
+    win_size: int = 1024,
+    fmin: float = 0.0,
+    fmax=None,
+) -> torch.Tensor:
+    """Compute log-mel spectrogram on CPU.
+
+    Matches the behaviour of ``indextts.s2mel.modules.audio.mel_spectrogram``:
+    librosa mel filter bank, reflect-padded STFT, log(clamp(x, min=1e-5)).
+
+    Args:
+        wav: [1, T] or [T] float32 waveform at *sr* Hz.
+    Returns:
+        [num_mels, T_mel] float32 log-mel spectrogram.
+    """
+    import librosa
+
+    if wav.dim() == 1:
+        wav = wav.unsqueeze(0)  # [1, T]
+
+    # Mel filter bank derived by librosa (matches indextts exactly)
+    mel_fb = torch.from_numpy(
+        librosa.filters.mel(sr=sr, n_fft=n_fft, n_mels=num_mels, fmin=fmin, fmax=fmax)
+    ).float()  # [num_mels, n_fft//2+1]
+
+    window = torch.hann_window(win_size)
+
+    # Reflect-pad to match indextts (centre=False behaviour)
+    pad = (n_fft - hop_size) // 2
+    wav_p = torch.nn.functional.pad(
+        wav.unsqueeze(1), (pad, pad), mode="reflect"
+    ).squeeze(1)  # [1, T+2*pad]
+
+    spec = torch.stft(
+        wav_p,
+        n_fft=n_fft,
+        hop_length=hop_size,
+        win_length=win_size,
+        window=window,
+        center=False,
+        normalized=False,
+        onesided=True,
+        return_complex=True,
+    )  # [1, n_fft//2+1, T_mel]
+
+    spec = torch.view_as_real(spec)
+    spec = torch.sqrt(spec.pow(2).sum(-1) + 1e-9)  # magnitude [1, n_fft//2+1, T_mel]
+
+    mel = torch.matmul(mel_fb, spec)               # [1, num_mels, T_mel]
+    mel = torch.log(torch.clamp(mel, min=1e-5))    # log-mel
+    return mel.squeeze(0)                          # [num_mels, T_mel]
+
+
+class Dataset_CFM_Index_Phase1(Dataset):
+    """Dataset for training IndexTTS2-CFM (Phase 1).
+
+    Reads a ``metadata.csv`` file with the following columns:
+      - ``prompt_audio_path`` : reference speaker audio (absolute or relative to csv dir)
+      - ``out_pt``            : path to pre-computed S_infer .pt file  [1?, T_codes, 1024]
+      - ``out_wav``           : path to target audio (ground truth for training)
+      - ``gen_error``         : if non-empty the row is skipped
+
+    Each ``__getitem__`` returns a dict with CPU tensors:
+      - ``stem``              : sample identifier string
+      - ``s_infer``           : [T_codes, 1024] GPT semantic features
+      - ``s_infer_len``       : scalar LongTensor
+      - ``ref_audio_22k``     : [T_22k]  reference audio at 22050 Hz
+      - ``ref_audio_22k_len`` : scalar LongTensor
+      - ``ref_audio_16k``     : [T_16k]  reference audio at 16000 Hz
+      - ``ref_audio_16k_len`` : scalar LongTensor
+      - ``x1_mel``            : [80, T_gen] log-mel spectrogram of target audio
+      - ``x1_len``            : scalar LongTensor
+    """
+
+    MEL_SR    = 22050
+    MEL_SR16  = 16000
+    MEL_N_FFT = 1024
+    MEL_WIN   = 1024
+    MEL_HOP   = 256
+    MEL_MELS  = 80
+    MEL_FMIN  = 0.0
+
+    def __init__(
+        self,
+        csv_path: str,
+        split: str = "train",
+        split_ratio: float = 0.9,
+        seed: int = 2026,
+        max_ref_sec: float = 15.0,
+        max_gen_sec: float = 10.0,
+        max_code_len: int = 500,
+    ):
+        super().__init__()
+        self.csv_path    = Path(csv_path)
+        self.data_root   = self.csv_path.parent
+        self.split       = split
+        self.max_ref_sec = max_ref_sec
+        self.max_gen_sec = max_gen_sec
+        self.max_code_len = max_code_len
+
+        all_samples = self._load_csv()
+        self.samples = self._split_samples(all_samples, split, split_ratio, seed)
+
+        if len(self.samples) == 0:
+            raise RuntimeError(
+                f"No valid samples for split={split!r} in {csv_path}"
+            )
+        logger.info(
+            f"Dataset_CFM_Index_Phase1 [{split}]: {len(self.samples)} samples"
+        )
+
+    # ------------------------------------------------------------------
+    # Data loading helpers
+    # ------------------------------------------------------------------
+
+    def _load_csv(self) -> List[Dict]:
+        samples: List[Dict] = []
+        with open(self.csv_path, encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get("gen_error", "").strip():
+                    continue
+                out_pt  = row.get("out_pt",  "").strip()
+                out_wav = row.get("out_wav", "").strip()
+                prompt  = row.get("prompt_audio_path", "").strip()
+                if not (out_pt and out_wav and prompt):
+                    continue
+                # Resolve relative paths
+                if out_pt and not Path(out_pt).is_absolute():
+                    out_pt = str((self.data_root / out_pt).resolve())
+                if out_wav and not Path(out_wav).is_absolute():
+                    out_wav = str((self.data_root / out_wav).resolve())
+                if not Path(out_pt).exists() or not Path(out_wav).exists():
+                    continue
+                samples.append({
+                    "stem":               Path(out_pt).stem,
+                    "prompt_audio_path":  prompt,
+                    "out_pt":             out_pt,
+                    "out_wav":            out_wav,
+                })
+        return samples
+
+    @staticmethod
+    def _split_samples(
+        samples: List[Dict], split: str, split_ratio: float, seed: int
+    ) -> List[Dict]:
+        n = len(samples)
+        if n == 0:
+            return samples
+
+        rng   = torch.Generator().manual_seed(seed)
+        perm  = torch.randperm(n, generator=rng).tolist()
+        samples = [samples[i] for i in perm]
+
+        train_n   = max(1, min(int(n * split_ratio), n))
+        remaining = n - train_n
+        vt_n      = remaining // 2
+        if vt_n == 0:
+            vt_n = 1 if n >= 3 else 0
+
+        train_end = n - 2 * vt_n
+        val_end   = train_end + vt_n
+
+        if split == "train":
+            return samples[:train_end]
+        if split == "val":
+            return samples[train_end:val_end]
+        return samples[val_end:]  # test
+
+    def _load_audio(self, path: str, target_sr: int, max_sec: float) -> torch.Tensor:
+        """Load and resample audio; returns [T] float32 (mono, truncated)."""
+        wav, sr = torchaudio.load(str(path))
+        if wav.dim() == 2 and wav.size(0) > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        wav = wav.squeeze(0)
+        if sr != target_sr:
+            wav = torchaudio.functional.resample(wav, sr, target_sr)
+        max_len = int(max_sec * target_sr)
+        return wav[:max_len].float()
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, index: int) -> Dict:
+        item = self.samples[index]
+
+        # ---- S_infer (pre-computed GPT semantic features) ---------------
+        s_infer = torch.load(item["out_pt"], map_location="cpu")
+        if s_infer.dim() == 3 and s_infer.size(0) == 1:
+            s_infer = s_infer.squeeze(0)     # [T_codes, 1024]
+        s_infer = s_infer.float()
+        if s_infer.size(0) > self.max_code_len:
+            s_infer = s_infer[: self.max_code_len, :]
+
+        # ---- Reference audio --------------------------------------------
+        ref_22k = self._load_audio(item["prompt_audio_path"], self.MEL_SR,   self.max_ref_sec)
+        ref_16k = self._load_audio(item["prompt_audio_path"], self.MEL_SR16, self.max_ref_sec)
+
+        # ---- Target mel (x1) -------------------------------------------
+        x1_wav = self._load_audio(item["out_wav"], self.MEL_SR, self.max_gen_sec)
+        x1_mel = _mel_spectrogram_cpu(
+            x1_wav,
+            n_fft=self.MEL_N_FFT, num_mels=self.MEL_MELS,
+            sr=self.MEL_SR, hop_size=self.MEL_HOP, win_size=self.MEL_WIN,
+            fmin=self.MEL_FMIN,
+        )  # [80, T_gen]
+
+        return {
+            "stem":               item["stem"],
+            "s_infer":            s_infer,
+            "s_infer_len":        torch.tensor(s_infer.size(0),  dtype=torch.long),
+            "ref_audio_22k":      ref_22k,
+            "ref_audio_22k_len":  torch.tensor(ref_22k.size(0),  dtype=torch.long),
+            "ref_audio_16k":      ref_16k,
+            "ref_audio_16k_len":  torch.tensor(ref_16k.size(0),  dtype=torch.long),
+            "x1_mel":             x1_mel,
+            "x1_len":             torch.tensor(x1_mel.size(-1),  dtype=torch.long),
+        }
+
+
+def collate_cfm_index_phase1(batch: List[Dict]) -> Dict:
+    """Pad and collate a batch from Dataset_CFM_Index_Phase1."""
+    B = len(batch)
+
+    max_codes  = max(item["s_infer_len"].item()       for item in batch)
+    max_r22    = max(item["ref_audio_22k_len"].item()  for item in batch)
+    max_r16    = max(item["ref_audio_16k_len"].item()  for item in batch)
+    max_gen    = max(item["x1_len"].item()             for item in batch)
+    n_mels     = batch[0]["x1_mel"].size(0)
+
+    s_infer       = torch.zeros(B, max_codes, 1024)
+    ref_audio_22k = torch.zeros(B, max_r22)
+    ref_audio_16k = torch.zeros(B, max_r16)
+    x1_mel        = torch.zeros(B, n_mels, max_gen)
+
+    s_infer_lens      = torch.zeros(B, dtype=torch.long)
+    ref_audio_22k_lens = torch.zeros(B, dtype=torch.long)
+    ref_audio_16k_lens = torch.zeros(B, dtype=torch.long)
+    x1_lens            = torch.zeros(B, dtype=torch.long)
+    stems: List[str]   = []
+
+    for i, item in enumerate(batch):
+        tc  = item["s_infer_len"].item()
+        t22 = item["ref_audio_22k_len"].item()
+        t16 = item["ref_audio_16k_len"].item()
+        tg  = item["x1_len"].item()
+
+        s_infer[i, :tc, :]      = item["s_infer"][:tc, :]
+        ref_audio_22k[i, :t22]  = item["ref_audio_22k"][:t22]
+        ref_audio_16k[i, :t16]  = item["ref_audio_16k"][:t16]
+        x1_mel[i, :, :tg]       = item["x1_mel"][:, :tg]
+
+        s_infer_lens[i]       = tc
+        ref_audio_22k_lens[i] = t22
+        ref_audio_16k_lens[i] = t16
+        x1_lens[i]            = tg
+        stems.append(item["stem"])
+
+    return {
+        "stems":              stems,
+        "s_infer":            s_infer,
+        "s_infer_lens":       s_infer_lens,
+        "ref_audio_22k":      ref_audio_22k,
+        "ref_audio_22k_lens": ref_audio_22k_lens,
+        "ref_audio_16k":      ref_audio_16k,
+        "ref_audio_16k_lens": ref_audio_16k_lens,
+        "x1_mel":             x1_mel,
+        "x1_lens":            x1_lens,
     }
