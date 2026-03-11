@@ -379,7 +379,7 @@ class Exp_CFM_Index_Phase1_TrainExpand(Exp_Basic):
                     style_i   = style[i:i+1]                          # [1, 192]
 
                     pred_full = core.inference(
-                        mu=cond_i,
+                        cond=cond_i,
                         x_lens=x_lens[i:i+1],
                         prompt=ref_mel_i,
                         style=style_i,

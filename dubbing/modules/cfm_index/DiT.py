@@ -337,7 +337,7 @@ class DiT(nn.Module):
         x_in = torch.cat([x_t, prompt_t, cond], dim=-1)     # [B, T, 80+80+D]
 
         if self.transformer_style_condition and not self.style_as_token:
-            x_in = torch.cat([x_in, style[:, None, :].expand(-1, T, -1)], dim=-1)
+            x_in = torch.cat([x_in, style[:, None, :].expand(-1, T, -1)], dim=-1)   #[B, T, 80+80+D+style_dim]
 
         if class_dropout:
             x_in[..., self.in_channels:] = 0.0

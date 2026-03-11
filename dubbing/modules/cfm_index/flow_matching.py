@@ -66,7 +66,7 @@ class BASECFM(nn.Module, ABC):
     @torch.inference_mode()
     def inference(
         self,
-        mu: torch.Tensor,
+        cond: torch.Tensor,
         x_lens: torch.Tensor,
         prompt: torch.Tensor,
         style: torch.Tensor,
@@ -78,7 +78,7 @@ class BASECFM(nn.Module, ABC):
         """Run ODE forward from noise to mel-spectrogram.
 
         Args:
-            mu:           Concatenated semantic condition [B, T_ref+T_infer, 512].
+            cond:         Concatenated semantic condition [B, T_ref+T_infer, 512].
             x_lens:       Total mel lengths [B].
             prompt:       Reference mel [B, 80, T_ref].
             style:        Global speaker embedding [B, 192].
@@ -89,17 +89,17 @@ class BASECFM(nn.Module, ABC):
         Returns:
             Generated mel [B, 80, T].
         """
-        B, T = mu.size(0), mu.size(1)
-        z = torch.randn([B, self.estimator.in_channels, T], device=mu.device) * temperature
-        t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device)
-        return self._solve_euler(z, x_lens, prompt, mu, style, t_span, inference_cfg_rate)
+        B, T = cond.size(0), cond.size(1)
+        z = torch.randn([B, self.estimator.in_channels, T], device=cond.device) * temperature
+        t_span = torch.linspace(0, 1, n_timesteps + 1, device=cond.device)
+        return self._solve_euler(z, x_lens, prompt, cond, style, t_span, inference_cfg_rate)
 
     def _solve_euler(
         self,
         x: torch.Tensor,
         x_lens: torch.Tensor,
         prompt: torch.Tensor,
-        mu: torch.Tensor,
+        cond: torch.Tensor,
         style: torch.Tensor,
         t_span: torch.Tensor,
         inference_cfg_rate: float,
@@ -113,8 +113,8 @@ class BASECFM(nn.Module, ABC):
         prompt_x[..., :prompt_len] = prompt[..., :prompt_len]
         x[..., :prompt_len] = 0.0
         if self.zero_prompt_speech_token:
-            mu = mu.clone()
-            mu[..., :prompt_len] = 0.0
+            cond = cond.clone()
+            cond[..., :prompt_len] = 0.0
 
         for step in tqdm(range(1, len(t_span))):
             dt = t_span[step] - t_span[step - 1]
@@ -126,12 +126,12 @@ class BASECFM(nn.Module, ABC):
                     x_lens,
                     torch.cat([t.unsqueeze(0), t.unsqueeze(0)], dim=0),
                     torch.cat([style, torch.zeros_like(style)], dim=0),
-                    torch.cat([mu, torch.zeros_like(mu)], dim=0),
+                    torch.cat([cond, torch.zeros_like(cond)], dim=0),
                 )
                 dphi_cond, dphi_uncond = dphi_dt.chunk(2, dim=0)
                 dphi_dt = (1.0 + inference_cfg_rate) * dphi_cond - inference_cfg_rate * dphi_uncond
             else:
-                dphi_dt = self.estimator(x, prompt_x, x_lens, t.unsqueeze(0), style, mu)
+                dphi_dt = self.estimator(x, prompt_x, x_lens, t.unsqueeze(0), style, cond)
 
             x = x + dt * dphi_dt
             t = t + dt
