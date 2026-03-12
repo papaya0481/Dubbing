@@ -29,7 +29,7 @@ import os
 
 # ---- paths -------------------------------------------------------------
 _CHECKPOINT_PATH = Path("/data2/ruixin/index-tts2/checkpoints")
-_SPK_PROMPT      = Path("/data2/ruixin/ted-tts/AllInferenceResults/ESD/0001/Angry/0001_000351.wav")
+_SPK_PROMPT      = Path("/data2/ruixin/datasets/MELD_raw/audios/ost/dev_dia0_utt0.wav")
 
 _SKIP = pytest.mark.skipif(
     not _CHECKPOINT_PATH.exists(),
