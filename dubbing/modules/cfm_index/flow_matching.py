@@ -210,3 +210,47 @@ class CFM(BASECFM):
         loss = self.criterion(estimator_out[valid_mask_mel], u[valid_mask_mel])
 
         return loss, estimator_out + (1 - self.sigma_min) * z
+
+
+class CrossAttnCFM(CFM):
+    """CFM variant with cross-attention to the semantic condition and lips features.
+    Which can replace the flow matching in IndexTTS2 for more conditions.
+    
+    """
+    def __init__(self, args: Any):
+        super().__init__(args)
+        cfg = args if isinstance(args, CFMConfig) else CFMConfig.from_args(args)
+        if cfg.dit_type != "DiT":
+            raise NotImplementedError(f"Unknown dit_type: {cfg.dit_type!r}")
+        self.estimator = DiT(cfg.DiT)
+    
+    def forward(
+        self,
+        x1: torch.Tensor,
+        x_lens: torch.Tensor,
+        prompt_lens: torch.Tensor,
+        prompt_cond: torch.Tensor,
+        infer_cond: torch.Tensor,
+        lips_feat: torch.Tensor,
+        style: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Training forward pass (conditional flow matching loss).
+        This module will firstly do cross attention between infer_cond and lips_feat. 
+        Q is from infer_cond, K and V are from lips_feat. 
+        Then the output of cross attention will be concatenated with prompt_cond and fed into the DiT estimator.
+        
+        Note that a residual connection is added between the output of cross attention and infer_cond.
+
+        Args:
+            x1:          Ground-truth mel [B, 80, T].
+            x_lens:      Valid frame lengths [B].
+            prompt_lens: Prompt (reference) frame lengths [B].
+            prompt_cond: Prompt (reference) semantic condition [B, T, 512].
+            infer_cond: Inference semantic condition [B, T, 512].
+            lips_feat: Lip reading features [B, T_lips, 512].
+            style:       Speaker embedding [B, 192].
+        Returns:
+            (loss, estimator_output + sigma_correction)
+        """
+        pass
+    
