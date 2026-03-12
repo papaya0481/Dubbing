@@ -29,7 +29,7 @@ data:
   cache_dir: null
   dataset: cfm_index_phase1
   train_split_ratio: 0.9
-  batch_size: 4
+  batch_size: 8
   num_workers: 2
   # Audio duration limits (seconds); longer samples are truncated
   max_ref_sec: 15.0     # maximum reference (prompt) audio duration
