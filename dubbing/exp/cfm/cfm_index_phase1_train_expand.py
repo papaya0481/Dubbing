@@ -25,6 +25,7 @@ from typing import Dict, List
 
 import torch
 import torchaudio
+from accelerate import Accelerator
 from tqdm.auto import tqdm
 
 from exp.basic import Exp_Basic
@@ -81,7 +82,13 @@ class Exp_CFM_Index_Phase1_TrainExpand(Exp_Basic):
     def __init__(self, args):
         self.best_ckpt_path = None
         self._bigvgan = None
+        self._model_prepared = False
+        self.accelerator = Accelerator()
         super().__init__(args)
+
+    def _acquire_device(self):
+        logger.info(f"[Accelerate] device: {self.accelerator.device}")
+        return self.accelerator.device
 
     # ------------------------------------------------------------------
     # Model construction
@@ -113,12 +120,9 @@ class Exp_CFM_Index_Phase1_TrainExpand(Exp_Basic):
         else:
             logger.warning(f"[CFM] s2mel checkpoint not found at {s2mel_path}, training from scratch.")
 
-        if self.args.system.use_multi_gpu and self.args.system.use_gpu:
-            model = torch.nn.DataParallel(model, device_ids=self.args.system.device_ids)
         num_params = sum(p.numel() for p in model.parameters())
         logger.info(f"CFM (cfm_index) parameters: {num_params:,}")
-        core = model.module if isinstance(model, torch.nn.DataParallel) else model
-        core.estimator.setup_caches(max_batch_size=8, max_seq_length=8192)
+        model.estimator.setup_caches(max_batch_size=8, max_seq_length=8192)
         return model
 
     # ------------------------------------------------------------------
@@ -137,11 +141,7 @@ class Exp_CFM_Index_Phase1_TrainExpand(Exp_Basic):
         total_loss = 0.0
         count      = 0
 
-        core = (
-            self.model.module
-            if isinstance(self.model, torch.nn.DataParallel)
-            else self.model
-        )
+        core = self.accelerator.unwrap_model(self.model)
 
         if train:
             self.model.train()
@@ -177,7 +177,7 @@ class Exp_CFM_Index_Phase1_TrainExpand(Exp_Basic):
                     )
 
                 if train:
-                    loss.backward()
+                    self.accelerator.backward(loss)
                     torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(), self.args.training.max_grad_norm
                     )
@@ -213,6 +213,13 @@ class Exp_CFM_Index_Phase1_TrainExpand(Exp_Basic):
             lr=t.learning_rate, weight_decay=t.weight_decay,
         )
         self.scheduler = self._build_scheduler(self.optimizer)
+        (
+            self.model, self.optimizer, self.scheduler, train_loader, val_loader, test_loader,
+        ) = self.accelerator.prepare(
+            self.model, self.optimizer, self.scheduler,
+            train_loader, val_loader, test_loader,
+        )
+        self._model_prepared = True
 
         best_val          = float("inf")
         stale_epochs      = 0
@@ -254,7 +261,7 @@ class Exp_CFM_Index_Phase1_TrainExpand(Exp_Basic):
                 best_val     = val_loss
                 stale_epochs = 0
                 torch.save(
-                    {"model": self.model.state_dict(), "args": self.args},
+                    {"model": self.accelerator.unwrap_model(self.model).state_dict(), "args": self.args},
                     self.best_ckpt_path,
                 )
                 logger.info(f"  → best checkpoint saved: {self.best_ckpt_path}")
@@ -287,11 +294,15 @@ class Exp_CFM_Index_Phase1_TrainExpand(Exp_Basic):
     def test(self, setting: str, test: int = 0, epoch: int = 0) -> float:
         _, test_loader = self._get_data("test")
 
+        if not self._model_prepared:
+            self.model, test_loader = self.accelerator.prepare(self.model, test_loader)
+            self._model_prepared = True
+
         ckpt_dir       = os.path.join(self.args.system.checkpoints, setting)
         best_ckpt_path = os.path.join(ckpt_dir, "best.pth")
         if os.path.exists(best_ckpt_path):
             state = torch.load(best_ckpt_path, map_location=self.device, weights_only=False)
-            self.model.load_state_dict(state["model"], strict=False)
+            self.accelerator.unwrap_model(self.model).load_state_dict(state["model"], strict=False)
             logger.info(f"Loaded checkpoint: {best_ckpt_path}")
 
         test_loss = self._run_one_epoch(test_loader, train=False, stage="Test")
@@ -342,11 +353,7 @@ class Exp_CFM_Index_Phase1_TrainExpand(Exp_Basic):
         os.makedirs(output_dir, exist_ok=True)
         vocoder = self._get_bigvgan()
 
-        core = (
-            self.model.module
-            if isinstance(self.model, torch.nn.DataParallel)
-            else self.model
-        )
+        core = self.accelerator.unwrap_model(self.model)
         core.eval()
 
         tr = self.args.training
