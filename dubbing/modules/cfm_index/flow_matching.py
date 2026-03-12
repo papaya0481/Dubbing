@@ -212,17 +212,80 @@ class CFM(BASECFM):
         return loss, estimator_out + (1 - self.sigma_min) * z
 
 
-class CrossAttnCFM(CFM):
-    """CFM variant with cross-attention to the semantic condition and lips features.
-    Which can replace the flow matching in IndexTTS2 for more conditions.
-    
+class LipsCrossAttentionLayer(nn.Module):
+    """Pre-norm cross-attention: Q from infer_cond, K/V from lips_feat.
+
+    Uses the Attention module from .transformer (supports cross-attention via
+    ``is_cross_attention=True``) with RMSNorm pre-normalisation and a
+    residual connection: output = query + attn(norm(query), norm(context)).
     """
+
+    def __init__(self, dim: int = 512, n_head: int = 8, context_dim: int = 512):
+        super().__init__()
+        from .transformer import (
+            ModelArgs,
+            Attention as _TransAttn,
+            RMSNorm,
+            precompute_freqs_cis,
+        )
+        self._precompute_freqs = precompute_freqs_cis
+        self._head_dim = dim // n_head
+        cfg = ModelArgs(
+            dim=dim,
+            n_head=n_head,
+            n_local_heads=n_head,
+            head_dim=dim // n_head,
+            context_dim=context_dim,
+            has_cross_attention=True,
+        )
+        self.norm_q  = RMSNorm(dim)
+        self.norm_kv = RMSNorm(context_dim)
+        self.attn    = _TransAttn(cfg, is_cross_attention=True)
+
+    def forward(self, query: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        """Args:
+            query:   [B, T_q, dim]       (infer_cond)
+            context: [B, T_c, ctxt_dim]  (lips_feat)
+        Returns:
+            [B, T_q, dim] with residual added
+        """
+        T_q = query.size(1)
+        T_c = context.size(1)
+        max_len = max(T_q, T_c)
+        freqs = self._precompute_freqs(
+            max_len, self._head_dim, dtype=query.dtype
+        ).to(query.device)
+        attn_out = self.attn(
+            x=self.norm_q(query),
+            freqs_cis=freqs[:T_q],
+            mask=None,
+            input_pos=None,
+            context=self.norm_kv(context),
+            context_freqs_cis=freqs[:T_c],
+        )
+        out = query + attn_out
+        return out
+
+
+class CrossAttnCFM(CFM):
+    """CFM variant with cross-attention to lips_feat before conditioning DiT.
+
+    Adds a LipsCrossAttentionLayer that fuses infer_cond and lips_feat via
+    cross-attention (Q from infer_cond, K/V from lips_feat) with a residual
+    connection, before concatenating with prompt_cond and passing the
+    assembled condition into the DiT estimator.
+    """
+
     def __init__(self, args: Any):
-        super().__init__(args)
+        super().__init__(args)   # builds self.estimator = DiT(cfg.DiT)
         cfg = args if isinstance(args, CFMConfig) else CFMConfig.from_args(args)
         if cfg.dit_type != "DiT":
             raise NotImplementedError(f"Unknown dit_type: {cfg.dit_type!r}")
-        self.estimator = DiT(cfg.DiT)
+        content_dim = cfg.DiT.DiT.content_dim
+        n_head      = cfg.DiT.DiT.num_heads
+        self.lips_cross_attn = LipsCrossAttentionLayer(
+            dim=content_dim, n_head=n_head, context_dim=content_dim
+        )
     
     def forward(
         self,
@@ -237,7 +300,7 @@ class CrossAttnCFM(CFM):
         """Training forward pass (conditional flow matching loss).
         This module will firstly do cross attention between infer_cond and lips_feat. 
         Q is from infer_cond, K and V are from lips_feat. 
-        Then the output of cross attention will be concatenated with prompt_cond and fed into the DiT estimator.
+        Then the output of cross attention will be concatenated with prompt_cond on the Time dimension (T=T_prompt+T_infer) and fed into the DiT estimator as the condition.
         
         Note that a residual connection is added between the output of cross attention and infer_cond.
 
@@ -245,12 +308,59 @@ class CrossAttnCFM(CFM):
             x1:          Ground-truth mel [B, 80, T].
             x_lens:      Valid frame lengths [B].
             prompt_lens: Prompt (reference) frame lengths [B].
-            prompt_cond: Prompt (reference) semantic condition [B, T, 512].
-            infer_cond: Inference semantic condition [B, T, 512].
+            prompt_cond: Prompt (reference) semantic condition [B, T_prompt, 512].
+            infer_cond: Inference semantic condition [B, T_infer, 512].
             lips_feat: Lip reading features [B, T_lips, 512].
             style:       Speaker embedding [B, 192].
         Returns:
             (loss, estimator_output + sigma_correction)
         """
-        pass
+        # ------------------------------------------------------------------
+        # 1. Cross-attend: Q from infer_cond, K/V from lips_feat (+residual)
+        # ------------------------------------------------------------------
+        attended_infer = self.lips_cross_attn(infer_cond, lips_feat)  # [B, T_infer, 512]
+
+        # ------------------------------------------------------------------
+        # 2. Assemble full cond: per-sample [prompt || attended_infer] with
+        #    variable lengths, zero-padding to T_mel = x1.size(2)
+        # ------------------------------------------------------------------
+        B      = x1.size(0)
+        T_mel  = x1.size(2)
+        C      = infer_cond.size(-1)
+        infer_lens = x_lens - prompt_lens  # [B]
+        cond = torch.zeros(B, T_mel, C, device=x1.device, dtype=infer_cond.dtype)
+        for i in range(B):
+            T_r = int(prompt_lens[i])
+            T_g = int(infer_lens[i])
+            cond[i, :T_r]        = prompt_cond[i, :T_r]
+            cond[i, T_r:T_r+T_g] = attended_infer[i, :T_g]
+
+        # ------------------------------------------------------------------
+        # 3. Flow-matching forward (same logic as CFM.forward)
+        # ------------------------------------------------------------------
+        b, _, T = x1.shape
+        t = torch.rand([b, 1, 1], device=cond.device, dtype=x1.dtype)
+        z = torch.randn_like(x1)
+
+        xt = (1 - (1 - self.sigma_min) * t) * z + t * x1
+        u  = x1 - (1 - self.sigma_min) * z
+
+        frame_idx = torch.arange(T, device=x1.device)
+        prompt_mask = frame_idx.unsqueeze(0) < prompt_lens.unsqueeze(1)   # [B, T]
+        prompt_mask_mel = prompt_mask.unsqueeze(1)                             # [B, 1, T]
+        valid_mask = (~prompt_mask) & (frame_idx.unsqueeze(0) < x_lens.unsqueeze(1))
+
+        prompt = x1 * prompt_mask_mel
+        xt = xt.masked_fill(prompt_mask_mel, 0.0)
+        if self.zero_prompt_speech_token:
+            cond = cond.masked_fill(prompt_mask.unsqueeze(2), 0.0)
+
+        estimator_out = self.estimator(
+            xt, prompt, x_lens,
+            t.squeeze(1).squeeze(1), style, cond,
+        )
+        valid_mask_mel = valid_mask.unsqueeze(1).expand_as(estimator_out)
+        loss = self.criterion(estimator_out[valid_mask_mel], u[valid_mask_mel])
+
+        return loss, estimator_out + (1 - self.sigma_min) * z
     
