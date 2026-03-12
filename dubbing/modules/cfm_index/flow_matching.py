@@ -116,7 +116,7 @@ class BASECFM(nn.Module, ABC):
             cond = cond.clone()
             cond[..., :prompt_len] = 0.0
 
-        for step in tqdm(range(1, len(t_span))):
+        for step in range(1, len(t_span)):
             dt = t_span[step] - t_span[step - 1]
             if inference_cfg_rate > 0:
                 # Batched CFG: conditional + unconditional in one forward pass.
