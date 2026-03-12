@@ -242,10 +242,18 @@ class LipsCrossAttentionLayer(nn.Module):
         self.norm_kv = RMSNorm(context_dim)
         self.attn    = _TransAttn(cfg, is_cross_attention=True)
 
-    def forward(self, query: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        query: torch.Tensor,
+        context: torch.Tensor,
+        query_lens: torch.Tensor | None = None,
+        context_lens: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Args:
-            query:   [B, T_q, dim]       (infer_cond)
-            context: [B, T_c, ctxt_dim]  (lips_feat)
+            query:        [B, T_q, dim]       (infer_cond)
+            context:      [B, T_c, ctxt_dim]  (lips_feat)
+            query_lens:   [B] valid lengths for Q (None = all valid)
+            context_lens: [B] valid lengths for K/V (None = all valid)
         Returns:
             [B, T_q, dim] with residual added
         """
@@ -255,10 +263,27 @@ class LipsCrossAttentionLayer(nn.Module):
         freqs = self._precompute_freqs(
             max_len, self._head_dim, dtype=query.dtype
         ).to(query.device)
+
+        # Build boolean attn_mask [B, 1, T_q, T_c]: True = attend, False = ignore.
+        # Masks out padding in both Q and K/V sequences.
+        if query_lens is not None or context_lens is not None:
+            idx_q = torch.arange(T_q, device=query.device)   # [T_q]
+            idx_c = torch.arange(T_c, device=query.device)   # [T_c]
+            q_mask = (idx_q.unsqueeze(0) < query_lens.unsqueeze(1)
+                      if query_lens is not None
+                      else torch.ones(query.size(0), T_q, dtype=torch.bool, device=query.device))
+            k_mask = (idx_c.unsqueeze(0) < context_lens.unsqueeze(1)
+                      if context_lens is not None
+                      else torch.ones(query.size(0), T_c, dtype=torch.bool, device=query.device))
+            # [B, T_q, T_c] → [B, 1, T_q, T_c]
+            attn_mask = (q_mask.unsqueeze(2) & k_mask.unsqueeze(1)).unsqueeze(1)
+        else:
+            attn_mask = None
+
         attn_out = self.attn(
             x=self.norm_q(query),
             freqs_cis=freqs[:T_q],
-            mask=None,
+            mask=attn_mask,
             input_pos=None,
             context=self.norm_kv(context),
             context_freqs_cis=freqs[:T_c],
@@ -295,6 +320,7 @@ class CrossAttnCFM(CFM):
         prompt_cond: torch.Tensor,
         infer_cond: torch.Tensor,
         lips_feat: torch.Tensor,
+        lips_lens: torch.Tensor,
         style: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Training forward pass (conditional flow matching loss).
@@ -318,7 +344,12 @@ class CrossAttnCFM(CFM):
         # ------------------------------------------------------------------
         # 1. Cross-attend: Q from infer_cond, K/V from lips_feat (+residual)
         # ------------------------------------------------------------------
-        attended_infer = self.lips_cross_attn(infer_cond, lips_feat)  # [B, T_infer, 512]
+        infer_lens = x_lens - prompt_lens  # [B]
+        attended_infer = self.lips_cross_attn(
+            infer_cond, lips_feat,
+            query_lens=infer_lens,
+            context_lens=lips_lens,
+        )  # [B, T_infer, 512]
 
         # ------------------------------------------------------------------
         # 2. Assemble full cond: per-sample [prompt || attended_infer] with
@@ -327,7 +358,6 @@ class CrossAttnCFM(CFM):
         B      = x1.size(0)
         T_mel  = x1.size(2)
         C      = infer_cond.size(-1)
-        infer_lens = x_lens - prompt_lens  # [B]
         cond = torch.zeros(B, T_mel, C, device=x1.device, dtype=infer_cond.dtype)
         for i in range(B):
             T_r = int(prompt_lens[i])
