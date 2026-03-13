@@ -1,4 +1,4 @@
-export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_VISIBLE_DEVICES=2,3
 
 python mel_convert/generate/gen_semantic.py \
     --csv /data2/ruixin/datasets/MELD_raw/metadata.csv \
