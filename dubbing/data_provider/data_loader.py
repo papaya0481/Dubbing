@@ -639,6 +639,19 @@ class Dataset_CMF_Index_Phase1_ForLipsFeat(Dataset_CFM_Index_Phase1):
             tier_name=self.tier_name,
         ).build(self.samples)
 
+        # Some samples may still fail during cache building (e.g. malformed
+        # alignment files). Keep only samples with cache files to ensure
+        # dataloader stability.
+        before = len(self.samples)
+        self.samples = [
+            s for s in self.samples
+            if (self.lips_cache_dir / f"{s['stem']}.pt").exists()
+        ]
+        if len(self.samples) != before:
+            logger.warning(
+                f"[LipsFeat] Drop samples without lips cache: {before} -> {len(self.samples)}"
+            )
+
         if len(self.samples) == 0:
             raise RuntimeError(
                 f"No valid intersected samples for split={split!r} in {self.csv_path_auto}"

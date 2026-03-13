@@ -316,6 +316,9 @@ class CFMIndexLipsInferCacheBuilder:
         lips_cache_dir,
         max_code_len: int = 500,
         tier_name: str = "phones",
+        diffusion_steps: int = 10,
+        inference_cfg_rate: float = 0.7,
+        batch_size: int = 8,
     ):
         self.preprocess = preprocess
         self.base_cache_dir = Path(base_cache_dir)
@@ -323,11 +326,17 @@ class CFMIndexLipsInferCacheBuilder:
         self.lips_cache_dir.mkdir(parents=True, exist_ok=True)
         self.max_code_len = max_code_len
         self.tier_name = tier_name
+        self.diffusion_steps = int(diffusion_steps)
+        self.inference_cfg_rate = float(inference_cfg_rate)
+        self.batch_size = int(batch_size)
 
+        # Keep a single device for the whole lips-cache pipeline to avoid
+        # cross-device mismatches inside CFM internals.
         self.device = torch.device("cpu")
-        self.semantic_transformer = SemanticTransformer(device="cpu", verbose=False)
+        self.semantic_transformer = SemanticTransformer(device=self.device, verbose=False)
 
         self._len_reg = None
+        self._cfm = None
         self._phoneme_vocab = None
 
     def cache_path(self, stem: str) -> Path:
@@ -358,6 +367,11 @@ class CFMIndexLipsInferCacheBuilder:
             is_distributed=False,
         )
         self._len_reg = s2mel_model.models["length_regulator"].to(self.device).eval()
+        self._cfm = s2mel_model.models["cfm"].to(self.device).eval()
+        try:
+            self._cfm.estimator.setup_caches(max_batch_size=1, max_seq_length=8192)
+        except Exception:
+            pass
 
         try:
             from lips.data.phoneme_vocab import PhonemeVocab
@@ -369,64 +383,135 @@ class CFMIndexLipsInferCacheBuilder:
         self._phoneme_vocab = PhonemeVocab()
 
     @torch.no_grad()
-    def _build_one(self, item: Dict):
-        stem = item["stem"]
-        base_path = self.base_cache_dir / f"{stem}.pt"
-        if not base_path.exists():
-            raise FileNotFoundError(f"base cache missing for stem={stem}: {base_path}")
+    def _build_batch(self, items: List[Dict]) -> None:
+        # Stage 1: per-sample prep (TextGrid warp + infer_cond)
+        prepared: List[Dict] = []
+        for item in items:
+            stem = item["stem"]
+            base_path = self.base_cache_dir / f"{stem}.pt"
+            if not base_path.exists():
+                raise FileNotFoundError(f"base cache missing for stem={stem}: {base_path}")
 
-        base = torch.load(base_path, map_location="cpu", weights_only=True)
+            base = torch.load(base_path, map_location="cpu", weights_only=True)
 
-        s_infer = torch.load(item["out_pt"], map_location="cpu", weights_only=False)
-        if s_infer.dim() == 2:
-            s_infer = s_infer.unsqueeze(0)
-        elif s_infer.dim() == 3 and s_infer.size(0) != 1:
-            s_infer = s_infer[:1]
-        s_infer = s_infer.float()
-        if s_infer.size(1) > self.max_code_len:
-            s_infer = s_infer[:, : self.max_code_len, :]
+            s_infer = torch.load(item["out_pt"], map_location="cpu", weights_only=False)
+            if s_infer.dim() == 2:
+                s_infer = s_infer.unsqueeze(0)
+            elif s_infer.dim() == 3 and s_infer.size(0) != 1:
+                s_infer = s_infer[:1]
+            s_infer = s_infer.float()
+            if s_infer.size(1) > self.max_code_len:
+                s_infer = s_infer[:, : self.max_code_len, :]
 
-        src_tg = tgt.io.read_textgrid(str(item["source_textgrid"]))
-        tgt_tg = tgt.io.read_textgrid(str(item["lips_textgrid"]))
-        for tg_obj in (src_tg, tgt_tg):
-            try:
-                tier = tg_obj.get_tier_by_name(self.tier_name)
-            except Exception:
-                continue
-            for iv in tier:
-                txt = (iv.text or "").strip()
-                if txt == "":
+            src_tg = tgt.io.read_textgrid(str(item["source_textgrid"]))
+            tgt_tg = tgt.io.read_textgrid(str(item["lips_textgrid"]))
+            for tg_obj in (src_tg, tgt_tg):
+                try:
+                    tier = tg_obj.get_tier_by_name(self.tier_name)
+                except Exception:
                     continue
-                vfa_id = self._phoneme_vocab.arpabet_to_vfa_id(txt)
-                iv.text = self._phoneme_vocab.vfa_id_to_arpabet(vfa_id)
+                for iv in tier:
+                    txt = (iv.text or "").strip()
+                    if txt == "":
+                        continue
+                    vfa_id = self._phoneme_vocab.arpabet_to_vfa_id(txt)
+                    iv.text = self._phoneme_vocab.vfa_id_to_arpabet(vfa_id)
 
-        s_warped, _ = self.semantic_transformer.transform(
-            s_infer=s_infer,
-            source_textgrid=src_tg,
-            target_textgrid=tgt_tg,
-            tier_name=self.tier_name,
-        )
+            s_warped, _ = self.semantic_transformer.transform(
+                s_infer=s_infer,
+                source_textgrid=src_tg,
+                target_textgrid=tgt_tg,
+                tier_name=self.tier_name,
+            )
 
-        target_len = int(base["x1_mel"].size(-1))
-        infer_cond = self._len_reg(
-            s_warped,
-            ylens=torch.LongTensor([target_len]).to(self.device),
-            n_quantizers=3,
-            f0=None,
-        )[0].squeeze(0).cpu()
+            target_len = int(base["x1_mel"].size(-1))
+            infer_cond = self._len_reg(
+                s_warped.to(self.device),
+                ylens=torch.LongTensor([target_len]).to(self.device),
+                n_quantizers=3,
+                f0=None,
+            )[0].squeeze(0).cpu()
 
-        merged = {
-            "ref_mel": base["ref_mel"],
-            "style": base["style"],
-            "prompt_cond": base["prompt_cond"],
-            "infer_cond": infer_cond,
-            "x1_mel": base["x1_mel"],
-        }
-        torch.save(merged, self.cache_path(stem))
+            prepared.append(
+                {
+                    "stem": stem,
+                    "base": base,
+                    "infer_cond": infer_cond,
+                }
+            )
+
+        # Stage 2: batched CFM inference for x1_mel generation
+        B = len(prepared)
+        ref_lens = [int(x["base"]["ref_mel"].size(-1)) for x in prepared]
+        gen_lens = [int(x["infer_cond"].size(0)) for x in prepared]
+        total_lens = [r + g for r, g in zip(ref_lens, gen_lens)]
+
+        ref_max = max(ref_lens)
+        gen_max = max(gen_lens)
+        total_max = max(total_lens)
+
+        prompt_pad = torch.zeros(B, ref_max, 512, dtype=prepared[0]["base"]["prompt_cond"].dtype)
+        infer_pad = torch.zeros(B, gen_max, 512, dtype=prepared[0]["infer_cond"].dtype)
+        cond = torch.zeros(B, total_max, 512, dtype=prepared[0]["infer_cond"].dtype)
+
+        ref_mel = torch.zeros(B, 80, ref_max, dtype=prepared[0]["base"]["ref_mel"].dtype)
+        style = torch.zeros(B, 192, dtype=prepared[0]["base"]["style"].dtype)
+
+        for i, rec in enumerate(prepared):
+            t_ref = ref_lens[i]
+            t_gen = gen_lens[i]
+            prompt_pad[i, :t_ref, :] = rec["base"]["prompt_cond"]
+            infer_pad[i, :t_gen, :] = rec["infer_cond"]
+            cond[i, :t_ref, :] = prompt_pad[i, :t_ref, :]
+            cond[i, t_ref:t_ref + t_gen, :] = infer_pad[i, :t_gen, :]
+
+            ref_mel[i, :, :t_ref] = rec["base"]["ref_mel"]
+            style[i, :] = rec["base"]["style"]
+
+        vc_target = self._cfm.inference(
+            cond.to(self.device),
+            torch.LongTensor(total_lens).to(self.device),
+            ref_mel.to(self.device),
+            style.to(self.device),
+            None,
+            self.diffusion_steps,
+            inference_cfg_rate=self.inference_cfg_rate,
+        ).cpu()
+
+        for i, rec in enumerate(prepared):
+            t_ref = ref_lens[i]
+            t_gen = gen_lens[i]
+            x1_mel = vc_target[i, :, t_ref:t_ref + t_gen]
+
+            merged = {
+                "ref_mel": rec["base"]["ref_mel"],
+                "style": rec["base"]["style"],
+                "prompt_cond": rec["base"]["prompt_cond"],
+                "infer_cond": rec["infer_cond"],
+                "x1_mel": x1_mel,
+                "_lips_cache_version": 3,
+                "_x1_from_stretched_infer": True,
+            }
+            torch.save(merged, self.cache_path(rec["stem"]))
 
     def build(self, samples: List[Dict]) -> None:
         self._load_runtime()
-        missing = [s for s in samples if not self.cache_path(s["stem"]).exists()]
+        missing = []
+        failed = []
+        for s in samples:
+            cp = self.cache_path(s["stem"])
+            if not cp.exists():
+                missing.append(s)
+                continue
+            try:
+                cached = torch.load(cp, map_location="cpu", weights_only=False)
+                if (
+                    not bool(cached.get("_x1_from_stretched_infer", False))
+                    or int(cached.get("_lips_cache_version", 0)) < 3
+                ):
+                    missing.append(s)
+            except Exception:
+                missing.append(s)
         if not missing:
             logger.info(f"[LipsCache] All {len(samples)} samples already cached")
             return
@@ -434,8 +519,23 @@ class CFMIndexLipsInferCacheBuilder:
         logger.info(
             f"[LipsCache] Building {len(missing)}/{len(samples)} entries -> {self.lips_cache_dir}"
         )
-        for item in tqdm(missing, desc="Building CFM lips infer cache"):
+        batches = [
+            missing[i: i + self.batch_size]
+            for i in range(0, len(missing), self.batch_size)
+        ]
+        for batch_items in tqdm(batches, desc="Building CFM lips infer cache"):
             try:
-                self._build_one(item)
+                self._build_batch(batch_items)
             except Exception as e:
-                logger.warning(f"[LipsCache] Skipping {item.get('stem', '<unknown>')}: {e!r}")
+                logger.warning(f"[LipsCache] Batch failed ({e!r}), fallback to per-sample")
+                for item in batch_items:
+                    try:
+                        self._build_batch([item])
+                    except Exception as e2:
+                        failed.append(item.get("stem", "<unknown>"))
+                        logger.warning(f"[LipsCache] Skipping {item.get('stem', '<unknown>')}: {e2!r}")
+
+        if failed:
+            logger.warning(
+                f"[LipsCache] {len(failed)} samples failed to build and will be unavailable"
+            )
