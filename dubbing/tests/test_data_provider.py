@@ -39,7 +39,7 @@ if str(_DUB_ROOT) not in sys.path:
 _CFM_PHASE1_ROOT  = Path("/data2/ruixin/datasets/MELD_gen_pairs")
 _CFM_INDEX_CSV    = Path("/data2/ruixin/datasets/flow_dataset/MELD_semantic/metadata.csv")
 _CFM_INDEX_MDLDIR = Path("/data2/ruixin/index-tts2/checkpoints")
-_FLOW_DATASET_ROOT = Path("/data2/ruixin/datasets/flow_dataset")
+_FLOW_DATASET_ROOT = Path("/data2/ruixin/datasets/flow_dataset/MELD")
 
 _SKIP_PHASE1 = pytest.mark.skipif(
     not _CFM_PHASE1_ROOT.exists(),

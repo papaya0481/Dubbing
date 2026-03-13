@@ -596,11 +596,11 @@ class Dataset_CMF_Index_Phase1_ForLipsFeat(Dataset_CFM_Index_Phase1):
         self.flow_dataset_path = Path(flow_dataset_path)
         self.tier_name = tier_name
 
-        self.semantic_root = self.flow_dataset_path / "MELD" / "MELD_semantic"
-        self.predict_root = self.flow_dataset_path / "MELD" / "MELD_predict_results"
+        self.semantic_root = self.flow_dataset_path / "semantic"
+        self.predict_root = self.flow_dataset_path / "predict_results"
 
         self.source_tg_dir = self.semantic_root / "audios" / "aligned"
-        self.lips_tg_dir = self.predict_root / "textgrid"
+        self.lips_tg_dir = self.predict_root / "textgrids"
         self.lips_hs_dir = self.predict_root / "hidden_states"
         self.csv_path_auto = self.semantic_root / "metadata.csv"
 

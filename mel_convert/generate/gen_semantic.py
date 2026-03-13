@@ -109,6 +109,20 @@ def save_metadata_csv(csv_path: str, output_dir: Path, audio_col: str, drop_cols
 
     rows: list[dict] = []
     fieldnames: list[str] = []
+
+    def _to_rel_under_output(path_str: str) -> str:
+        """Normalize to path relative to output_dir when possible."""
+        if not path_str:
+            return ""
+        p = Path(path_str)
+        if not p.is_absolute():
+            return path_str.replace("\\", "/")
+        try:
+            rel = p.relative_to(output_dir)
+            return rel.as_posix()
+        except Exception:
+            return str(p)
+
     with open(csv_path, encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         orig_fields = [c for c in (reader.fieldnames or []) if c not in drop_cols]
@@ -122,8 +136,8 @@ def save_metadata_csv(csv_path: str, output_dir: Path, audio_col: str, drop_cols
             new_row["prompt_audio_path"] = audio_path
             if results is not None and stem in results:
                 r = results[stem]
-                new_row["out_wav"]   = r.get("out_wav", "")
-                new_row["out_pt"]    = r.get("out_pt", "")
+                new_row["out_wav"]   = _to_rel_under_output(r.get("out_wav", ""))
+                new_row["out_pt"]    = _to_rel_under_output(r.get("out_pt", ""))
                 new_row["gen_error"] = r.get("gen_error", "")
             else:
                 new_row["out_wav"]   = ""
