@@ -32,10 +32,9 @@ warnings.filterwarnings(
 
 from modules.mel_strech.meldataset import get_mel_spectrogram
 from modules.mel_strech.mel_transform import GlobalWarpTransformer
-from modules.semantic_stretch.semantic_transform import SemanticTransformer
 
 from data_provider.collate_funcs import collate_cfm_phase1, collate_cfm_index_phase1  # noqa: F401
-from data_provider.utils import CFMIndexCacheBuilder  # noqa: F401
+from data_provider.utils import CFMIndexCacheBuilder, CFMIndexLipsInferCacheBuilder  # noqa: F401
 
 from logger import get_logger
 
@@ -549,16 +548,34 @@ class Dataset_CFM_Index_Phase1(Dataset):
 
 
 class Dataset_CMF_Index_Phase1_ForLipsFeat(Dataset_CFM_Index_Phase1):
-    """LipsFeat variant of CFM Index Phase1 dataset.
+    """针对 lips 特征训练的全新 Dataset（基于 CFM Index Phase1 扩展）。
 
-    Changes compared with ``Dataset_CFM_Index_Phase1``:
-      - discovers and keeps only sample intersection among:
-        metadata / source_textgrid / lips_textgrid / lips_hidden_states
-      - warps ``S_infer`` from source TextGrid to target lips TextGrid
-      - normalizes phone labels via ARPA->VFA mapping before warping
-      - recomputes ``infer_cond`` from warped semantic features
-      - adds ``lips_hidden_states`` to each sample
-    """
+        设计目标
+        --------
+        1. 完整复用 ``Dataset_CFM_Index_Phase1`` 的缓存机制：
+          - 仍使用 ``metadata.csv``
+          - 仍复用 ``CFMIndexCacheBuilder`` 生成/读取 ``ref_mel``、``style``、
+            ``prompt_cond``、``x1_mel`` 等缓存
+         2. 在上述缓存基础上，仅额外做 lips 相关增强：
+          - 加载 ``source_textgrid``（MELD_semantic/audios/aligned）
+          - 加载 ``lips_textgrid``（MELD_predict_results/textgrid）
+          - 以 source/target TextGrid 对 ``S_infer`` 做 semantic stretch
+          - stretch 前对 TextGrid 音素统一做 ARPA→VFA→ARPAbet 规范化
+             - 用 stretch 后的 ``S_infer`` 重新计算 ``infer_cond``（在缓存阶段完成）
+          - 加载并返回 ``lips_hidden_states``（MELD_predict_results/hidden_states）
+
+    样本规则
+    --------
+    只保留交集样本：metadata 与 source_textgrid / lips_textgrid /
+    lips_hidden_states 同时存在的样本才会进入 ``self.samples``。
+
+        返回字段
+        --------
+        与 ``Dataset_CFM_Index_Phase1`` 相比，新增：
+            - ``lips_hidden_states``
+            - ``lips_textgrid``
+            - ``source_textgrid``
+        """
 
     def __init__(
         self,
@@ -612,11 +629,15 @@ class Dataset_CMF_Index_Phase1_ForLipsFeat(Dataset_CFM_Index_Phase1):
             cache_batch_size=cache_batch_size,
         )
 
-        self._semantic_transformer = SemanticTransformer(device="cpu", verbose=False)
-        self._phoneme_vocab = self._load_phoneme_vocab()
-        self._len_reg = self._load_length_regulator(preprocess)
-
-        self._attach_extra_paths_and_intersect()
+        self.lips_cache_dir = self.cache_dir.parent / f"{self.cache_dir.name}_lipsfeat"
+        self.lips_cache_dir.mkdir(parents=True, exist_ok=True)
+        CFMIndexLipsInferCacheBuilder(
+            preprocess=preprocess,
+            base_cache_dir=self.cache_dir,
+            lips_cache_dir=self.lips_cache_dir,
+            max_code_len=self.max_code_len,
+            tier_name=self.tier_name,
+        ).build(self.samples)
 
         if len(self.samples) == 0:
             raise RuntimeError(
@@ -626,53 +647,31 @@ class Dataset_CMF_Index_Phase1_ForLipsFeat(Dataset_CFM_Index_Phase1):
             f"Dataset_CMF_Index_Phase1_ForLipsFeat [{split}]: {len(self.samples)} samples"
         )
 
-    @staticmethod
-    def _load_phoneme_vocab():
-        try:
-            from lips.data.phoneme_vocab import PhonemeVocab
-            return PhonemeVocab()
-        except Exception:
-            proj_root = Path(__file__).resolve().parents[2]
-            if str(proj_root) not in sys.path:
-                sys.path.insert(0, str(proj_root))
-            from lips.data.phoneme_vocab import PhonemeVocab
-            return PhonemeVocab()
-
-    @staticmethod
-    def _load_length_regulator(preprocess):
-        from omegaconf import OmegaConf
-        from indextts.s2mel.modules.commons import MyModel, load_checkpoint2
-
-        model_dir = Path(preprocess.model_dir)
-        cfg = OmegaConf.load(str(model_dir / "config.yaml"))
-
-        s2mel_model = MyModel(cfg.s2mel, use_gpt_latent=False)
-        s2mel_model, _, _, _ = load_checkpoint2(
-            s2mel_model,
-            None,
-            str(model_dir / preprocess.s2mel_checkpoint),
-            load_only_params=True,
-            ignore_modules=[],
-            is_distributed=False,
-        )
-        return s2mel_model.models["length_regulator"].to("cpu").eval()
-
-    @staticmethod
-    def _find_existing_file(base_dir: Path, stem: str, exts: Tuple[str, ...]) -> Optional[Path]:
-        for ext in exts:
-            p = base_dir / f"{stem}{ext}"
-            if p.exists():
-                return p
-        return None
-
-    def _attach_extra_paths_and_intersect(self) -> None:
+    def _load_csv(self) -> List[Dict]:
+        samples = super()._load_csv()
         merged = []
-        for s in self.samples:
+        for s in samples:
             stem = s["stem"]
 
-            source_tg = self._find_existing_file(self.source_tg_dir, stem, (".TextGrid", ".textgrid"))
-            lips_tg = self._find_existing_file(self.lips_tg_dir, stem, (".TextGrid", ".textgrid"))
-            lips_hs = self._find_existing_file(self.lips_hs_dir, stem, (".pt", ".pth", ".npy"))
+            source_tg = None
+            lips_tg = None
+            lips_hs = None
+
+            for ext in (".TextGrid", ".textgrid"):
+                p = self.source_tg_dir / f"{stem}{ext}"
+                if p.exists():
+                    source_tg = p
+                    break
+            for ext in (".TextGrid", ".textgrid"):
+                p = self.lips_tg_dir / f"{stem}{ext}"
+                if p.exists():
+                    lips_tg = p
+                    break
+            for ext in (".pt", ".pth", ".npy"):
+                p = self.lips_hs_dir / f"{stem}{ext}"
+                if p.exists():
+                    lips_hs = p
+                    break
 
             if source_tg is None or lips_tg is None or lips_hs is None:
                 continue
@@ -683,93 +682,43 @@ class Dataset_CMF_Index_Phase1_ForLipsFeat(Dataset_CFM_Index_Phase1):
             s2["lips_hidden_states"] = str(lips_hs)
             merged.append(s2)
 
-        before = len(self.samples)
-        self.samples = merged
-        logger.info(
-            f"[LipsFeat] Intersection filter: {before} -> {len(self.samples)} samples"
-        )
-
-    def _canonicalize_tg(self, tg_path: Path) -> tgt.TextGrid:
-        tg = tgt.io.read_textgrid(str(tg_path))
-        try:
-            tier = tg.get_tier_by_name(self.tier_name)
-        except Exception:
-            return tg
-
-        for iv in tier:
-            txt = (iv.text or "").strip()
-            if txt == "":
-                continue
-            vfa_id = self._phoneme_vocab.arpabet_to_vfa_id(txt)
-            iv.text = self._phoneme_vocab.vfa_id_to_arpabet(vfa_id)
-        return tg
-
-    @staticmethod
-    def _load_lips_hidden_states(path: Path) -> torch.Tensor:
-        if path.suffix.lower() == ".npy":
-            import numpy as np
-
-            hs = torch.from_numpy(np.load(str(path)))
-        else:
-            hs = torch.load(str(path), map_location="cpu", weights_only=False)
-
-        if isinstance(hs, dict):
-            for k in ("hidden_states", "lips_hidden_states", "features", "x"):
-                if k in hs:
-                    hs = hs[k]
-                    break
-
-        if not torch.is_tensor(hs):
-            hs = torch.as_tensor(hs)
-
-        if hs.dim() == 3 and hs.size(0) == 1:
-            hs = hs.squeeze(0)
-        return hs.float().cpu()
+        logger.info(f"[LipsFeat] Intersection filter: {len(samples)} -> {len(merged)} samples")
+        return merged
 
     @torch.no_grad()
     def __getitem__(self, index: int) -> Dict:
         item = self.samples[index]
 
         cached = torch.load(
-            self.cache_dir / f"{item['stem']}.pt",
+            self.lips_cache_dir / f"{item['stem']}.pt",
             map_location="cpu",
             weights_only=True,
         )
 
-        s_infer = torch.load(item["out_pt"], map_location="cpu", weights_only=False)
-        if s_infer.dim() == 2:
-            s_infer = s_infer.unsqueeze(0)
-        elif s_infer.dim() == 3 and s_infer.size(0) != 1:
-            s_infer = s_infer[:1]
-        s_infer = s_infer.float()
-        if s_infer.size(1) > self.max_code_len:
-            s_infer = s_infer[:, : self.max_code_len, :]
+        hs_path = Path(item["lips_hidden_states"])
+        if hs_path.suffix.lower() == ".npy":
+            import numpy as np
 
-        src_tg = self._canonicalize_tg(Path(item["source_textgrid"]))
-        tgt_tg = self._canonicalize_tg(Path(item["lips_textgrid"]))
-        s_warped, _ = self._semantic_transformer.transform(
-            s_infer=s_infer,
-            source_textgrid=src_tg,
-            target_textgrid=tgt_tg,
-            tier_name=self.tier_name,
-        )
-
-        target_len = int(cached["x1_mel"].size(-1))
-        infer_cond = self._len_reg(
-            s_warped,
-            ylens=torch.LongTensor([target_len]),
-            n_quantizers=3,
-            f0=None,
-        )[0].squeeze(0).cpu()
-
-        lips_hs = self._load_lips_hidden_states(Path(item["lips_hidden_states"]))
+            lips_hs = torch.from_numpy(np.load(str(hs_path)))
+        else:
+            lips_hs = torch.load(str(hs_path), map_location="cpu", weights_only=False)
+        if isinstance(lips_hs, dict):
+            for k in ("hidden_states", "lips_hidden_states", "features", "x"):
+                if k in lips_hs:
+                    lips_hs = lips_hs[k]
+                    break
+        if not torch.is_tensor(lips_hs):
+            lips_hs = torch.as_tensor(lips_hs)
+        if lips_hs.dim() == 3 and lips_hs.size(0) == 1:
+            lips_hs = lips_hs.squeeze(0)
+        lips_hs = lips_hs.float().cpu()
 
         return {
             "stem": item["stem"],
             "ref_mel": cached["ref_mel"],
             "style": cached["style"],
             "prompt_cond": cached["prompt_cond"],
-            "infer_cond": infer_cond,
+            "infer_cond": cached["infer_cond"],
             "x1_mel": cached["x1_mel"],
             "lips_hidden_states": lips_hs,
             "lips_textgrid": item["lips_textgrid"],

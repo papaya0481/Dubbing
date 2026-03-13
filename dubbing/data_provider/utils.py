@@ -15,8 +15,10 @@ from typing import Dict, List, Optional
 import torch
 import torchaudio
 from tqdm.auto import tqdm
+import tgt
 
 from modules.mel_strech.meldataset import get_mel_spectrogram
+from modules.semantic_stretch.semantic_transform import SemanticTransformer
 from logger import get_logger
 
 logger = get_logger("dubbing.data_provider.utils")
@@ -295,3 +297,145 @@ class CFMIndexCacheBuilder:
                 },
                 self.cache_path(item["stem"]),
             )
+
+
+class CFMIndexLipsInferCacheBuilder:
+    """Build lipsfeat cache by reusing base CFM cache and recomputing infer_cond.
+
+    This builder is intentionally narrow in scope:
+      - read base cache (ref_mel/style/prompt_cond/x1_mel)
+      - warp S_infer via source/target TextGrid
+      - recompute infer_cond from warped S_infer
+      - save merged cache to a dedicated lips cache dir
+    """
+
+    def __init__(
+        self,
+        preprocess,
+        base_cache_dir,
+        lips_cache_dir,
+        max_code_len: int = 500,
+        tier_name: str = "phones",
+    ):
+        self.preprocess = preprocess
+        self.base_cache_dir = Path(base_cache_dir)
+        self.lips_cache_dir = Path(lips_cache_dir)
+        self.lips_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.max_code_len = max_code_len
+        self.tier_name = tier_name
+
+        self.device = torch.device("cpu")
+        self.semantic_transformer = SemanticTransformer(device="cpu", verbose=False)
+
+        self._len_reg = None
+        self._phoneme_vocab = None
+
+    def cache_path(self, stem: str) -> Path:
+        return self.lips_cache_dir / f"{stem}.pt"
+
+    @staticmethod
+    def _ensure_importable():
+        _proj = Path(__file__).resolve().parents[2]
+        _index = _proj / "index-tts2"
+        for _p in [str(_index), str(_proj)]:
+            if _p not in sys.path:
+                sys.path.insert(0, _p)
+
+    def _load_runtime(self):
+        self._ensure_importable()
+        from omegaconf import OmegaConf
+        from indextts.s2mel.modules.commons import MyModel, load_checkpoint2
+
+        model_dir = Path(self.preprocess.model_dir)
+        cfg = OmegaConf.load(str(model_dir / "config.yaml"))
+        s2mel_model = MyModel(cfg.s2mel, use_gpt_latent=False)
+        s2mel_model, _, _, _ = load_checkpoint2(
+            s2mel_model,
+            None,
+            str(model_dir / self.preprocess.s2mel_checkpoint),
+            load_only_params=True,
+            ignore_modules=[],
+            is_distributed=False,
+        )
+        self._len_reg = s2mel_model.models["length_regulator"].to(self.device).eval()
+
+        try:
+            from lips.data.phoneme_vocab import PhonemeVocab
+        except Exception:
+            _proj = Path(__file__).resolve().parents[2]
+            if str(_proj) not in sys.path:
+                sys.path.insert(0, str(_proj))
+            from lips.data.phoneme_vocab import PhonemeVocab
+        self._phoneme_vocab = PhonemeVocab()
+
+    @torch.no_grad()
+    def _build_one(self, item: Dict):
+        stem = item["stem"]
+        base_path = self.base_cache_dir / f"{stem}.pt"
+        if not base_path.exists():
+            raise FileNotFoundError(f"base cache missing for stem={stem}: {base_path}")
+
+        base = torch.load(base_path, map_location="cpu", weights_only=True)
+
+        s_infer = torch.load(item["out_pt"], map_location="cpu", weights_only=False)
+        if s_infer.dim() == 2:
+            s_infer = s_infer.unsqueeze(0)
+        elif s_infer.dim() == 3 and s_infer.size(0) != 1:
+            s_infer = s_infer[:1]
+        s_infer = s_infer.float()
+        if s_infer.size(1) > self.max_code_len:
+            s_infer = s_infer[:, : self.max_code_len, :]
+
+        src_tg = tgt.io.read_textgrid(str(item["source_textgrid"]))
+        tgt_tg = tgt.io.read_textgrid(str(item["lips_textgrid"]))
+        for tg_obj in (src_tg, tgt_tg):
+            try:
+                tier = tg_obj.get_tier_by_name(self.tier_name)
+            except Exception:
+                continue
+            for iv in tier:
+                txt = (iv.text or "").strip()
+                if txt == "":
+                    continue
+                vfa_id = self._phoneme_vocab.arpabet_to_vfa_id(txt)
+                iv.text = self._phoneme_vocab.vfa_id_to_arpabet(vfa_id)
+
+        s_warped, _ = self.semantic_transformer.transform(
+            s_infer=s_infer,
+            source_textgrid=src_tg,
+            target_textgrid=tgt_tg,
+            tier_name=self.tier_name,
+        )
+
+        target_len = int(base["x1_mel"].size(-1))
+        infer_cond = self._len_reg(
+            s_warped,
+            ylens=torch.LongTensor([target_len]).to(self.device),
+            n_quantizers=3,
+            f0=None,
+        )[0].squeeze(0).cpu()
+
+        merged = {
+            "ref_mel": base["ref_mel"],
+            "style": base["style"],
+            "prompt_cond": base["prompt_cond"],
+            "infer_cond": infer_cond,
+            "x1_mel": base["x1_mel"],
+        }
+        torch.save(merged, self.cache_path(stem))
+
+    def build(self, samples: List[Dict]) -> None:
+        self._load_runtime()
+        missing = [s for s in samples if not self.cache_path(s["stem"]).exists()]
+        if not missing:
+            logger.info(f"[LipsCache] All {len(samples)} samples already cached")
+            return
+
+        logger.info(
+            f"[LipsCache] Building {len(missing)}/{len(samples)} entries -> {self.lips_cache_dir}"
+        )
+        for item in tqdm(missing, desc="Building CFM lips infer cache"):
+            try:
+                self._build_one(item)
+            except Exception as e:
+                logger.warning(f"[LipsCache] Skipping {item.get('stem', '<unknown>')}: {e!r}")
