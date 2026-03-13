@@ -54,6 +54,8 @@ if str(_LIPS_ROOT) not in sys.path:
     sys.path.insert(0, str(_LIPS_ROOT))
 
 from modules.semantic_stretch.semantic_transform import SemanticTransformer
+from data.phoneme_vocab import PhonemeVocab as _PhonemeVocab
+_phoneme_vocab = _PhonemeVocab()
 
 # ---- 全局常量 ----
 FPS = 50.0          # 语义码帧率
@@ -682,8 +684,7 @@ def _arpa_to_vfa_label(text: str) -> str:
     sil_tokens = ("", "sp", "sil", "<eps>")
     if text in sil_tokens:
         return text
-    from data.phoneme_vocab import arpabet_to_vfa_id, vfa_id_to_arpabet
-    return vfa_id_to_arpabet(arpabet_to_vfa_id(text))
+    return _phoneme_vocab.vfa_id_to_arpabet(_phoneme_vocab.arpabet_to_vfa_id(text))
 
 
 def _convert_tg_phones_to_vfa(tg: tgt.TextGrid) -> tgt.TextGrid:
