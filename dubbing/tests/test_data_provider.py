@@ -5,6 +5,7 @@ Providers tested
 - cfm_phase1          (Dataset_CFM_Phase1)
 - cfm_phase1_stretch  (Dataset_CFM_Phase1_StretchEntireMel)
 - cfm_index_phase1    (Dataset_CFM_Index_Phase1)
+- cmf_index_phase1_for_lipsfeat (Dataset_CMF_Index_Phase1_ForLipsFeat)
 
 Each provider is verified for:
 - Dataset non-empty after split
@@ -38,6 +39,7 @@ if str(_DUB_ROOT) not in sys.path:
 _CFM_PHASE1_ROOT  = Path("/data2/ruixin/datasets/MELD_gen_pairs")
 _CFM_INDEX_CSV    = Path("/data2/ruixin/datasets/flow_dataset/MELD_semantic/metadata.csv")
 _CFM_INDEX_MDLDIR = Path("/data2/ruixin/index-tts2/checkpoints")
+_FLOW_DATASET_ROOT = Path("/data2/ruixin/datasets/flow_dataset")
 
 _SKIP_PHASE1 = pytest.mark.skipif(
     not _CFM_PHASE1_ROOT.exists(),
@@ -46,6 +48,10 @@ _SKIP_PHASE1 = pytest.mark.skipif(
 _SKIP_INDEX = pytest.mark.skipif(
     not _CFM_INDEX_CSV.exists(),
     reason=f"cfm_index_phase1 CSV not found: {_CFM_INDEX_CSV}",
+)
+_SKIP_INDEX_LIPS = pytest.mark.skipif(
+    not _FLOW_DATASET_ROOT.exists(),
+    reason=f"flow_dataset root not found: {_FLOW_DATASET_ROOT}",
 )
 
 
@@ -76,6 +82,15 @@ def _make_index_args() -> SimpleNamespace:
     args = load_config(str(_DUB_ROOT / "configs" / "default_cfm_index.yaml"))
     args.data.batch_size  = 2
     args.data.num_workers = 0
+    return args
+
+
+def _make_index_lips_args() -> SimpleNamespace:
+    """Build args for cmf_index_phase1_for_lipsfeat."""
+    args = _make_index_args()
+    args.data.dataset = "cmf_index_phase1_for_lipsfeat"
+    args.data.flow_dataset_path = str(_FLOW_DATASET_ROOT)
+    args.data.tier_name = "phones"
     return args
 
 
@@ -287,3 +302,61 @@ def test_cfm_index_phase1_splits_cover_all_samples():
     val_ds,   _ = data_provider(args, "val")
     test_ds,  _ = data_provider(args, "test")
     assert len(train_ds) + len(val_ds) + len(test_ds) > 0
+
+
+# ========================================================================
+# cmf_index_phase1_for_lipsfeat
+# ========================================================================
+
+@_SKIP_INDEX_LIPS
+def test_cmf_index_phase1_for_lipsfeat_dataset_nonempty():
+    from data_provider.data_factory import data_provider
+    args = _make_index_lips_args()
+    dataset, _ = data_provider(args, "train")
+    assert len(dataset) > 0, "cmf_index_phase1_for_lipsfeat train split returned 0 samples"
+
+
+@_SKIP_INDEX_LIPS
+def test_cmf_index_phase1_for_lipsfeat_batch_keys_and_shapes():
+    from data_provider.data_factory import data_provider
+    args = _make_index_lips_args()
+    _, loader = data_provider(args, "train")
+    batch = next(iter(loader))
+
+    required = {
+        "stems", "x1_full", "prompt_cond", "infer_cond",
+        "ref_mels", "style", "x_lens", "prompt_lens", "infer_lens",
+        "lips_hidden_states", "lips_lens", "lips_textgrids", "source_textgrids",
+    }
+    missing = required - batch.keys()
+    assert not missing, f"Batch missing keys: {missing}"
+
+    B = len(batch["stems"])
+    assert B >= 1
+
+    lips_hs = batch["lips_hidden_states"]
+    lips_lens = batch["lips_lens"]
+
+    assert lips_hs.ndim == 3, "lips_hidden_states must be 3-D (B, T_lips_max, D_lips)"
+    assert lips_hs.shape[0] == B
+    assert lips_lens.shape == (B,)
+    assert lips_lens.dtype == torch.long
+    assert lips_hs.dtype == torch.float32
+    assert int(lips_lens.max()) <= lips_hs.shape[1], "lips_lens exceeds lips_hidden_states padded dim"
+
+
+@_SKIP_INDEX_LIPS
+def test_cmf_index_phase1_for_lipsfeat_splits_disjoint():
+    from data_provider.data_factory import data_provider
+    args = _make_index_lips_args()
+    train_ds, _ = data_provider(args, "train")
+    val_ds, _ = data_provider(args, "val")
+    test_ds, _ = data_provider(args, "test")
+
+    train_stems = {s["stem"] for s in train_ds.samples}
+    val_stems = {s["stem"] for s in val_ds.samples}
+    test_stems = {s["stem"] for s in test_ds.samples}
+
+    assert train_stems.isdisjoint(val_stems), "train/val stems overlap"
+    assert train_stems.isdisjoint(test_stems), "train/test stems overlap"
+    assert val_stems.isdisjoint(test_stems), "val/test stems overlap"

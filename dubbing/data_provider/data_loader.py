@@ -32,6 +32,7 @@ warnings.filterwarnings(
 
 from modules.mel_strech.meldataset import get_mel_spectrogram
 from modules.mel_strech.mel_transform import GlobalWarpTransformer
+from modules.semantic_stretch.semantic_transform import SemanticTransformer
 
 from data_provider.collate_funcs import collate_cfm_phase1, collate_cfm_index_phase1  # noqa: F401
 from data_provider.utils import CFMIndexCacheBuilder  # noqa: F401
@@ -545,3 +546,232 @@ class Dataset_CFM_Index_Phase1(Dataset):
         )
         data["stem"] = item["stem"]
         return data
+
+
+class Dataset_CMF_Index_Phase1_ForLipsFeat(Dataset_CFM_Index_Phase1):
+    """LipsFeat variant of CFM Index Phase1 dataset.
+
+    Changes compared with ``Dataset_CFM_Index_Phase1``:
+      - discovers and keeps only sample intersection among:
+        metadata / source_textgrid / lips_textgrid / lips_hidden_states
+      - warps ``S_infer`` from source TextGrid to target lips TextGrid
+      - normalizes phone labels via ARPA->VFA mapping before warping
+      - recomputes ``infer_cond`` from warped semantic features
+      - adds ``lips_hidden_states`` to each sample
+    """
+
+    def __init__(
+        self,
+        flow_dataset_path: str,
+        mel_h,
+        preprocess,
+        sr_ref_16k: int = 16000,
+        split: str = "train",
+        split_ratio: float = 0.9,
+        seed: int = 2026,
+        max_ref_sec: float = 15.0,
+        max_gen_sec: float = 10.0,
+        max_code_len: int = 500,
+        cache_dir: Optional[str] = None,
+        cache_batch_size: int = 16,
+        tier_name: str = "phones",
+    ):
+        self.flow_dataset_path = Path(flow_dataset_path)
+        self.tier_name = tier_name
+
+        self.semantic_root = self.flow_dataset_path / "MELD" / "MELD_semantic"
+        self.predict_root = self.flow_dataset_path / "MELD" / "MELD_predict_results"
+
+        self.source_tg_dir = self.semantic_root / "audios" / "aligned"
+        self.lips_tg_dir = self.predict_root / "textgrid"
+        self.lips_hs_dir = self.predict_root / "hidden_states"
+        self.csv_path_auto = self.semantic_root / "metadata.csv"
+
+        if not self.csv_path_auto.exists():
+            raise FileNotFoundError(f"metadata.csv not found: {self.csv_path_auto}")
+        if not self.source_tg_dir.exists():
+            raise FileNotFoundError(f"source textgrid dir not found: {self.source_tg_dir}")
+        if not self.lips_tg_dir.exists():
+            raise FileNotFoundError(f"lips textgrid dir not found: {self.lips_tg_dir}")
+        if not self.lips_hs_dir.exists():
+            raise FileNotFoundError(f"lips hidden_states dir not found: {self.lips_hs_dir}")
+
+        # Keep constructor compatibility with existing phase1 index dataset.
+        super().__init__(
+            csv_path=str(self.csv_path_auto),
+            mel_h=mel_h,
+            preprocess=preprocess,
+            sr_ref_16k=sr_ref_16k,
+            split=split,
+            split_ratio=split_ratio,
+            seed=seed,
+            max_ref_sec=max_ref_sec,
+            max_gen_sec=max_gen_sec,
+            max_code_len=max_code_len,
+            cache_dir=cache_dir,
+            cache_batch_size=cache_batch_size,
+        )
+
+        self._semantic_transformer = SemanticTransformer(device="cpu", verbose=False)
+        self._phoneme_vocab = self._load_phoneme_vocab()
+        self._len_reg = self._load_length_regulator(preprocess)
+
+        self._attach_extra_paths_and_intersect()
+
+        if len(self.samples) == 0:
+            raise RuntimeError(
+                f"No valid intersected samples for split={split!r} in {self.csv_path_auto}"
+            )
+        logger.info(
+            f"Dataset_CMF_Index_Phase1_ForLipsFeat [{split}]: {len(self.samples)} samples"
+        )
+
+    @staticmethod
+    def _load_phoneme_vocab():
+        try:
+            from lips.data.phoneme_vocab import PhonemeVocab
+            return PhonemeVocab()
+        except Exception:
+            proj_root = Path(__file__).resolve().parents[2]
+            if str(proj_root) not in sys.path:
+                sys.path.insert(0, str(proj_root))
+            from lips.data.phoneme_vocab import PhonemeVocab
+            return PhonemeVocab()
+
+    @staticmethod
+    def _load_length_regulator(preprocess):
+        from omegaconf import OmegaConf
+        from indextts.s2mel.modules.commons import MyModel, load_checkpoint2
+
+        model_dir = Path(preprocess.model_dir)
+        cfg = OmegaConf.load(str(model_dir / "config.yaml"))
+
+        s2mel_model = MyModel(cfg.s2mel, use_gpt_latent=False)
+        s2mel_model, _, _, _ = load_checkpoint2(
+            s2mel_model,
+            None,
+            str(model_dir / preprocess.s2mel_checkpoint),
+            load_only_params=True,
+            ignore_modules=[],
+            is_distributed=False,
+        )
+        return s2mel_model.models["length_regulator"].to("cpu").eval()
+
+    @staticmethod
+    def _find_existing_file(base_dir: Path, stem: str, exts: Tuple[str, ...]) -> Optional[Path]:
+        for ext in exts:
+            p = base_dir / f"{stem}{ext}"
+            if p.exists():
+                return p
+        return None
+
+    def _attach_extra_paths_and_intersect(self) -> None:
+        merged = []
+        for s in self.samples:
+            stem = s["stem"]
+
+            source_tg = self._find_existing_file(self.source_tg_dir, stem, (".TextGrid", ".textgrid"))
+            lips_tg = self._find_existing_file(self.lips_tg_dir, stem, (".TextGrid", ".textgrid"))
+            lips_hs = self._find_existing_file(self.lips_hs_dir, stem, (".pt", ".pth", ".npy"))
+
+            if source_tg is None or lips_tg is None or lips_hs is None:
+                continue
+
+            s2 = dict(s)
+            s2["source_textgrid"] = str(source_tg)
+            s2["lips_textgrid"] = str(lips_tg)
+            s2["lips_hidden_states"] = str(lips_hs)
+            merged.append(s2)
+
+        before = len(self.samples)
+        self.samples = merged
+        logger.info(
+            f"[LipsFeat] Intersection filter: {before} -> {len(self.samples)} samples"
+        )
+
+    def _canonicalize_tg(self, tg_path: Path) -> tgt.TextGrid:
+        tg = tgt.io.read_textgrid(str(tg_path))
+        try:
+            tier = tg.get_tier_by_name(self.tier_name)
+        except Exception:
+            return tg
+
+        for iv in tier:
+            txt = (iv.text or "").strip()
+            if txt == "":
+                continue
+            vfa_id = self._phoneme_vocab.arpabet_to_vfa_id(txt)
+            iv.text = self._phoneme_vocab.vfa_id_to_arpabet(vfa_id)
+        return tg
+
+    @staticmethod
+    def _load_lips_hidden_states(path: Path) -> torch.Tensor:
+        if path.suffix.lower() == ".npy":
+            import numpy as np
+
+            hs = torch.from_numpy(np.load(str(path)))
+        else:
+            hs = torch.load(str(path), map_location="cpu", weights_only=False)
+
+        if isinstance(hs, dict):
+            for k in ("hidden_states", "lips_hidden_states", "features", "x"):
+                if k in hs:
+                    hs = hs[k]
+                    break
+
+        if not torch.is_tensor(hs):
+            hs = torch.as_tensor(hs)
+
+        if hs.dim() == 3 and hs.size(0) == 1:
+            hs = hs.squeeze(0)
+        return hs.float().cpu()
+
+    @torch.no_grad()
+    def __getitem__(self, index: int) -> Dict:
+        item = self.samples[index]
+
+        cached = torch.load(
+            self.cache_dir / f"{item['stem']}.pt",
+            map_location="cpu",
+            weights_only=True,
+        )
+
+        s_infer = torch.load(item["out_pt"], map_location="cpu", weights_only=False)
+        if s_infer.dim() == 2:
+            s_infer = s_infer.unsqueeze(0)
+        elif s_infer.dim() == 3 and s_infer.size(0) != 1:
+            s_infer = s_infer[:1]
+        s_infer = s_infer.float()
+        if s_infer.size(1) > self.max_code_len:
+            s_infer = s_infer[:, : self.max_code_len, :]
+
+        src_tg = self._canonicalize_tg(Path(item["source_textgrid"]))
+        tgt_tg = self._canonicalize_tg(Path(item["lips_textgrid"]))
+        s_warped, _ = self._semantic_transformer.transform(
+            s_infer=s_infer,
+            source_textgrid=src_tg,
+            target_textgrid=tgt_tg,
+            tier_name=self.tier_name,
+        )
+
+        target_len = int(cached["x1_mel"].size(-1))
+        infer_cond = self._len_reg(
+            s_warped,
+            ylens=torch.LongTensor([target_len]),
+            n_quantizers=3,
+            f0=None,
+        )[0].squeeze(0).cpu()
+
+        lips_hs = self._load_lips_hidden_states(Path(item["lips_hidden_states"]))
+
+        return {
+            "stem": item["stem"],
+            "ref_mel": cached["ref_mel"],
+            "style": cached["style"],
+            "prompt_cond": cached["prompt_cond"],
+            "infer_cond": infer_cond,
+            "x1_mel": cached["x1_mel"],
+            "lips_hidden_states": lips_hs,
+            "lips_textgrid": item["lips_textgrid"],
+            "source_textgrid": item["source_textgrid"],
+        }

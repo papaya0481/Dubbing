@@ -8,6 +8,7 @@ batching logic.
 Exported:
   collate_cfm_phase1           – for Dataset_CFM_Phase1 / Dataset_CFM_Phase1_StretchEntireMel
   collate_cfm_index_phase1     – for Dataset_CFM_Index_Phase1
+    collate_cmf_index_phase1_for_lipsfeat – for Dataset_CMF_Index_Phase1_ForLipsFeat
 """
 
 from __future__ import annotations
@@ -127,3 +128,27 @@ def collate_cfm_index_phase1(batch: List[Dict]) -> Dict:
         "prompt_lens": prompt_lens,
         "infer_lens":  infer_lens,
     }
+
+
+def collate_cmf_index_phase1_for_lipsfeat(batch: List[Dict]) -> Dict:
+    """Collate for Dataset_CMF_Index_Phase1_ForLipsFeat.
+
+    Same outputs as ``collate_cfm_index_phase1`` plus padded lips features.
+    """
+    base = collate_cfm_index_phase1(batch)
+
+    B = len(batch)
+    hs_dim = int(batch[0]["lips_hidden_states"].size(-1))
+    hs_lens = [int(item["lips_hidden_states"].size(0)) for item in batch]
+    hs_max = max(hs_lens)
+
+    lips_hidden_states = torch.zeros(B, hs_max, hs_dim, dtype=batch[0]["lips_hidden_states"].dtype)
+    for i, item in enumerate(batch):
+        t = hs_lens[i]
+        lips_hidden_states[i, :t, :] = item["lips_hidden_states"]
+
+    base["lips_hidden_states"] = lips_hidden_states
+    base["lips_lens"] = torch.tensor(hs_lens, dtype=torch.long)
+    base["lips_textgrids"] = [item["lips_textgrid"] for item in batch]
+    base["source_textgrids"] = [item["source_textgrid"] for item in batch]
+    return base
