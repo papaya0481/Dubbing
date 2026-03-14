@@ -547,35 +547,35 @@ class Dataset_CFM_Index_Phase1(Dataset):
         return data
 
 
-class Dataset_CMF_Index_Phase1_ForLipsFeat(Dataset_CFM_Index_Phase1):
-    """针对 lips 特征训练的全新 Dataset（基于 CFM Index Phase1 扩展）。
+class Dataset_CMF_Index_Phase1_ForLipsFeat(Dataset):
+    """针对 lips 特征训练的独立 Dataset。
 
-        设计目标
-        --------
-        1. 完整复用 ``Dataset_CFM_Index_Phase1`` 的缓存机制：
-          - 仍使用 ``metadata.csv``
-          - 仍复用 ``CFMIndexCacheBuilder`` 生成/读取 ``ref_mel``、``style``、
-            ``prompt_cond``、``x1_mel`` 等缓存
-         2. 在上述缓存基础上，仅额外做 lips 相关增强：
-          - 加载 ``source_textgrid``（MELD_semantic/audios/aligned）
-          - 加载 ``lips_textgrid``（MELD_predict_results/textgrid）
-          - 以 source/target TextGrid 对 ``S_infer`` 做 semantic stretch
-          - stretch 前对 TextGrid 音素统一做 ARPA→VFA→ARPAbet 规范化
-             - 用 stretch 后的 ``S_infer`` 重新计算 ``infer_cond``（在缓存阶段完成）
-          - 加载并返回 ``lips_hidden_states``（MELD_predict_results/hidden_states）
+    设计目标
+    --------
+    1. 保持与 ``Dataset_CFM_Index_Phase1`` 相近的使用方式：
+       - 仍使用 ``metadata.csv``
+       - 仍在首次实例化时构建/读取缓存
+    2. 缓存构建阶段直接完成 lips 相关增强：
+       - 加载 ``source_textgrid``（MELD_semantic/audios/aligned）
+       - 加载 ``lips_textgrid``（MELD_predict_results/textgrid）
+       - 以 source/target TextGrid 对 ``S_infer`` 做 semantic stretch
+       - stretch 前对 TextGrid 音素统一做 ARPA→VFA→ARPAbet 规范化
+       - 用 stretch 后的 ``S_infer`` 重新计算 ``infer_cond``
+       - 用新的 ``infer_cond`` 生成并缓存 ``x1_mel``
+       - 加载并返回 ``lips_hidden_states``（MELD_predict_results/hidden_states）
 
     样本规则
     --------
     只保留交集样本：metadata 与 source_textgrid / lips_textgrid /
     lips_hidden_states 同时存在的样本才会进入 ``self.samples``。
 
-        返回字段
-        --------
-        与 ``Dataset_CFM_Index_Phase1`` 相比，新增：
-            - ``lips_hidden_states``
-            - ``lips_textgrid``
-            - ``source_textgrid``
-        """
+    返回字段
+    --------
+    与 ``Dataset_CFM_Index_Phase1`` 相比，新增：
+        - ``lips_hidden_states``
+        - ``lips_textgrid``
+        - ``source_textgrid``
+    """
 
     def __init__(
         self,
@@ -593,8 +593,18 @@ class Dataset_CMF_Index_Phase1_ForLipsFeat(Dataset_CFM_Index_Phase1):
         cache_batch_size: int = 16,
         tier_name: str = "phones",
     ):
+        super().__init__()
         self.flow_dataset_path = Path(flow_dataset_path)
         self.tier_name = tier_name
+        self.split = split
+        self.mel_h = mel_h
+        self.preprocess = preprocess
+        self.sr_22k = int(mel_h.sampling_rate)
+        self.sr_ref_16k = int(sr_ref_16k)
+        self.max_ref_sec = max_ref_sec
+        self.max_gen_sec = max_gen_sec
+        self.max_code_len = max_code_len
+        self.cache_batch_size = cache_batch_size
 
         self.semantic_root = self.flow_dataset_path / "semantic"
         self.predict_root = self.flow_dataset_path / "predict_results"
@@ -603,6 +613,13 @@ class Dataset_CMF_Index_Phase1_ForLipsFeat(Dataset_CFM_Index_Phase1):
         self.lips_tg_dir = self.predict_root / "textgrids"
         self.lips_hs_dir = self.predict_root / "hidden_states"
         self.csv_path_auto = self.semantic_root / "metadata.csv"
+        self.csv_path = self.csv_path_auto
+        self.data_root = self.csv_path.parent
+        self.cache_dir = (
+            Path(cache_dir) if cache_dir
+            else self.data_root / "cfm_index_lipsfeat_cache"
+        )
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         if not self.csv_path_auto.exists():
             raise FileNotFoundError(f"metadata.csv not found: {self.csv_path_auto}")
@@ -613,31 +630,18 @@ class Dataset_CMF_Index_Phase1_ForLipsFeat(Dataset_CFM_Index_Phase1):
         if not self.lips_hs_dir.exists():
             raise FileNotFoundError(f"lips hidden_states dir not found: {self.lips_hs_dir}")
 
-        # Keep constructor compatibility with existing phase1 index dataset.
-        super().__init__(
-            csv_path=str(self.csv_path_auto),
-            mel_h=mel_h,
-            preprocess=preprocess,
-            sr_ref_16k=sr_ref_16k,
-            split=split,
-            split_ratio=split_ratio,
-            seed=seed,
-            max_ref_sec=max_ref_sec,
-            max_gen_sec=max_gen_sec,
-            max_code_len=max_code_len,
-            cache_dir=cache_dir,
-            cache_batch_size=cache_batch_size,
-        )
+        all_samples = self._load_csv()
+        self.samples = self._split_samples(all_samples, split, split_ratio, seed)
 
-        self.lips_cache_dir = self.cache_dir.parent / f"{self.cache_dir.name}_lipsfeat"
-        self.lips_cache_dir.mkdir(parents=True, exist_ok=True)
-        CFMIndexLipsInferCacheBuilder(
-            preprocess=preprocess,
-            base_cache_dir=self.cache_dir,
-            lips_cache_dir=self.lips_cache_dir,
-            max_code_len=self.max_code_len,
-            tier_name=self.tier_name,
-        ).build(self.samples)
+        if len(self.samples) == 0:
+            raise RuntimeError(
+                f"No valid intersected samples for split={split!r} in {self.csv_path_auto}"
+            )
+
+        logger.info(
+            f"Dataset_CMF_Index_Phase1_ForLipsFeat [{split}] before cache: {len(self.samples)} samples"
+        )
+        self._ensure_cache()
 
         # Some samples may still fail during cache building (e.g. malformed
         # alignment files). Keep only samples with cache files to ensure
@@ -645,7 +649,7 @@ class Dataset_CMF_Index_Phase1_ForLipsFeat(Dataset_CFM_Index_Phase1):
         before = len(self.samples)
         self.samples = [
             s for s in self.samples
-            if (self.lips_cache_dir / f"{s['stem']}.pt").exists()
+            if (self.cache_dir / f"{s['stem']}.pt").exists()
         ]
         if len(self.samples) != before:
             logger.warning(
@@ -660,8 +664,86 @@ class Dataset_CMF_Index_Phase1_ForLipsFeat(Dataset_CFM_Index_Phase1):
             f"Dataset_CMF_Index_Phase1_ForLipsFeat [{split}]: {len(self.samples)} samples"
         )
 
+    @staticmethod
+    def _split_samples(
+        samples: List[Dict], split: str, split_ratio: float, seed: int
+    ) -> List[Dict]:
+        n = len(samples)
+        if n == 0:
+            return samples
+        rng = torch.Generator().manual_seed(seed)
+        perm = torch.randperm(n, generator=rng).tolist()
+        samples = [samples[i] for i in perm]
+        train_n = max(1, min(int(n * split_ratio), n))
+        remaining = n - train_n
+        vt_n = remaining // 2
+        if vt_n == 0:
+            vt_n = 1 if n >= 3 else 0
+        train_end = n - 2 * vt_n
+        val_end = train_end + vt_n
+        if split == "train":
+            return samples[:train_end]
+        if split == "val":
+            return samples[train_end:val_end]
+        return samples[val_end:]
+
+    def _ensure_cache(self):
+        missing = [
+            s for s in self.samples
+            if not (self.cache_dir / f"{s['stem']}.pt").exists()
+        ]
+        if not missing:
+            logger.info(
+                f"[LipsCache] All {len(self.samples)} samples already cached"
+            )
+            return
+        logger.info(
+            f"[LipsCache] Building {len(missing)}/{len(self.samples)} missing entries -> {self.cache_dir}"
+        )
+        CFMIndexLipsInferCacheBuilder(
+            preprocess=self.preprocess,
+            mel_h=self.mel_h,
+            cache_dir=self.cache_dir,
+            sr_ref_16k=self.sr_ref_16k,
+            max_ref_sec=self.max_ref_sec,
+            max_gen_sec=self.max_gen_sec,
+            max_code_len=self.max_code_len,
+            batch_size=self.cache_batch_size,
+            tier_name=self.tier_name,
+        ).build(missing)
+
     def _load_csv(self) -> List[Dict]:
-        samples = super()._load_csv()
+        samples: List[Dict] = []
+        seen_stems: set = set()
+        with open(self.csv_path, encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get("gen_error", "").strip():
+                    continue
+                out_pt = row.get("out_pt", "").strip()
+                out_wav = row.get("out_wav", "").strip()
+                prompt = row.get("prompt_audio_path", "").strip()
+                if not (out_pt and out_wav and prompt):
+                    continue
+                if out_pt and not Path(out_pt).is_absolute():
+                    out_pt = str((self.data_root / out_pt).resolve())
+                if out_wav and not Path(out_wav).is_absolute():
+                    out_wav = str((self.data_root / out_wav).resolve())
+                if prompt and not Path(prompt).is_absolute():
+                    prompt = str((self.data_root / prompt).resolve())
+                if not Path(out_pt).exists() or not Path(out_wav).exists() or not Path(prompt).exists():
+                    continue
+                stem = Path(out_pt).stem
+                if stem in seen_stems:
+                    continue
+                seen_stems.add(stem)
+                samples.append({
+                    "stem": stem,
+                    "prompt_audio_path": prompt,
+                    "out_pt": out_pt,
+                    "out_wav": out_wav,
+                })
+
         merged = []
         for s in samples:
             stem = s["stem"]
@@ -703,7 +785,7 @@ class Dataset_CMF_Index_Phase1_ForLipsFeat(Dataset_CFM_Index_Phase1):
         item = self.samples[index]
 
         cached = torch.load(
-            self.lips_cache_dir / f"{item['stem']}.pt",
+            self.cache_dir / f"{item['stem']}.pt",
             map_location="cpu",
             weights_only=True,
         )
