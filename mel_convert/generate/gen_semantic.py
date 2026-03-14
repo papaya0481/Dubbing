@@ -1,7 +1,8 @@
 """
 多进程并行语音合成脚本（基于 dubbing/indextts/infer_v2.py）
 
-- 情感来源：直接使用 speaker prompt 音频（不依赖文本标注）
+- Prompt 选择：优先同 speaker + 同 emotion；若不存在则同 speaker + neutral
+- 二级回退：当使用 neutral prompt 时，启用 use_emo_text=True 让模型从文本推导情感
 - 输出命名：与输入音频文件同名（.wav / .pt）
 - 多 GPU 多进程：--gpus 0,1  --num-process 4  → 每卡 2 进程，样本均匀分配
 - 自动跳过已生成的文件（断点续跑）
@@ -19,6 +20,7 @@ import threading
 import time
 import traceback
 import unicodedata
+from collections import defaultdict
 from pathlib import Path
 
 import torch
@@ -86,6 +88,10 @@ def parse_args() -> argparse.Namespace:
                         help="CSV 中音频路径的列名（默认 audio_path）")
     parser.add_argument("--text-col", type=str, default="Utterance",
                         help="CSV 中文本的列名（默认 text）")
+    parser.add_argument("--speaker-col", type=str, default="Speaker",
+                        help="CSV 中 speaker 的列名（默认 Speaker）")
+    parser.add_argument("--emotion-col", type=str, default="Emotion",
+                        help="CSV 中 emotion 的列名（默认 Emotion）")
     parser.add_argument("--drop-cols", type=str, default="Video_Filename,Video_Path",
                         help="逗号分隔的要从输出 CSV 中删除的列名（默认去掉 video 列）")
     parser.add_argument("--test", action="store_true", default=False,
@@ -97,11 +103,54 @@ def parse_args() -> argparse.Namespace:
 #  数据加载                                                                     #
 # --------------------------------------------------------------------------- #
 
+_NEUTRAL_ALIASES = {"neutral", "calm", "natural"}
+
+
+def normalize_emotion(emotion: str) -> str:
+    emo = str(emotion).strip().lower()
+    if emo in _NEUTRAL_ALIASES:
+        return "neutral"
+    return emo
+
+
+def choose_prompt_audio(
+    audio_path: str,
+    speaker: str,
+    emotion: str,
+    prompt_index: dict[tuple[str, str], list[str]],
+) -> tuple[str | None, str]:
+    """选择 prompt 音频。
+
+    返回:
+      (prompt_path, strategy)
+      strategy in {"same_speaker_same_emotion", "same_speaker_neutral_text_fallback", "not_found"}
+    """
+    target = str(Path(audio_path).resolve())
+    speaker_key = str(speaker).strip().lower()
+    emotion_key = normalize_emotion(emotion)
+
+    same_emo_candidates = [p for p in prompt_index.get((speaker_key, emotion_key), []) if p != target]
+    if same_emo_candidates:
+        return same_emo_candidates[0], "same_speaker_same_emotion"
+
+    neutral_candidates = [p for p in prompt_index.get((speaker_key, "neutral"), []) if p != target]
+    if neutral_candidates:
+        return neutral_candidates[0], "same_speaker_neutral_text_fallback"
+
+    return None, "not_found"
+
 def save_metadata_csv(csv_path: str, output_dir: Path, audio_col: str, drop_cols: set,
                       results: dict | None = None) -> None:
     """将输入 CSV 增强后保存到 output_dir/metadata.csv
 
-    results: stem -> {"out_wav": str, "out_pt": str, "gen_error": str}
+    results: stem -> {
+        "prompt_audio_path": str,
+        "prompt_strategy": str,
+        "use_emo_text": bool,
+        "out_wav": str,
+        "out_pt": str,
+        "gen_error": str,
+    }
              None 表示尚未生成，out_wav/out_pt/gen_error 均留空
     """
     csv_base     = Path(csv_path).parent
@@ -126,16 +175,28 @@ def save_metadata_csv(csv_path: str, output_dir: Path, audio_col: str, drop_cols
     with open(csv_path, encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         orig_fields = [c for c in (reader.fieldnames or []) if c not in drop_cols]
-        fieldnames = orig_fields + ["prompt_audio_path", "out_wav", "out_pt", "gen_error"]
+        fieldnames = orig_fields + [
+            "prompt_audio_path",
+            "prompt_strategy",
+            "use_emo_text",
+            "out_wav",
+            "out_pt",
+            "gen_error",
+        ]
         for row in reader:
             audio_path = str(row.get(audio_col, "")).strip()
             if audio_path and not Path(audio_path).is_absolute():
                 audio_path = str((csv_base / audio_path).resolve())
             stem = Path(audio_path).stem if audio_path else ""
             new_row = {k: v for k, v in row.items() if k not in drop_cols}
-            new_row["prompt_audio_path"] = audio_path
+            new_row["prompt_audio_path"] = ""
+            new_row["prompt_strategy"] = ""
+            new_row["use_emo_text"] = ""
             if results is not None and stem in results:
                 r = results[stem]
+                new_row["prompt_audio_path"] = _to_rel_under_output(r.get("prompt_audio_path", ""))
+                new_row["prompt_strategy"] = r.get("prompt_strategy", "")
+                new_row["use_emo_text"] = "1" if r.get("use_emo_text", False) else "0"
                 new_row["out_wav"]   = _to_rel_under_output(r.get("out_wav", ""))
                 new_row["out_pt"]    = _to_rel_under_output(r.get("out_pt", ""))
                 new_row["gen_error"] = r.get("gen_error", "")
@@ -152,38 +213,109 @@ def save_metadata_csv(csv_path: str, output_dir: Path, audio_col: str, drop_cols
     print(f"[CSV] metadata saved → {out_csv}  ({len(rows)} rows)")
 
 
-def load_work_items(csv_path: str, output_dir: Path, audio_col: str = "audio_path", text_col: str = "text") -> list[dict]:
+def load_work_items(
+    csv_path: str,
+    output_dir: Path,
+    audio_col: str = "audio_path",
+    text_col: str = "text",
+    speaker_col: str = "Speaker",
+    emotion_col: str = "Emotion",
+) -> list[dict]:
     csv_base = Path(csv_path).parent
     audios_dir   = output_dir / "audios" / "ost"
     semantic_dir = output_dir / "semantic"
     audios_dir.mkdir(parents=True, exist_ok=True)
     semantic_dir.mkdir(parents=True, exist_ok=True)
-    items: list[dict] = []
+
+    rows: list[dict] = []
+    prompt_index: dict[tuple[str, str], list[str]] = defaultdict(list)
+
     with open(csv_path, encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
+        fieldnames = set(reader.fieldnames or [])
+        required_cols = [audio_col, text_col, speaker_col, emotion_col]
+        missing_cols = [c for c in required_cols if c not in fieldnames]
+        if missing_cols:
+            raise ValueError(f"CSV 缺少必要列: {missing_cols}")
+
         for row in reader:
             audio_path = str(row.get(audio_col, "")).strip()
             text = str(row.get(text_col, "")).strip()
-            # 相对路径 → 相对 CSV 所在目录解析为绝对路径
+            speaker = str(row.get(speaker_col, "")).strip()
+            emotion = str(row.get(emotion_col, "")).strip()
+
             if audio_path and not Path(audio_path).is_absolute():
                 audio_path = str((csv_base / audio_path).resolve())
-            if not audio_path or not text:
+
+            if not audio_path or not text or not speaker or not emotion:
                 continue
-            text = sanitize_text(text)
-            stem = Path(audio_path).stem
-            out_wav = audios_dir   / f"{stem}.wav"
-            out_txt = audios_dir   / f"{stem}.txt"
-            out_pt  = semantic_dir / f"{stem}.pt"
-            if out_wav.exists() and out_txt.exists() and out_pt.exists():
-                continue  # 三者都已生成则跳过
-            items.append({
-                "audio_path": audio_path,
-                "text":       text,
-                "stem":       stem,
-                "out_wav":    str(out_wav),
-                "out_txt":    str(out_txt),
-                "out_pt":     str(out_pt),
+
+            resolved_audio_path = str(Path(audio_path).resolve())
+            if not Path(resolved_audio_path).exists():
+                continue
+
+            rows.append({
+                "audio_path": resolved_audio_path,
+                "text": sanitize_text(text),
+                "speaker": speaker,
+                "emotion": emotion,
             })
+
+            speaker_key = speaker.strip().lower()
+            emotion_key = normalize_emotion(emotion)
+            prompt_index[(speaker_key, emotion_key)].append(resolved_audio_path)
+
+    for key in prompt_index:
+        prompt_index[key] = sorted(set(prompt_index[key]))
+
+    items: list[dict] = []
+
+    same_emo_count = 0
+    neutral_fallback_count = 0
+    no_prompt_count = 0
+
+    for row in rows:
+        prompt_audio_path, prompt_strategy = choose_prompt_audio(
+            audio_path=row["audio_path"],
+            speaker=row["speaker"],
+            emotion=row["emotion"],
+            prompt_index=prompt_index,
+        )
+
+        if prompt_strategy == "same_speaker_same_emotion":
+            same_emo_count += 1
+        elif prompt_strategy == "same_speaker_neutral_text_fallback":
+            neutral_fallback_count += 1
+        else:
+            no_prompt_count += 1
+            continue
+
+        stem = Path(row["audio_path"]).stem
+        out_wav = audios_dir   / f"{stem}.wav"
+        out_txt = audios_dir   / f"{stem}.txt"
+        out_pt  = semantic_dir / f"{stem}.pt"
+        if out_wav.exists() and out_txt.exists() and out_pt.exists():
+            continue  # 三者都已生成则跳过
+
+        use_emo_text = prompt_strategy == "same_speaker_neutral_text_fallback"
+        items.append({
+            "audio_path": row["audio_path"],
+            "prompt_audio_path": prompt_audio_path,
+            "prompt_strategy": prompt_strategy,
+            "use_emo_text": use_emo_text,
+            "text": row["text"],
+            "stem": stem,
+            "out_wav": str(out_wav),
+            "out_txt": str(out_txt),
+            "out_pt": str(out_pt),
+        })
+
+    print(
+        "[PromptSelect] "
+        f"same_emotion={same_emo_count}, "
+        f"neutral_text_fallback={neutral_fallback_count}, "
+        f"no_prompt={no_prompt_count}"
+    )
     return items
 
 
@@ -223,11 +355,13 @@ def worker(rank: int, gpu_id: int, items: list[dict], args: argparse.Namespace,
         try:
             if not Path(item["out_wav"]).exists() or not Path(item["out_pt"]).exists():
                 result = tts.infer(
-                    spk_audio_prompt=item["audio_path"],
+                    spk_audio_prompt=item["prompt_audio_path"],
                     text=item["text"],
                     output_path=item["out_wav"],
                     emo_audio_prompt=None,
-                    emo_vectors=None,
+                    emo_vector=None,
+                    use_emo_text=item["use_emo_text"],
+                    emo_text=item["text"] if item["use_emo_text"] else None,
                     verbose=False,
                     num_beams=args.num_beams,
                     method="hmm",
@@ -252,6 +386,9 @@ def worker(rank: int, gpu_id: int, items: list[dict], args: argparse.Namespace,
 
         result_queue.put({
             "stem":      item["stem"],
+            "prompt_audio_path": item["prompt_audio_path"],
+            "prompt_strategy": item["prompt_strategy"],
+            "use_emo_text": item["use_emo_text"],
             "out_wav":   out_wav_result,
             "out_pt":    out_pt_result,
             "gen_error": gen_error,
@@ -314,7 +451,14 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     # audios/ 和 semantic/ 子目录由 load_work_items 创建
 
-    items = load_work_items(args.csv, output_dir, args.audio_col, args.text_col)
+    items = load_work_items(
+        args.csv,
+        output_dir,
+        audio_col=args.audio_col,
+        text_col=args.text_col,
+        speaker_col=args.speaker_col,
+        emotion_col=args.emotion_col,
+    )
     drop_cols = {c.strip() for c in args.drop_cols.split(",") if c.strip()}
     if args.test:
         items = items[:20]
