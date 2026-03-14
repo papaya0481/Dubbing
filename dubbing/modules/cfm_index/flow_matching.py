@@ -17,6 +17,7 @@ import torch.nn as nn
 from tqdm import tqdm
 
 from .DiT import DiT, IndexDiTConfig
+from .cross_attn import LipsTransformer
 
 
 # ---------------------------------------------------------------------------
@@ -212,93 +213,12 @@ class CFM(BASECFM):
         return loss, estimator_out + (1 - self.sigma_min) * z
 
 
-class LipsCrossAttentionLayer(nn.Module):
-    """Pre-norm cross-attention: Q from infer_cond, K/V from lips_feat.
-
-    Uses the Attention module from .transformer (supports cross-attention via
-    ``is_cross_attention=True``) with RMSNorm pre-normalisation and a
-    residual connection: output = query + attn(norm(query), norm(context)).
-    """
-
-    def __init__(self, dim: int = 512, n_head: int = 8, context_dim: int = 512):
-        super().__init__()
-        from .transformer import (
-            ModelArgs,
-            Attention as _TransAttn,
-            RMSNorm,
-            precompute_freqs_cis,
-        )
-        self._precompute_freqs = precompute_freqs_cis
-        self._head_dim = dim // n_head
-        cfg = ModelArgs(
-            dim=dim,
-            n_head=n_head,
-            n_local_heads=n_head,
-            head_dim=dim // n_head,
-            context_dim=context_dim,
-            has_cross_attention=True,
-        )
-        self.norm_q  = RMSNorm(dim)
-        self.norm_kv = RMSNorm(context_dim)
-        self.attn    = _TransAttn(cfg, is_cross_attention=True)
-
-    def forward(
-        self,
-        query: torch.Tensor,
-        context: torch.Tensor,
-        query_lens: torch.Tensor | None = None,
-        context_lens: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Args:
-            query:        [B, T_q, dim]       (infer_cond)
-            context:      [B, T_c, ctxt_dim]  (lips_feat)
-            query_lens:   [B] valid lengths for Q (None = all valid)
-            context_lens: [B] valid lengths for K/V (None = all valid)
-        Returns:
-            [B, T_q, dim] with residual added
-        """
-        T_q = query.size(1)
-        T_c = context.size(1)
-        max_len = max(T_q, T_c)
-        freqs = self._precompute_freqs(
-            max_len, self._head_dim, dtype=query.dtype
-        ).to(query.device)
-
-        # Build boolean attn_mask [B, 1, T_q, T_c]: True = attend, False = ignore.
-        # Masks out padding in both Q and K/V sequences.
-        if query_lens is not None or context_lens is not None:
-            idx_q = torch.arange(T_q, device=query.device)   # [T_q]
-            idx_c = torch.arange(T_c, device=query.device)   # [T_c]
-            q_mask = (idx_q.unsqueeze(0) < query_lens.unsqueeze(1)
-                      if query_lens is not None
-                      else torch.ones(query.size(0), T_q, dtype=torch.bool, device=query.device))
-            k_mask = (idx_c.unsqueeze(0) < context_lens.unsqueeze(1)
-                      if context_lens is not None
-                      else torch.ones(query.size(0), T_c, dtype=torch.bool, device=query.device))
-            # [B, T_q, T_c] → [B, 1, T_q, T_c]
-            attn_mask = (q_mask.unsqueeze(2) & k_mask.unsqueeze(1)).unsqueeze(1)
-        else:
-            attn_mask = None
-
-        attn_out = self.attn(
-            x=self.norm_q(query),
-            freqs_cis=freqs[:T_q],
-            mask=attn_mask,
-            input_pos=None,
-            context=self.norm_kv(context),
-            context_freqs_cis=freqs[:T_c],
-        )
-        out = query + attn_out
-        return out
-
-
 class CrossAttnCFM(CFM):
     """CFM variant with cross-attention to lips_feat before conditioning DiT.
 
-    Adds a LipsCrossAttentionLayer that fuses infer_cond and lips_feat via
-    cross-attention (Q from infer_cond, K/V from lips_feat) with a residual
-    connection, before concatenating with prompt_cond and passing the
-    assembled condition into the DiT estimator.
+    Uses LipsTransformer (multi-layer transformer with cross-attention) to fuse
+    infer_cond and lips_feat. Output is the residual-connected semantic input,
+    before concatenating with prompt_cond and passing into the DiT estimator.
     """
 
     def __init__(self, args: Any):
@@ -308,7 +228,7 @@ class CrossAttnCFM(CFM):
             raise NotImplementedError(f"Unknown dit_type: {cfg.dit_type!r}")
         content_dim = cfg.DiT.DiT.content_dim
         n_head      = cfg.DiT.DiT.num_heads
-        self.lips_cross_attn = LipsCrossAttentionLayer(
+        self.lips_cross_attn = LipsTransformer(
             dim=content_dim, n_head=n_head, context_dim=content_dim
         )
     
