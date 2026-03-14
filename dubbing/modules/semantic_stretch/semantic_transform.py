@@ -42,6 +42,7 @@ class SemanticTransformer:
 
     #: 语义码的帧率（semantic codec 运行在 50 Hz）
     CODES_PER_SECOND: float = 50.0
+    MEL_PER_SECOND: float = 22050.0 / 256.0  # mel 帧率（hop=256, sr=22050）
 
     def __init__(self, device: str = "cuda", verbose: bool = False) -> None:
         self.device = device
@@ -59,9 +60,14 @@ class SemanticTransformer:
     # 秒 → 帧 转换
     # ------------------------------------------------------------------
 
-    def _sec_to_frame(self, sec: float) -> float:
+    def _sec_to_frame(self, sec: float, input_type: str = "semantic") -> float:
         """将时间（秒）换算为（小数）码帧索引。"""
-        return sec * self.CODES_PER_SECOND
+        if input_type == "semantic":
+            return sec * self.CODES_PER_SECOND
+        elif input_type == "cond":
+            return sec * self.MEL_PER_SECOND
+        else:
+            raise ValueError(f"Unsupported input type: {input_type}")
 
     # ------------------------------------------------------------------
     # 锚点构建（与 GlobalWarpTransformer 逻辑完全对应）
@@ -269,13 +275,14 @@ class SemanticTransformer:
         src_anchors: List[float],
         tgt_anchors: List[float],
         total_tgt_frames: int,
+        input_type: str = "semantic",
     ) -> torch.Tensor:
         """计算目标每帧对应的源帧索引（shape: ``(total_tgt_frames,)``）。
 
         实现与 GlobalWarpTransformer 完全一致，单位换算为码帧（50 fps）。
         """
-        src_frames_raw = np.array([self._sec_to_frame(t) for t in src_anchors])
-        tgt_frames_raw = np.array([self._sec_to_frame(t) for t in tgt_anchors])
+        src_frames_raw = np.array([self._sec_to_frame(t, input_type=input_type) for t in src_anchors])
+        tgt_frames_raw = np.array([self._sec_to_frame(t, input_type=input_type) for t in tgt_anchors])
 
         # 去除 src 零跨度段的内部重复点，保留段首段尾（形成平台）
         keep = np.ones(len(src_frames_raw), dtype=bool)
@@ -302,6 +309,9 @@ class SemanticTransformer:
 
         interpolator = PchipInterpolator(tgt_frames, src_frames)
         grid_src = interpolator(np.arange(total_tgt_frames))
+        # 防止末端轻微外推导致越界（尤其在 cond 帧率下总帧数更大时）。
+        # 这里裁剪到源锚点范围，保证后续采样稳定且不出现负值。
+        grid_src = np.clip(grid_src, src_frames.min(), src_frames.max())
 
         return torch.from_numpy(grid_src.astype(np.float32)).to(self.device)
 
@@ -310,6 +320,7 @@ class SemanticTransformer:
         src_anchors: List[float],
         tgt_anchors: List[float],
         total_tgt_frames: int,
+        input_type: str = "semantic",
         src_eps: float = 1e-4,
     ) -> torch.Tensor:
         """构建布尔 mask：目标中对应插入静音的帧为 True。"""
@@ -318,10 +329,10 @@ class SemanticTransformer:
             src_span = abs(src_anchors[i + 1] - src_anchors[i])
             tgt_span = tgt_anchors[i + 1] - tgt_anchors[i]
             if src_span < src_eps and tgt_span > src_eps:
-                f_start = max(0, int(round(self._sec_to_frame(tgt_anchors[i]))))
+                f_start = max(0, int(round(self._sec_to_frame(tgt_anchors[i], input_type=input_type))))
                 f_end = min(
                     total_tgt_frames,
-                    int(round(self._sec_to_frame(tgt_anchors[i + 1]))),
+                    int(round(self._sec_to_frame(tgt_anchors[i + 1], input_type=input_type))),
                 )
                 if f_end > f_start:
                     mask[f_start:f_end] = True
@@ -433,6 +444,7 @@ class SemanticTransformer:
         source_textgrid: Union[str, Path, tgt.TextGrid],   # MFA on TTS output wav
         target_textgrid: Union[str, Path, tgt.TextGrid],   # user-provided
         tier_name: str = "phones",
+        input_type: str = "semantic",  # 预留接口，支持 "semantic" 或 "cond"
     ) -> Tuple[torch.Tensor, float]:
         """根据 TextGrid 对齐将 S_infer 从源时序扭曲到目标时序。
 
@@ -480,7 +492,7 @@ class SemanticTransformer:
             phone_groups_tgt=pg_tgt,
         )
 
-        total_tgt_frames = max(1, int(round(self._sec_to_frame(tgt_duration))))
+        total_tgt_frames = max(1, int(round(self._sec_to_frame(tgt_duration, input_type))))
 
         if self.verbose:
             print(
@@ -488,8 +500,12 @@ class SemanticTransformer:
                 f"src_frames={s_infer.shape[1]}, tgt_frames={total_tgt_frames}"
             )
 
-        warping_path = self.calculate_warping_path(src_anchors, tgt_anchors, total_tgt_frames)
-        silence_mask = self._detect_silence_mask(src_anchors, tgt_anchors, total_tgt_frames)
+        warping_path = self.calculate_warping_path(
+            src_anchors, tgt_anchors, total_tgt_frames, input_type=input_type
+        )
+        silence_mask = self._detect_silence_mask(
+            src_anchors, tgt_anchors, total_tgt_frames, input_type=input_type
+        )
         warped = self.warp(s_infer.to(self.device), warping_path, silence_mask)
 
         return warped, tgt_duration

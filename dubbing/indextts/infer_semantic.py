@@ -301,3 +301,122 @@ class IndexTTS2Semantic(IndexTTS2):
         else:
             wav_data = wav_final.type(torch.int16).numpy().T
             return seg_lens, sampling_rate, wav_data
+
+    def infer_with_cond_warp(
+        self,
+        spk_audio_prompt: Union[str, list],
+        text: str,
+        output_path: Optional[str],
+        target_textgrid: Union[str, Path, tgt.TextGrid],
+        mfa_aligner=None,
+        tier_name: str = "phones",
+        save_mid: bool = False,
+        diffusion_steps: int = 25,
+        inference_cfg_rate: float = 0.7,
+        sampling_rate: int = 22050,
+        emo_vector: Optional[torch.Tensor] = None,
+        **infer_kwargs,
+    ):
+        """cond-first 版本的语义扭曲推理。
+
+        与 :meth:`infer_with_semantic_warp` 的差异：
+          - 旧路径：``S_infer -> warp -> length_regulator -> cond``
+          - 新路径：``S_infer -> length_regulator -> cond -> warp``
+        """
+        aligner = mfa_aligner if mfa_aligner is not None else self.mfa_aligner
+
+        # ----------------------------------------------------------
+        # 1. 第一次推理：缓存 speaker/style/prompt，并获取 S_infer
+        # ----------------------------------------------------------
+        first_result = self.infer(
+            spk_audio_prompt=spk_audio_prompt,
+            text=text,
+            emo_vector=emo_vector,
+            return_stats=True,
+            method="hmm",
+            **infer_kwargs,
+        )
+        seg_lens, sampling_rate, wav_out, inference_stats = first_result
+        S_infer: torch.Tensor = inference_stats["S_infer"].to(self.device)
+
+        # ----------------------------------------------------------
+        # 1b. 保存中间态音频（第一次推理结果）
+        # ----------------------------------------------------------
+        if save_mid and output_path is not None:
+            _p = Path(output_path)
+            mid_path = str(_p.with_stem(_p.stem + "_mid"))
+            os.makedirs(os.path.dirname(os.path.abspath(mid_path)), exist_ok=True)
+            torchaudio.save(mid_path, wav_out.reshape(1, -1).type(torch.int16), sampling_rate)
+            print(f"[save_mid] 中间态音频保存至 {mid_path}")
+
+        # ----------------------------------------------------------
+        # 2. MFA 强制对齐：得到 source_textgrid
+        # ----------------------------------------------------------
+        wav_out_mono = wav_out
+        if wav_out_mono.dtype == torch.int16:
+            wav_out_mono = wav_out_mono.float() / 32767.0
+
+        if isinstance(text, str):
+            clean_text = text.strip()
+        else:
+            clean_text = " ".join(text).strip()
+
+        import time
+        start_time = time.time()
+        mfa_result = aligner.align_one_wav(
+            wavs=wav_out_mono,
+            sampling_rate=sampling_rate,
+            text=clean_text,
+            return_textgrid=True,
+        )
+        end_time = time.time()
+        print(f"MFA 对齐耗时：{end_time - start_time:.2f} 秒")
+        source_tg: tgt.TextGrid = mfa_result[0]
+
+        # ----------------------------------------------------------
+        # 3. 先由 S_infer 生成 cond（mel 空间）
+        # ----------------------------------------------------------
+        _MEL_SR, _MEL_HOP = 22050, 256
+        src_duration = source_tg.get_tier_by_name(tier_name).end_time
+        src_mel_len = max(1, int(round(src_duration * _MEL_SR / _MEL_HOP)))
+        cond_src = self.s2mel.models["length_regulator"](
+            S_infer,
+            ylens=torch.LongTensor([src_mel_len]).to(self.device),
+            n_quantizers=3,
+            f0=None,
+        )[0]
+
+        # ----------------------------------------------------------
+        # 4. 对 cond 做时序扭曲
+        # ----------------------------------------------------------
+        cond_warped, tgt_duration = self.semantic_transformer.transform(
+            s_infer=cond_src,
+            source_textgrid=source_tg,
+            target_textgrid=target_textgrid,
+            tier_name=tier_name,
+            input_type="cond",
+        )
+
+        # ----------------------------------------------------------
+        # 5. 直接使用 cond 解码
+        # ----------------------------------------------------------
+        wav_final = self._decode_cond_to_wav(
+            cond=cond_warped,
+            diffusion_steps=diffusion_steps,
+            inference_cfg_rate=inference_cfg_rate,
+        )
+
+        wav_final = torch.clamp(32767 * wav_final, -32767.0, 32767.0).cpu()
+        wav_length_final = wav_final.shape[-1] / sampling_rate
+
+        if output_path is not None:
+            if os.path.isfile(output_path):
+                os.remove(output_path)
+            _out_dir = os.path.dirname(os.path.abspath(output_path))
+            if _out_dir:
+                os.makedirs(_out_dir, exist_ok=True)
+            torchaudio.save(output_path, wav_final.type(torch.int16), sampling_rate)
+            return output_path, seg_lens, wav_length_final
+        else:
+            wav_data = wav_final.type(torch.int16).numpy().T
+            return seg_lens, sampling_rate, wav_data

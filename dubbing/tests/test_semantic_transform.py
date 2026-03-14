@@ -383,6 +383,169 @@ def test_integration_infer_with_semantic_warp():
     print(f"[DONE] 共处理 {processed} 条样本，输出目录: {output_dir}")
 
 
+def test_integration_infer_with_cond_warp():
+    """
+    端到端批量测试（前 20 条，cond-first 路径）：
+      1. 从 /data2/ruixin/datasets/MELD_raw/audios/ost 读取前 20 个样本
+      2. 按 metadata.csv 优先、txt 回退方式获取文本/情感
+      3. 调用 infer_with_cond_warp（先 LR 得 cond，再对 cond 做 warp）
+      4. 每条样本保存为 {name}_mid.wav 与 {name}_final.wav
+
+    需要真实模型文件与 MFA 环境，仅在对应机器上运行。
+    """
+    CHECKPOINT_DIR = "/data2/ruixin/index-tts2/checkpoints"
+    CFG_PATH = f"{CHECKPOINT_DIR}/config.yaml"
+    target_root = Path("/data2/ruixin/datasets/MELD_raw/audios")
+    ost_dir = target_root / "ost"
+    aligned_dir = target_root / "aligned"
+    output_dir = Path("/data2/ruixin/ours/test_outputs/semantic_warp_integration_cond_first")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    _required = [
+        Path(CHECKPOINT_DIR),
+        Path(CFG_PATH),
+        ost_dir,
+        aligned_dir,
+    ]
+    if not all(p.exists() for p in _required):
+        pytest.skip(
+            "Skipping integration test: one or more required paths not found: "
+            + str([str(p) for p in _required if not p.exists()])
+        )
+
+    import csv
+    import re
+
+    metadata_map = {}
+    metadata_csv = aligned_dir / "generation_metadata.csv"
+    if metadata_csv.exists():
+        with metadata_csv.open("r", encoding="utf-8-sig", newline="") as f:
+            for row in csv.DictReader(f):
+                key = (str(row.get("sample_key", "")).strip(), str(row.get("repeat_idx", "")).strip())
+                metadata_map[key] = row
+
+    EMOTION_DIMS = ["happy", "angry", "sad", "afraid", "disgusted", "melancholic", "surprised", "calm"]
+    ALIASES = {
+        "joy": "happy", "anger": "angry", "sadness": "sad", "fear": "afraid",
+        "fearful": "afraid", "disgust": "disgusted", "surprise": "surprised", "neutral": "calm",
+    }
+
+    def _emo_vec(emo: str) -> list[float]:
+        emo = ALIASES.get(emo.lower().strip(), emo.lower().strip())
+        emo = emo if emo in EMOTION_DIMS else "calm"
+        vec = [0.0] * len(EMOTION_DIMS)
+        vec[EMOTION_DIMS.index(emo)] = 1.0
+        return vec
+
+    def _load_text_and_emo(name: str) -> tuple[list[str], list[list[float]]]:
+        m = re.match(r"^(.+)_r(\d+)$", name)
+        sample_key = m.group(1) if m else name
+        repeat_idx = m.group(2) if m else "1"
+
+        row = metadata_map.get((sample_key, repeat_idx))
+        if row is not None:
+            text_raw = str(row.get("text", "")).strip()
+            if text_raw:
+                text_parts = [x.strip() for x in text_raw.split("|") if x.strip()]
+                if not text_parts:
+                    text_parts = [text_raw]
+                emo_labels = [x.strip() for x in str(row.get("emo_text", "")).split("|") if x.strip()]
+                if not emo_labels:
+                    emo_labels = ["calm"] * len(text_parts)
+                if len(emo_labels) < len(text_parts):
+                    emo_labels.extend([emo_labels[-1]] * (len(text_parts) - len(emo_labels)))
+                emo = [_emo_vec(e) for e in emo_labels[:len(text_parts)]]
+                return text_parts, emo
+
+        txt_path = ost_dir / f"{name}.txt"
+        if txt_path.exists():
+            raw_text = txt_path.read_text(encoding="utf-8", errors="ignore").strip()
+        else:
+            raw_text = ""
+
+        if not raw_text:
+            text_parts = [name]
+        else:
+            words = raw_text.split()
+            if len(words) <= 1:
+                text_parts = [raw_text]
+            else:
+                split_idx = max(1, len(words) // 2)
+                text_parts = [" ".join(words[:split_idx]), " ".join(words[split_idx:])]
+
+        emo = [_emo_vec("happy" if i % 2 == 0 else "angry") for i in range(len(text_parts))]
+        return text_parts, emo
+
+    from indextts.infer_semantic import IndexTTS2Semantic
+    model = IndexTTS2Semantic(
+        cfg_path=CFG_PATH,
+        model_dir=CHECKPOINT_DIR,
+        is_fp16=False,
+        verbose_transform=True,
+    )
+
+    from modules.mfa_alinger import MFAAligner
+    aligner = MFAAligner(
+        acoustic_model="english_us_arpa",
+        dictionary_model="english_us_arpa",
+    )
+    model.mfa_aligner = aligner
+
+    wav_paths = sorted(ost_dir.glob("*.wav"))[:20]
+    if not wav_paths:
+        pytest.skip(f"No wav files found in ost dir: {ost_dir}")
+
+    processed = 0
+    for wav_path in wav_paths:
+        name = wav_path.stem
+        tg_path = aligned_dir / f"{name}.TextGrid"
+        if not tg_path.exists():
+            tg_path = aligned_dir / f"{name}.textgrid"
+        if not tg_path.exists():
+            print(f"[SKIP] {name}: target textgrid not found")
+            continue
+
+        text, emo_vector = _load_text_and_emo(name)
+
+        final_out_path = output_dir / f"{name}_final.wav"
+        result = model.infer_with_cond_warp(
+            spk_audio_prompt=str(wav_path),
+            text=text,
+            output_path=str(final_out_path),
+            target_textgrid=str(tg_path),
+            tier_name="phones",
+            emo_audio_prompt=str(wav_path),
+            emo_vector=emo_vector,
+            verbose=True,
+            save_mid=True,
+        )
+
+        raw_mid = final_out_path.with_stem(final_out_path.stem + "_mid")
+        renamed_mid = output_dir / f"{name}_mid.wav"
+        if raw_mid.exists():
+            if renamed_mid.exists():
+                renamed_mid.unlink()
+            raw_mid.replace(renamed_mid)
+
+        assert final_out_path.exists(), f"输出文件不存在: {final_out_path}"
+        assert renamed_mid.exists(), f"中间态文件不存在: {renamed_mid}"
+
+        tg_tgt = tgt.io.read_textgrid(str(tg_path))
+        tgt_duration = tg_tgt.get_tier_by_name("phones").end_time
+        assert abs(result[2] - tgt_duration) < 0.5, (
+            f"[{name}] 输出时长 {result[2]:.2f}s 偏离目标 {tgt_duration:.2f}s 过多"
+        )
+
+        print(
+            f"[PASS-cond] {name}: mid={renamed_mid.name}, final={final_out_path.name}, "
+            f"wav={result[2]:.2f}s, tgt={tgt_duration:.2f}s"
+        )
+        processed += 1
+
+    assert processed > 0, "没有成功处理任何样本，请检查输入数据与对齐文件"
+    print(f"[DONE-cond] 共处理 {processed} 条样本，输出目录: {output_dir}")
+
+
 # ============================================================
 # 可视化：比较 S_infer 拉伸前后（参考 test_mel_transfrom.py）
 # ============================================================
@@ -463,5 +626,6 @@ if __name__ == "__main__":
     print("=" * 60)
     print("集成测试（需要真实模型）")
     print("=" * 60)
-    
-    test_integration_infer_with_semantic_warp()
+
+    # test_integration_infer_with_semantic_warp()
+    test_integration_infer_with_cond_warp()
