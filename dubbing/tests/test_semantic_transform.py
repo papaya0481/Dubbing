@@ -28,6 +28,7 @@ import os
 import torch
 import tgt
 import numpy as np
+import pytest
 
 
 # ============================================================
@@ -213,24 +214,29 @@ def test_vectorized_no_for_loop():
 
 def test_integration_infer_with_semantic_warp():
     """
-    端到端测试：
-      1. 用 IndexTTS2Semantic 做一次正常推理（第一次 pass）
-      2. MFA 对齐输出 wav
-      3. SemanticTransformer 扭曲 S_infer
-      4. 重新生成最终 wav
+        端到端批量测试（前 20 条）：
+            1. 从 /data2/ruixin/datasets/MELD_raw/audios/ost 读取前 20 个样本
+            2. 按 metadata.csv 优先、txt 回退方式获取文本/情感
+            3. 调用 infer_with_semantic_warp 做推理 + warp
+            4. 每条样本保存为 {name}_mid.wav 与 {name}_final.wav
 
     需要真实模型文件与 MFA 环境，仅在对应机器上运行。
     """
     # ---- 路径配置（按实际环境修改）----
     CHECKPOINT_DIR = "/data2/ruixin/index-tts2/checkpoints"
     CFG_PATH       = f"{CHECKPOINT_DIR}/config.yaml"
-    SPK_PROMPT     = "/data2/ruixin/datasets/MELD_raw/audios/ost/dev_dia0_utt0.wav"
+    target_root = Path("/data2/ruixin/datasets/MELD_raw/audios")
+    ost_dir = target_root / "ost"
+    aligned_dir = target_root / "aligned"
+    output_dir = Path("/data2/ruixin/ours/test_outputs/semantic_warp_integration")
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Skip when required resources are absent
     _required = [
         Path(CHECKPOINT_DIR),
         Path(CFG_PATH),
-        Path(SPK_PROMPT),
+        ost_dir,
+        aligned_dir,
     ]
     if not all(p.exists() for p in _required):
         pytest.skip(
@@ -238,59 +244,68 @@ def test_integration_infer_with_semantic_warp():
             + str([str(p) for p in _required if not p.exists()])
         )
 
-    # target_textgrid：使用 test_output/ 里已有的 TextGrid
-    target_root = "/data2/ruixin/datasets/MELD_raw/audios"
-    target_base = "aligned"
-    target_name = "dev_dia0_utt0"
-    TARGET_TG_PATH = (
-        Path(target_root) / target_base / f"{target_name}.TextGrid"
-    )
-    OUTPUT_PATH = str(project_dubbing_root.parent / "test_output" / "test_semantic_warp.wav")
+    import csv
+    import re
 
-    # read text and emotion: prefer generation_metadata.csv, else fallback to txt + random split
-    import csv, re, random
-    metadata_csv = Path(target_root) / target_base / "generation_metadata.csv"
-    # parse sample_key / repeat_idx from target_name (e.g. "dev_dia7_row7_r1")
-    m = re.match(r"^(.+)_r(\d+)$", target_name)
-    sample_key_parsed = m.group(1) if m else target_name
-    repeat_idx_parsed  = m.group(2) if m else "1"
-
-    TEXT       = None
-    emo_vector = None
-
+    metadata_map = {}
+    metadata_csv = aligned_dir / "generation_metadata.csv"
     if metadata_csv.exists():
-        with metadata_csv.open("r", encoding="utf-8-sig", newline="") as _f:
-            for row in csv.DictReader(_f):
-                if (str(row.get("sample_key", "")).strip() == sample_key_parsed and
-                        str(row.get("repeat_idx", "")).strip() == repeat_idx_parsed):
-                    TEXT = str(row["text"]).strip()
-                    emo_labels = str(row["emo_text"]).strip().split("|")
-                    EMOTION_DIMS = ["happy","angry","sad","afraid","disgusted","melancholic","surprised","calm"]
-                    ALIASES = {"joy":"happy","anger":"angry","sadness":"sad","fear":"afraid",
-                               "fearful":"afraid","disgust":"disgusted","surprise":"surprised","neutral":"calm"}
-                    def _emo_vec(e):
-                        e = ALIASES.get(e.lower().strip(), e.lower().strip())
-                        e = e if e in EMOTION_DIMS else "calm"
-                        v = [0.0]*len(EMOTION_DIMS); v[EMOTION_DIMS.index(e)] = 1.0
-                        return v
-                    emo_vector = [_emo_vec(e) for e in emo_labels]
-                    print(f"[metadata.csv] text='{TEXT}', emo={emo_labels}")
-                    break
+        with metadata_csv.open("r", encoding="utf-8-sig", newline="") as f:
+            for row in csv.DictReader(f):
+                key = (str(row.get("sample_key", "")).strip(), str(row.get("repeat_idx", "")).strip())
+                metadata_map[key] = row
 
-    if TEXT is None:
-        ost_txt_path = f"{target_root}/ost/{target_name}.txt"
-        with open(ost_txt_path, "r") as f:
-            raw_text = f.read().strip()
-        words = raw_text.split()
-        if len(words) <= 1:
-            TEXT = [raw_text, raw_text]
+    EMOTION_DIMS = ["happy", "angry", "sad", "afraid", "disgusted", "melancholic", "surprised", "calm"]
+    ALIASES = {
+        "joy": "happy", "anger": "angry", "sadness": "sad", "fear": "afraid",
+        "fearful": "afraid", "disgust": "disgusted", "surprise": "surprised", "neutral": "calm",
+    }
+
+    def _emo_vec(emo: str) -> list[float]:
+        emo = ALIASES.get(emo.lower().strip(), emo.lower().strip())
+        emo = emo if emo in EMOTION_DIMS else "calm"
+        vec = [0.0] * len(EMOTION_DIMS)
+        vec[EMOTION_DIMS.index(emo)] = 1.0
+        return vec
+
+    def _load_text_and_emo(name: str) -> tuple[list[str], list[list[float]]]:
+        m = re.match(r"^(.+)_r(\d+)$", name)
+        sample_key = m.group(1) if m else name
+        repeat_idx = m.group(2) if m else "1"
+
+        row = metadata_map.get((sample_key, repeat_idx))
+        if row is not None:
+            text_raw = str(row.get("text", "")).strip()
+            if text_raw:
+                text_parts = [x.strip() for x in text_raw.split("|") if x.strip()]
+                if not text_parts:
+                    text_parts = [text_raw]
+                emo_labels = [x.strip() for x in str(row.get("emo_text", "")).split("|") if x.strip()]
+                if not emo_labels:
+                    emo_labels = ["calm"] * len(text_parts)
+                if len(emo_labels) < len(text_parts):
+                    emo_labels.extend([emo_labels[-1]] * (len(text_parts) - len(emo_labels)))
+                emo = [_emo_vec(e) for e in emo_labels[:len(text_parts)]]
+                return text_parts, emo
+
+        txt_path = ost_dir / f"{name}.txt"
+        if txt_path.exists():
+            raw_text = txt_path.read_text(encoding="utf-8", errors="ignore").strip()
         else:
-            split_idx = random.randint(1, len(words) - 1)
-            TEXT = [" ".join(words[:split_idx]), " ".join(words[split_idx:])]
-        print(f"[txt fallback] 第1段: '{TEXT[0]}' | 第2段: '{TEXT[1]}'")
-        emo_vector = [[0.0]*8, [0.0]*8]
-        emo_vector[0][0] = 1.0
-        emo_vector[1][1] = 1.0
+            raw_text = ""
+
+        if not raw_text:
+            text_parts = [name]
+        else:
+            words = raw_text.split()
+            if len(words) <= 1:
+                text_parts = [raw_text]
+            else:
+                split_idx = max(1, len(words) // 2)
+                text_parts = [" ".join(words[:split_idx]), " ".join(words[split_idx:])]
+
+        emo = [_emo_vec("happy" if i % 2 == 0 else "angry") for i in range(len(text_parts))]
+        return text_parts, emo
     
 
     # ---- 初始化 IndexTTS2Semantic ----
@@ -311,31 +326,61 @@ def test_integration_infer_with_semantic_warp():
     
     model.mfa_aligner = aligner
 
-    # ---- 执行语义扭曲推理 ----
-    result = model.infer_with_semantic_warp(
-        spk_audio_prompt=SPK_PROMPT,
-        text=TEXT,
-        output_path=OUTPUT_PATH,
-        target_textgrid=str(TARGET_TG_PATH),
-        tier_name="phones",
-        emo_audio_prompt=SPK_PROMPT,
-        emo_vector=emo_vector,
-        verbose=True,
-        save_mid=True,
-    )
+    wav_paths = sorted(ost_dir.glob("*.wav"))[:20]
+    if not wav_paths:
+        pytest.skip(f"No wav files found in ost dir: {ost_dir}")
 
-    print(f"\n[集成测试结果] output_path={result[0]}, wav_length={result[2]:.2f}s")
+    processed = 0
+    for wav_path in wav_paths:
+        name = wav_path.stem
+        tg_path = aligned_dir / f"{name}.TextGrid"
+        if not tg_path.exists():
+            tg_path = aligned_dir / f"{name}.textgrid"
+        if not tg_path.exists():
+            print(f"[SKIP] {name}: target textgrid not found")
+            continue
 
-    # 验证输出文件存在
-    assert os.path.isfile(result[0]), f"输出文件不存在: {result[0]}"
+        text, emo_vector = _load_text_and_emo(name)
 
-    # 验证输出 wav 时长接近目标 TextGrid 时长
-    tg_tgt = tgt.io.read_textgrid(str(TARGET_TG_PATH))
-    tgt_duration = tg_tgt.get_tier_by_name("phones").end_time
-    assert abs(result[2] - tgt_duration) < 0.5, (
-        f"输出时长 {result[2]:.2f}s 偏离目标 {tgt_duration:.2f}s 过多"
-    )
-    print(f"[PASS] 集成测试通过，输出时长={result[2]:.2f}s，目标={tgt_duration:.2f}s")
+        final_out_path = output_dir / f"{name}_final.wav"
+        result = model.infer_with_semantic_warp(
+            spk_audio_prompt=str(wav_path),
+            text=text,
+            output_path=str(final_out_path),
+            target_textgrid=str(tg_path),
+            tier_name="phones",
+            emo_audio_prompt=str(wav_path),
+            emo_vector=emo_vector,
+            verbose=True,
+            save_mid=True,
+        )
+
+        # infer_semantic.py 内部 save_mid 使用 <output_stem>_mid.wav，
+        # 这里统一重命名为 {name}_mid.wav。
+        raw_mid = final_out_path.with_stem(final_out_path.stem + "_mid")
+        renamed_mid = output_dir / f"{name}_mid.wav"
+        if raw_mid.exists():
+            if renamed_mid.exists():
+                renamed_mid.unlink()
+            raw_mid.replace(renamed_mid)
+
+        assert final_out_path.exists(), f"输出文件不存在: {final_out_path}"
+        assert renamed_mid.exists(), f"中间态文件不存在: {renamed_mid}"
+
+        tg_tgt = tgt.io.read_textgrid(str(tg_path))
+        tgt_duration = tg_tgt.get_tier_by_name("phones").end_time
+        assert abs(result[2] - tgt_duration) < 0.5, (
+            f"[{name}] 输出时长 {result[2]:.2f}s 偏离目标 {tgt_duration:.2f}s 过多"
+        )
+
+        print(
+            f"[PASS] {name}: mid={renamed_mid.name}, final={final_out_path.name}, "
+            f"wav={result[2]:.2f}s, tgt={tgt_duration:.2f}s"
+        )
+        processed += 1
+
+    assert processed > 0, "没有成功处理任何样本，请检查输入数据与对齐文件"
+    print(f"[DONE] 共处理 {processed} 条样本，输出目录: {output_dir}")
 
 
 # ============================================================

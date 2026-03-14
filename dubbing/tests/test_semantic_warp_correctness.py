@@ -63,8 +63,13 @@ TOL_FRAMES = 1.5    # warping_path 比较时允许的帧级误差（PCHIP 在边
 
 # 真实数据：src/tgt 来自两个独立目录，相同文件名构成一对
 REAL_SRC_DIR = Path("/data2/ruixin/datasets/MELD_raw/audios/aligned")
-REAL_TGT_DIR = Path("/data2/ruixin/datasets/flow_dataset/MELD_semantic/audios/aligned")
+REAL_TGT_DIR = Path("/data2/ruixin/datasets/flow_dataset/MELD/semantic/audios/aligned")
 REAL_DATA_AVAILABLE = REAL_SRC_DIR.exists() and REAL_TGT_DIR.exists()
+
+# 真实数据（lips 对齐）：source 来自 MELD/semantic，target 来自 MELD/predict_results
+REAL_LIPS_SRC_DIR = Path("/data2/ruixin/datasets/flow_dataset/MELD/semantic/audios/aligned")
+REAL_LIPS_TGT_DIR = Path("/data2/ruixin/datasets/flow_dataset/MELD/predict_results/textgrids")
+REAL_LIPS_DATA_AVAILABLE = REAL_LIPS_SRC_DIR.exists() and REAL_LIPS_TGT_DIR.exists()
 
 # =============================================================================
 # 辅助：构造合成 TextGrid
@@ -1017,6 +1022,59 @@ def test_real_data_vfa_phones():
     print(f"  通过 {tested} 条真实 words-equal 样本（VFA 音素域）")
 
 
+@pytest.mark.skipif(not REAL_LIPS_DATA_AVAILABLE, reason="MELD lips 对齐数据目录不可访问")
+def test_real_data_vfa_lips_alignment():
+    """真实数据（VFA 音素域，lips 对齐）：
+    source 使用 MELD/semantic/audios/aligned（先映射到 VFA 域），
+    target 使用 MELD/predict_results/textgrids（已是 VFA 域），
+    验证 warping_path 对齐正确性（最多 200 条）。
+    """
+    # 以 source 文件名为主进行配对，兼容 TextGrid/textgrid 后缀差异
+    src_stem_to_path = {}
+    for p in REAL_LIPS_SRC_DIR.iterdir():
+        if p.is_file() and p.suffix.lower() == ".textgrid":
+            src_stem_to_path[p.stem] = p
+
+    tgt_stem_to_path = {}
+    for p in REAL_LIPS_TGT_DIR.iterdir():
+        if p.is_file() and p.suffix.lower() == ".textgrid":
+            tgt_stem_to_path[p.stem] = p
+
+    common_stems = sorted(set(src_stem_to_path).intersection(tgt_stem_to_path))
+
+    tested = 0
+    skipped_no_match = 0
+    for stem in common_stems:
+        r1 = tgt.io.read_textgrid(str(src_stem_to_path[stem]))
+        r2 = tgt.io.read_textgrid(str(tgt_stem_to_path[stem]))
+
+        # source 转到 VFA 域；target 按数据约定已在 VFA 域
+        tg_src_vfa = _convert_tg_phones_to_vfa(r1)
+        tg_tgt_vfa = r2
+
+        warping_path, silence_mask, *_, words_src, words_tgt, _ = _compute_warping(
+            tg_src_vfa, tg_tgt_vfa, tier_name="phones"
+        )
+
+        if len(words_src) == 0 or len(words_tgt) == 0:
+            skipped_no_match += 1
+            continue
+
+        _assert_warp_correspondence(
+            warping_path, words_src, words_tgt,
+            label=f"real_vfa_lips/{stem}"
+        )
+        tested += 1
+        if tested >= 200:
+            break
+
+    assert tested > 0, (
+        "没有找到可测试的 lips 对齐样本（VFA 域）"
+        f"；总配对={len(common_stems)}，LCS 无匹配跳过={skipped_no_match}"
+    )
+    print(f"  通过 {tested} 条真实 lips 对齐样本（VFA 音素域，跳过无匹配 {skipped_no_match} 条）")
+
+
 # =============================================================================
 # 入口
 # =============================================================================
@@ -1065,6 +1123,12 @@ if __name__ == "__main__":
         test_real_data_vfa_phones()
     else:
         print("(真实数据路径不存在，跳过)")
+
+    if REAL_LIPS_DATA_AVAILABLE:
+        print("Real data - VFA 音素域 lips 对齐 (最多 200 条):")
+        test_real_data_vfa_lips_alignment()
+    else:
+        print("(lips 对齐数据路径不存在，跳过)")
 
     print("=" * 60)
     print("All tests passed.")
