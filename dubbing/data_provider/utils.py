@@ -324,6 +324,7 @@ class CFMIndexLipsInferCacheBuilder(CFMIndexCacheBuilder):
         diffusion_steps: int = 10,
         inference_cfg_rate: float = 0.7,
         batch_size: int = 8,
+        warp_type: str = "cond",  # "semantic" or "cond"
     ):
         super().__init__(
             preprocess=preprocess,
@@ -338,6 +339,7 @@ class CFMIndexLipsInferCacheBuilder(CFMIndexCacheBuilder):
         self.tier_name = tier_name
         self.diffusion_steps = int(diffusion_steps)
         self.inference_cfg_rate = float(inference_cfg_rate)
+        self.warp_type = warp_type
         self._cfm = None
         self._phoneme_vocab = None
         self.semantic_transformer = None
@@ -372,7 +374,7 @@ class CFMIndexLipsInferCacheBuilder(CFMIndexCacheBuilder):
                 sys.path.insert(0, str(_proj))
             from lips.data.phoneme_vocab import PhonemeVocab
         self._phoneme_vocab = PhonemeVocab()
-        self.semantic_transformer = SemanticTransformer(device=self.device, verbose=False)
+        self.semantic_transformer = SemanticTransformer(device=self.device, verbose=False, input_type=self.warp_type)
 
     def _release_runtime(self):
         self._cfm = None
@@ -470,18 +472,35 @@ class CFMIndexLipsInferCacheBuilder(CFMIndexCacheBuilder):
                     vfa_id = self._phoneme_vocab.arpabet_to_vfa_id(txt)
                     iv.text = self._phoneme_vocab.vfa_id_to_arpabet(vfa_id)
 
-            s_warped, _ = self.semantic_transformer.transform(
-                s_infer=s_infer,
-                source_textgrid=src_tg,
-                target_textgrid=tgt_tg,
-                tier_name=self.tier_name,
-            )
-            infer_cond = m["len_reg"](
-                s_warped.to(dev),
-                ylens=torch.LongTensor([T_gens[i]]).to(dev),
-                n_quantizers=3,
-                f0=None,
-            )[0].squeeze(0).cpu()
+            if self.warp_type == "cond":
+                # Run LR first to get cond, then warp in cond (mel) space
+                infer_cond_pre = m["len_reg"](
+                    s_infer.to(dev),
+                    ylens=torch.LongTensor([T_gens[i]]).to(dev),
+                    n_quantizers=3,
+                    f0=None,
+                )[0]  # (1, T_gen, 512)
+                infer_cond_warped, _ = self.semantic_transformer.transform(
+                    x=infer_cond_pre,
+                    source_textgrid=src_tg,
+                    target_textgrid=tgt_tg,
+                    tier_name=self.tier_name,
+                )
+                infer_cond = infer_cond_warped.squeeze(0).cpu()
+            else:
+                # Warp in semantic space first, then run LR
+                s_warped, _ = self.semantic_transformer.transform(
+                    x=s_infer,
+                    source_textgrid=src_tg,
+                    target_textgrid=tgt_tg,
+                    tier_name=self.tier_name,
+                )
+                infer_cond = m["len_reg"](
+                    s_warped.to(dev),
+                    ylens=torch.LongTensor([T_gens[i]]).to(dev),
+                    n_quantizers=3,
+                    f0=None,
+                )[0].squeeze(0).cpu()
             infer_conds.append(infer_cond)
 
         total_lens = [r + g for r, g in zip(T_refs, T_gens)]

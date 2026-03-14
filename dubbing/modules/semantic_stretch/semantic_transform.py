@@ -48,7 +48,7 @@ class SemanticTransformer:
         self,
         device: str = "cuda",
         verbose: bool = False,
-        input_type: str = "semantic",  # "semantic" (50 fps) or "cond" (mel fps)
+        input_type: str = "cond",  # "semantic" (50 fps) or "cond" (mel fps)
     ) -> None:
         assert input_type in ("semantic", "cond"), f"Unknown input_type: {input_type!r}"
         self.device = device
@@ -462,6 +462,8 @@ class SemanticTransformer:
             - ``warped``: shape ``(B, T_tgt, D)``，时序对齐到目标时长。
             - ``tgt_duration``: 目标时长（秒），用于后续计算目标 mel 帧数。
         """
+        if self.input_type == "cond":
+            assert x.size(-1) == 512, f"Expected cond dimension 512, got {x.size(-1)}"
         def _as_tg(x: Union[str, Path, tgt.TextGrid]) -> tgt.TextGrid:
             return x if isinstance(x, tgt.TextGrid) else tgt.io.read_textgrid(str(x))
 

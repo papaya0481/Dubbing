@@ -592,6 +592,7 @@ class Dataset_CFM_Index_Phase1_ForLipsFeat(Dataset):
         cache_dir: Optional[str] = None,
         cache_batch_size: int = 16,
         tier_name: str = "phones",
+        warp_type: str = "cond",  # "semantic" or "cond" — matches SemanticTransformer.input_type
     ):
         super().__init__()
         self.flow_dataset_path = Path(flow_dataset_path)
@@ -605,6 +606,7 @@ class Dataset_CFM_Index_Phase1_ForLipsFeat(Dataset):
         self.max_gen_sec = max_gen_sec
         self.max_code_len = max_code_len
         self.cache_batch_size = cache_batch_size
+        self.warp_type = warp_type
 
         self.semantic_root = self.flow_dataset_path / "semantic"
         self.predict_root = self.flow_dataset_path / "predict_results"
@@ -710,6 +712,7 @@ class Dataset_CFM_Index_Phase1_ForLipsFeat(Dataset):
             max_code_len=self.max_code_len,
             batch_size=self.cache_batch_size,
             tier_name=self.tier_name,
+            warp_type=self.warp_type,
         ).build(missing)
 
     def _load_csv(self) -> List[Dict]:
