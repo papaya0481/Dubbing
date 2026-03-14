@@ -780,6 +780,9 @@ class Dataset_CFM_Index_Phase1_ForLipsFeat(Dataset):
         logger.info(f"[LipsFeat] Intersection filter: {len(samples)} -> {len(merged)} samples")
         return merged
 
+    def __len__(self) -> int:
+        return len(self.samples)
+
     @torch.no_grad()
     def __getitem__(self, index: int) -> Dict:
         item = self.samples[index]

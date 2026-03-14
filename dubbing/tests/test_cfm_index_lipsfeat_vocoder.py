@@ -71,7 +71,7 @@ def _make_args() -> SimpleNamespace:
 
 
 def _output_root() -> Path:
-    return "/data2/ruixin/ours/test_outputs/cfm_index_lipsfeat_vocoder"
+    return Path("/data2/ruixin/ours/test_outputs/cfm_index_lipsfeat_vocoder")
 
 
 @_SKIP
