@@ -8,7 +8,7 @@ batching logic.
 Exported:
   collate_cfm_phase1           – for Dataset_CFM_Phase1 / Dataset_CFM_Phase1_StretchEntireMel
   collate_cfm_index_phase1     – for Dataset_CFM_Index_Phase1
-    collate_cmf_index_phase1_for_lipsfeat – for Dataset_CMF_Index_Phase1_ForLipsFeat
+        collate_cfm_index_phase1_for_lipsfeat – for Dataset_CFM_Index_Phase1_ForLipsFeat
 """
 
 from __future__ import annotations
@@ -130,8 +130,8 @@ def collate_cfm_index_phase1(batch: List[Dict]) -> Dict:
     }
 
 
-def collate_cmf_index_phase1_for_lipsfeat(batch: List[Dict]) -> Dict:
-    """Collate for Dataset_CMF_Index_Phase1_ForLipsFeat.
+def collate_cfm_index_phase1_for_lipsfeat(batch: List[Dict]) -> Dict:
+    """Collate for Dataset_CFM_Index_Phase1_ForLipsFeat.
 
     Same outputs as ``collate_cfm_index_phase1`` plus padded lips features.
     """

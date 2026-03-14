@@ -5,7 +5,7 @@ Providers tested
 - cfm_phase1          (Dataset_CFM_Phase1)
 - cfm_phase1_stretch  (Dataset_CFM_Phase1_StretchEntireMel)
 - cfm_index_phase1    (Dataset_CFM_Index_Phase1)
-- cmf_index_phase1_for_lipsfeat (Dataset_CMF_Index_Phase1_ForLipsFeat)
+- cfm_index_phase1_for_lipsfeat (Dataset_CFM_Index_Phase1_ForLipsFeat)
 
 Each provider is verified for:
 - Dataset non-empty after split
@@ -86,9 +86,9 @@ def _make_index_args() -> SimpleNamespace:
 
 
 def _make_index_lips_args() -> SimpleNamespace:
-    """Build args for cmf_index_phase1_for_lipsfeat."""
+    """Build args for cfm_index_phase1_for_lipsfeat."""
     args = _make_index_args()
-    args.data.dataset = "cmf_index_phase1_for_lipsfeat"
+    args.data.dataset = "cfm_index_phase1_for_lipsfeat"
     args.data.flow_dataset_path = str(_FLOW_DATASET_ROOT)
     args.data.tier_name = "phones"
     return args
@@ -305,19 +305,19 @@ def test_cfm_index_phase1_splits_cover_all_samples():
 
 
 # ========================================================================
-# cmf_index_phase1_for_lipsfeat
+# cfm_index_phase1_for_lipsfeat
 # ========================================================================
 
 @_SKIP_INDEX_LIPS
-def test_cmf_index_phase1_for_lipsfeat_dataset_nonempty():
+def test_cfm_index_phase1_for_lipsfeat_dataset_nonempty():
     from data_provider.data_factory import data_provider
     args = _make_index_lips_args()
     dataset, _ = data_provider(args, "train")
-    assert len(dataset) > 0, "cmf_index_phase1_for_lipsfeat train split returned 0 samples"
+    assert len(dataset) > 0, "cfm_index_phase1_for_lipsfeat train split returned 0 samples"
 
 
 @_SKIP_INDEX_LIPS
-def test_cmf_index_phase1_for_lipsfeat_batch_keys_and_shapes():
+def test_cfm_index_phase1_for_lipsfeat_batch_keys_and_shapes():
     from data_provider.data_factory import data_provider
     args = _make_index_lips_args()
     _, loader = data_provider(args, "train")
@@ -346,7 +346,7 @@ def test_cmf_index_phase1_for_lipsfeat_batch_keys_and_shapes():
 
 
 @_SKIP_INDEX_LIPS
-def test_cmf_index_phase1_for_lipsfeat_splits_disjoint():
+def test_cfm_index_phase1_for_lipsfeat_splits_disjoint():
     from data_provider.data_factory import data_provider
     args = _make_index_lips_args()
     train_ds, _ = data_provider(args, "train")

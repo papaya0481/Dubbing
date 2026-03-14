@@ -547,7 +547,7 @@ class Dataset_CFM_Index_Phase1(Dataset):
         return data
 
 
-class Dataset_CMF_Index_Phase1_ForLipsFeat(Dataset):
+class Dataset_CFM_Index_Phase1_ForLipsFeat(Dataset):
     """针对 lips 特征训练的独立 Dataset。
 
     设计目标
@@ -639,7 +639,7 @@ class Dataset_CMF_Index_Phase1_ForLipsFeat(Dataset):
             )
 
         logger.info(
-            f"Dataset_CMF_Index_Phase1_ForLipsFeat [{split}] before cache: {len(self.samples)} samples"
+            f"Dataset_CFM_Index_Phase1_ForLipsFeat [{split}] before cache: {len(self.samples)} samples"
         )
         self._ensure_cache()
 
@@ -661,7 +661,7 @@ class Dataset_CMF_Index_Phase1_ForLipsFeat(Dataset):
                 f"No valid intersected samples for split={split!r} in {self.csv_path_auto}"
             )
         logger.info(
-            f"Dataset_CMF_Index_Phase1_ForLipsFeat [{split}]: {len(self.samples)} samples"
+            f"Dataset_CFM_Index_Phase1_ForLipsFeat [{split}]: {len(self.samples)} samples"
         )
 
     @staticmethod

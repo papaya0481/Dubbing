@@ -2,12 +2,12 @@ from data_provider.data_loader import (
     Dataset_CFM_Phase1,
     Dataset_CFM_Phase1_StretchEntireMel,
     Dataset_CFM_Index_Phase1,
-    Dataset_CMF_Index_Phase1_ForLipsFeat,
+    Dataset_CFM_Index_Phase1_ForLipsFeat,
 )
 from data_provider.collate_funcs import (
     collate_cfm_phase1,
     collate_cfm_index_phase1,
-    collate_cmf_index_phase1_for_lipsfeat,
+    collate_cfm_index_phase1_for_lipsfeat,
 )
 
 from torch.utils.data import DataLoader
@@ -16,14 +16,14 @@ data_dict = {
     "cfm_phase1":         Dataset_CFM_Phase1,
     "cfm_phase1_stretch": Dataset_CFM_Phase1_StretchEntireMel,
     "cfm_index_phase1":   Dataset_CFM_Index_Phase1,
-    "cmf_index_phase1_for_lipsfeat": Dataset_CMF_Index_Phase1_ForLipsFeat,
+    "cfm_index_phase1_for_lipsfeat": Dataset_CFM_Index_Phase1_ForLipsFeat,
 }
 
 collate_dict = {
     "cfm_phase1":         collate_cfm_phase1,
     "cfm_phase1_stretch": collate_cfm_phase1,
     "cfm_index_phase1":   collate_cfm_index_phase1,
-    "cmf_index_phase1_for_lipsfeat": collate_cmf_index_phase1_for_lipsfeat,
+    "cfm_index_phase1_for_lipsfeat": collate_cfm_index_phase1_for_lipsfeat,
 }
 
 
@@ -57,7 +57,7 @@ def data_provider(args, flag: str):
             cache_dir=getattr(args.data, "cache_dir", None),
             cache_batch_size=getattr(args.preprocess, "cache_batch_size", 16),
         )
-    elif dataset_name == "cmf_index_phase1_for_lipsfeat":
+    elif dataset_name == "cfm_index_phase1_for_lipsfeat":
         data_set = Data(
             flow_dataset_path=args.data.flow_dataset_path,
             mel_h=args.preprocess.mel,
