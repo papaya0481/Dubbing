@@ -2,7 +2,7 @@
 多进程并行语音合成脚本（基于 dubbing/indextts/infer_v2.py）
 
 - Prompt 选择：优先同 speaker + 同 emotion；若不存在则同 speaker + neutral
-- 二级回退：当使用 neutral prompt 时，启用 use_emo_text=True 让模型从文本推导情感
+- 二级回退：当使用 neutral prompt 时，启用 use_emo_text=True 并传入 emotion 列文本辅助情感控制
 - 输出命名：与输入音频文件同名（.wav / .pt）
 - 多 GPU 多进程：--gpus 0,1  --num-process 4  → 每卡 2 进程，样本均匀分配
 - 自动跳过已生成的文件（断点续跑）
@@ -259,6 +259,7 @@ def load_work_items(
                 "text": sanitize_text(text),
                 "speaker": speaker,
                 "emotion": emotion,
+                "emo_text": sanitize_text(emotion),
             })
 
             speaker_key = speaker.strip().lower()
@@ -304,6 +305,7 @@ def load_work_items(
             "prompt_strategy": prompt_strategy,
             "use_emo_text": use_emo_text,
             "text": row["text"],
+            "emo_text": row["emo_text"],
             "stem": stem,
             "out_wav": str(out_wav),
             "out_txt": str(out_txt),
@@ -361,7 +363,7 @@ def worker(rank: int, gpu_id: int, items: list[dict], args: argparse.Namespace,
                     emo_audio_prompt=None,
                     emo_vector=None,
                     use_emo_text=item["use_emo_text"],
-                    emo_text=item["text"] if item["use_emo_text"] else None,
+                    emo_text=item["emo_text"] if item["use_emo_text"] else None,
                     verbose=False,
                     num_beams=args.num_beams,
                     method="hmm",
