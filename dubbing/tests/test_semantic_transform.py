@@ -340,7 +340,7 @@ def test_transform_shape_and_duration():
     )
 
     # S_infer 的 T_src = src_duration * 50 = 2.0 * 50 = 100
-    B, T_src, D = 1, 100, 512
+    B, T_src, D = 1, 2 * 86, 512
     s_infer = torch.randn(B, T_src, D)
 
     warped, tgt_duration = transformer.transform(
@@ -350,7 +350,7 @@ def test_transform_shape_and_duration():
         tier_name="phones",
     )
 
-    expected_T_tgt = int(round(2.5 * 50))  # 125
+    expected_T_tgt = int(round(2.5 * 86))  # 125
     assert warped.shape == (B, expected_T_tgt, D), (
         f"期望 shape {(B, expected_T_tgt, D)}, 实际 {warped.shape}"
     )
