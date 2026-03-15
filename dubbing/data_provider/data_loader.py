@@ -593,6 +593,7 @@ class Dataset_CFM_Index_Phase1_ForLipsFeat(Dataset):
         cache_batch_size: int = 16,
         tier_name: str = "phones",
         warp_type: str = "cond",  # "semantic" or "cond" — matches SemanticTransformer.input_type
+        grid_sample_mode: str = "bilinear",  # for semantic stretch; "nearest" or "bilinear"
         max_samples: Optional[int] = None,
     ):
         super().__init__()
@@ -608,6 +609,7 @@ class Dataset_CFM_Index_Phase1_ForLipsFeat(Dataset):
         self.max_code_len = max_code_len
         self.cache_batch_size = cache_batch_size
         self.warp_type = warp_type
+        self.grid_sample_mode = grid_sample_mode
 
         self.semantic_root = self.flow_dataset_path / "semantic"
         self.predict_root = self.flow_dataset_path / "predict_results"
@@ -716,6 +718,7 @@ class Dataset_CFM_Index_Phase1_ForLipsFeat(Dataset):
             batch_size=self.cache_batch_size,
             tier_name=self.tier_name,
             warp_type=self.warp_type,
+            grid_sample_mode=self.grid_sample_mode,
         ).build(missing)
 
     def _load_csv(self) -> List[Dict]:

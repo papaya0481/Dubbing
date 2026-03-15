@@ -17,7 +17,7 @@ from pathlib import Path
 import torch
 import torchaudio
 
-project_dubbing_root = Path(__file__).resolve().parents[1]
+project_dubbing_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_dubbing_root))
 sys.path.insert(0, str(project_dubbing_root / "modules"))
 
@@ -115,8 +115,8 @@ def save_mel_phoneme_visualization(mel, phoneme_ids, transformer, image_path, ti
 
 def main():
     # ---- 配置输入 ----
-    WAV_PATH    = "/home/ruixin/Dubbing/test_output/test_semantic_warp.wav"
-    TEXT        = "What-You're not serious. I mean she's a very nice woman, but there is no way we can take eight weeks of her. She'll drive us totally crazy."
+    WAV_PATH    = "/data2/ruixin/ours/test_outputs/cfm_index_lipsfeat_vocoder/wav/test_dia12_utt19.wav"
+    TEXT        = "Good! A verbal contract is binding in the state of New York!"
     BEAM        = 20
     RETRY_BEAM  = 200
 
