@@ -70,6 +70,7 @@ def _make_args() -> SimpleNamespace:
     args.data.max_samples = 50
     args.data.warp_type = "cond"
     args.data.grid_sample_mode = "nearest"
+    args.data.cache_dir = "/data2/ruixin/datasets/flow_dataset/MELD/semantic/cfm_index_lipsfeat_cache_TEST"
     args.system.seed = getattr(args.system, "seed", 2026)
     return args
 
