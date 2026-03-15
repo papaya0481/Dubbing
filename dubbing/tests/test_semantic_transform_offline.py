@@ -56,12 +56,13 @@ logger = get_logger("test_semantic_transform_offline")
 # =============================================================================
 
 # Paths - adjust these to your actual data
-FLOW_DATASET_PATH = Path("/data2/ruixin/ours/MELD")
+FLOW_DATASET_PATH = Path("/data2/ruixin/datasets/flow_dataset/MELD")
 SEMANTIC_ROOT = FLOW_DATASET_PATH / "semantic"
 PREDICT_ROOT = FLOW_DATASET_PATH / "predict_results"
 SOURCE_TG_DIR = SEMANTIC_ROOT / "audios" / "aligned"
 LIPS_TG_DIR = PREDICT_ROOT / "textgrids"
-DATA_ROOT = SEMANTIC_ROOT
+SEMANTIC_CODES_DIR = SEMANTIC_ROOT / "semantic"
+AUDIO_DIR = SEMANTIC_ROOT / "audios" / "ost"
 
 # Model paths
 MODEL_DIR = project_root / "index-tts2" / "ckpts" / "maskgct-s2a-base"
@@ -166,15 +167,33 @@ def discover_available_samples(seed: int = 42) -> List[str]:
 
     Returns a randomly sampled list of stems.
     """
-    # Find all .pt files in the semantic audios directory
-    pt_files = list((DATA_ROOT / "audios").glob("*.pt"))
+    # Check if directories exist
+    if not SEMANTIC_CODES_DIR.exists():
+        logger.error(f"SEMANTIC_CODES_DIR does not exist: {SEMANTIC_CODES_DIR}")
+        return []
+
+    if not AUDIO_DIR.exists():
+        logger.error(f"AUDIO_DIR does not exist: {AUDIO_DIR}")
+        return []
+
+    if not SOURCE_TG_DIR.exists():
+        logger.error(f"SOURCE_TG_DIR does not exist: {SOURCE_TG_DIR}")
+        return []
+
+    if not LIPS_TG_DIR.exists():
+        logger.error(f"LIPS_TG_DIR does not exist: {LIPS_TG_DIR}")
+        return []
+
+    # Find all .pt files in the semantic codes directory
+    pt_files = list(SEMANTIC_CODES_DIR.glob("*.pt"))
+    logger.info(f"Found {len(pt_files)} .pt files in {SEMANTIC_CODES_DIR}")
 
     available_stems = []
     for pt_file in pt_files:
         stem = pt_file.stem
 
         # Check if all required files exist
-        out_wav = DATA_ROOT / "audios" / f"{stem}.wav"
+        out_wav = AUDIO_DIR / f"{stem}.wav"
 
         source_tg = None
         for ext in (".TextGrid", ".textgrid"):
@@ -194,7 +213,11 @@ def discover_available_samples(seed: int = 42) -> List[str]:
         if out_wav.exists() and source_tg is not None and lips_tg is not None:
             available_stems.append(stem)
 
-    logger.info(f"Found {len(available_stems)} available samples")
+    logger.info(f"Found {len(available_stems)} available samples with all required files")
+
+    if len(available_stems) == 0:
+        logger.warning("No samples found! Check your data paths.")
+        return []
 
     # Randomly sample
     random.seed(seed)
@@ -208,8 +231,8 @@ def discover_available_samples(seed: int = 42) -> List[str]:
 def load_sample_data(stem: str) -> dict:
     """Load all necessary data for a sample."""
     # Find files
-    out_pt = DATA_ROOT / "audios" / f"{stem}.pt"
-    out_wav = DATA_ROOT / "audios" / f"{stem}.wav"
+    out_pt = SEMANTIC_CODES_DIR / f"{stem}.pt"
+    out_wav = AUDIO_DIR / f"{stem}.wav"
 
     source_tg = None
     lips_tg = None
