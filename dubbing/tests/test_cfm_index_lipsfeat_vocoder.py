@@ -67,6 +67,7 @@ def _make_args() -> SimpleNamespace:
     args.data.tier_name = "phones"
     args.data.batch_size = 1
     args.data.num_workers = 0
+    args.data.max_samples = 50
     args.system.seed = getattr(args.system, "seed", 2026)
     return args
 

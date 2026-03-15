@@ -519,37 +519,36 @@ class CFMIndexLipsInferCacheBuilder(CFMIndexCacheBuilder):
         T_refs = [min(T_refs[i], int(prompt_conds[i].size(0))) for i in range(B)]
         T_gens = [int(infer_conds[i].size(0)) for i in range(B)]
 
-        total_lens = [r + g for r, g in zip(T_refs, T_gens)]
-        ref_max = max(T_refs)
-        gen_max = max(T_gens)
-        total_max = max(total_lens)
-
-        cond = torch.zeros(B, total_max, 512, dtype=infer_conds[0].dtype)
-        ref_mel = torch.zeros(B, 80, ref_max, dtype=ref_mels[0].dtype)
-        style = torch.zeros(B, 192, dtype=styles.dtype)
-
+        # Keep pre-processing batched, but force CFM inference to single-sample mode.
+        # This avoids cross-sample coupling inside CFM inference for variable prompt lengths.
+        vc_target_list = []
         for i in range(B):
             t_ref = T_refs[i]
             t_gen = T_gens[i]
-            cond[i, :t_ref, :] = prompt_conds[i][:t_ref]
-            cond[i, t_ref:t_ref + t_gen, :] = infer_conds[i][:t_gen]
-            ref_mel[i, :, :t_ref] = ref_mels[i][:, :t_ref]
-            style[i, :] = styles[i]
+            total_len = t_ref + t_gen
 
-        vc_target = self._cfm.inference(
-            cond.to(dev),
-            torch.LongTensor(total_lens).to(dev),
-            ref_mel.to(dev),
-            style.to(dev),
-            None,
-            self.diffusion_steps,
-            inference_cfg_rate=self.inference_cfg_rate,
-        ).cpu()
+            cond_i = torch.cat(
+                [prompt_conds[i][:t_ref], infer_conds[i][:t_gen]],
+                dim=0,
+            ).unsqueeze(0)  # (1, T_total, 512)
+            ref_mel_i = ref_mels[i][:, :t_ref].unsqueeze(0)  # (1, 80, T_ref)
+            style_i = styles[i].unsqueeze(0)  # (1, 192)
+
+            vc_target_i = self._cfm.inference(
+                cond_i.to(dev),
+                torch.LongTensor([total_len]).to(dev),
+                ref_mel_i.to(dev),
+                style_i.to(dev),
+                None,
+                self.diffusion_steps,
+                inference_cfg_rate=self.inference_cfg_rate,
+            ).cpu().squeeze(0)  # (80, T_total)
+            vc_target_list.append(vc_target_i)
 
         for i, item in enumerate(items):
             t_ref = T_refs[i]
             t_gen = T_gens[i]
-            x1_mel = vc_target[i, :, t_ref:t_ref + t_gen]
+            x1_mel = vc_target_list[i][:, t_ref:t_ref + t_gen]
             torch.save(
                 {
                     "ref_mel": ref_mels[i][:, :t_ref],

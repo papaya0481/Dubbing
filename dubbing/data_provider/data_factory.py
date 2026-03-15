@@ -72,6 +72,8 @@ def data_provider(args, flag: str):
             cache_dir=getattr(args.data, "cache_dir", None),
             cache_batch_size=getattr(args.preprocess, "cache_batch_size", 16),
             tier_name=getattr(args.data, "tier_name", "phones"),
+            warp_type="semantic",
+            max_samples=getattr(args.data, "max_samples", None),
         )
     else:
         data_set = Data(

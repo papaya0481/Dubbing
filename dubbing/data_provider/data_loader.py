@@ -593,6 +593,7 @@ class Dataset_CFM_Index_Phase1_ForLipsFeat(Dataset):
         cache_batch_size: int = 16,
         tier_name: str = "phones",
         warp_type: str = "cond",  # "semantic" or "cond" — matches SemanticTransformer.input_type
+        max_samples: Optional[int] = None,
     ):
         super().__init__()
         self.flow_dataset_path = Path(flow_dataset_path)
@@ -634,6 +635,8 @@ class Dataset_CFM_Index_Phase1_ForLipsFeat(Dataset):
 
         all_samples = self._load_csv()
         self.samples = self._split_samples(all_samples, split, split_ratio, seed)
+        if max_samples is not None and max_samples > 0:
+            self.samples = self.samples[:max_samples]
 
         if len(self.samples) == 0:
             raise RuntimeError(
