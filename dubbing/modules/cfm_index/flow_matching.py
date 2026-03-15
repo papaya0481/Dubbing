@@ -171,6 +171,7 @@ class CFM(BASECFM):
         if cfg.dit_type != "DiT":
             raise NotImplementedError(f"Unknown dit_type: {cfg.dit_type!r}")
         self.estimator = DiT(cfg.DiT)
+        self.cond_drop_rate = getattr(self.estimator, 'class_dropout_prob', 0.1)  # for CFG training
 
     def forward(
         self,
@@ -217,8 +218,7 @@ class CFM(BASECFM):
         # Similar to dubbing/modules/cfm/flow_matching.py line 145
         if self.training:
             # Get class_dropout_prob from estimator
-            cfg_rate = getattr(self.estimator, 'class_dropout_prob', 0.1)
-            cfg_mask = torch.rand(b, device=x1.device) > cfg_rate  # [B] bool
+            cfg_mask = torch.rand(b, device=x1.device) > self.cond_drop_rate  # [B] bool
         else:
             cfg_mask = torch.ones(b, device=x1.device, dtype=torch.bool)  # inference: keep all
 
