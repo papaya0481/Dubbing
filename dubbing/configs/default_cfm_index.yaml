@@ -22,7 +22,7 @@ itr: 1
 # --- Data ---
 data:
   # Path to the metadata CSV (columns: prompt_audio_path, out_pt, out_wav, gen_error)
-  csv_path: /data2/ruixin/datasets/flow_dataset/MELD_semantic/metadata.csv
+  csv_path: /data2/ruixin/datasets/flow_dataset/MELD/semantic/metadata.csv
   # Cache directory for pre-computed CFM conditions.
   # null  → <csv_dir>/cfm_index_cache  (auto)
   # str   → explicit absolute path
@@ -123,6 +123,6 @@ system:
   log_level: DEBUG          # DEBUG | INFO | WARNING | ERROR
   checkpoints: ./checkpoints
   use_gpu: true
-  gpu: 0
-  use_multi_gpu: false
-  devices: "0,1,2,3"
+  gpu: 0,1
+  use_multi_gpu: true
+  devices: "0,1"
