@@ -57,6 +57,7 @@ class CFMIndexCacheBuilder:
         max_gen_sec: float = 10.0,
         max_code_len: int = 500,
         batch_size: int = 16,
+        mel_ratio: float = 1.72265625,  # 1/50 * 22050/256, aligned with infer_v2
     ):
         self.preprocess   = preprocess
         self.mel_h        = mel_h
@@ -67,6 +68,7 @@ class CFMIndexCacheBuilder:
         self.max_gen_sec  = max_gen_sec
         self.max_code_len = max_code_len
         self.batch_size   = batch_size
+        self.mel_ratio    = mel_ratio
         self._models: Optional[Dict] = None
         self.device: Optional[torch.device] = None
 
@@ -197,6 +199,17 @@ class CFMIndexCacheBuilder:
             wav = torchaudio.functional.resample(wav, orig_sr, sr)
         return wav[: int(max_sec * sr)].float()
 
+    def _lr_ylens_from_semantic(self, semantic: torch.Tensor, dev: torch.device) -> torch.LongTensor:
+        """Build LR target length from semantic time dim via fixed mel_ratio."""
+        if semantic.dim() == 3:
+            t_sem = int(semantic.size(1))
+        elif semantic.dim() == 2:
+            t_sem = int(semantic.size(0))
+        else:
+            raise ValueError(f"Unexpected semantic shape for length regulator: {tuple(semantic.shape)}")
+        t_mel = max(1, int(t_sem * self.mel_ratio))
+        return torch.LongTensor([t_mel]).to(dev)
+
     # ------------------------------------------------------------------
     # Core: batched processing
     # ------------------------------------------------------------------
@@ -264,7 +277,7 @@ class CFMIndexCacheBuilder:
             s_ref_i = S_refs_padded[i:i+1, :T_f, :]   # [1, T_feat_i, 1024]
             pc = m["len_reg"](
                 s_ref_i,
-                ylens=torch.LongTensor([T_refs[i]]).to(dev),
+                ylens=self._lr_ylens_from_semantic(s_ref_i, dev),
                 n_quantizers=3, f0=None,
             )[0].squeeze(0).cpu()                       # [T_ref_i, 512]
             prompt_conds.append(pc)
@@ -280,7 +293,7 @@ class CFMIndexCacheBuilder:
                 s = s[: self.max_code_len]
             ic = m["len_reg"](
                 s.unsqueeze(0).to(dev),
-                ylens=torch.LongTensor([T_gens[i]]).to(dev),
+                ylens=self._lr_ylens_from_semantic(s.unsqueeze(0), dev),
                 n_quantizers=3, f0=None,
             )[0].squeeze(0).cpu()                       # [T_gen_i, 512]
             infer_conds.append(ic)
@@ -441,7 +454,7 @@ class CFMIndexLipsInferCacheBuilder(CFMIndexCacheBuilder):
             s_ref_i = S_refs_padded[i:i + 1, :T_f, :]
             prompt_cond = m["len_reg"](
                 s_ref_i,
-                ylens=torch.LongTensor([T_refs[i]]).to(dev),
+                ylens=self._lr_ylens_from_semantic(s_ref_i, dev),
                 n_quantizers=3,
                 f0=None,
             )[0].squeeze(0).cpu()
@@ -476,7 +489,7 @@ class CFMIndexLipsInferCacheBuilder(CFMIndexCacheBuilder):
                 # Run LR first to get cond, then warp in cond (mel) space
                 infer_cond_pre = m["len_reg"](
                     s_infer.to(dev),
-                    ylens=torch.LongTensor([T_gens[i]]).to(dev),
+                    ylens=self._lr_ylens_from_semantic(s_infer, dev),
                     n_quantizers=3,
                     f0=None,
                 )[0]  # (1, T_gen, 512)
@@ -497,7 +510,7 @@ class CFMIndexLipsInferCacheBuilder(CFMIndexCacheBuilder):
                 )
                 infer_cond = m["len_reg"](
                     s_warped.to(dev),
-                    ylens=torch.LongTensor([T_gens[i]]).to(dev),
+                    ylens=self._lr_ylens_from_semantic(s_warped, dev),
                     n_quantizers=3,
                     f0=None,
                 )[0].squeeze(0).cpu()
