@@ -819,6 +819,7 @@ class Dataset_CFM_Index_Phase1_ForLipsFeat(Dataset):
 
         return {
             "stem": item["stem"],
+            "out_wav": item["out_wav"],
             "ref_mel": cached["ref_mel"],
             "style": cached["style"],
             "prompt_cond": cached["prompt_cond"],

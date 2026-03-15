@@ -49,11 +49,13 @@ class SemanticTransformer:
         device: str = "cuda",
         verbose: bool = False,
         input_type: str = "cond",  # "semantic" (50 fps) or "cond" (mel fps)
+        grid_sample_mode: str = "bilinear",
     ) -> None:
         assert input_type in ("semantic", "cond"), f"Unknown input_type: {input_type!r}"
         self.device = device
         self.verbose = verbose
         self.input_type = input_type
+        self.grid_sample_mode = grid_sample_mode
 
     # ------------------------------------------------------------------
     # 工具：提取有效 interval（排除静音标记）
@@ -374,7 +376,7 @@ class SemanticTransformer:
         # 双线性插值（等价于 1-D 线性插值）；padding_mode='border' 防越界
         warped_4d = F.grid_sample(
             s_4d, grid,
-            mode="bilinear",
+            mode=self.grid_sample_mode,
             padding_mode="border",
             align_corners=True,
         )  # (B, D, 1, T_tgt)

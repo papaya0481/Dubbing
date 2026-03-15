@@ -133,6 +133,10 @@ def test_cfm_index_phase1_for_lipsfeat_vocode_50_samples() -> None:
         tg_dst = out_tg_dir / f"{stem}{lips_tg.suffix}"
         shutil.copy2(lips_tg, tg_dst)
 
+        out_wav_src = Path(item["out_wav"])
+        if out_wav_src.exists():
+            shutil.copy2(out_wav_src, out_wav_dir / f"{stem}_origin.wav")
+
         saved += 1
 
     assert saved == n_pick, f"Saved {saved} samples, expected {n_pick}"
