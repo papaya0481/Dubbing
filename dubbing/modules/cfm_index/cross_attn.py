@@ -55,6 +55,13 @@ class LipsTransformer(nn.Module):
         self.layers = nn.ModuleList(TransformerBlock(cfg) for _ in range(n_layer))
         self.norm = RMSNorm(dim, eps=norm_eps)
         self._head_dim = dim // n_head
+        
+        # --- zero linear -----------
+        self.zero_linear = nn.Linear(dim, dim)
+        
+        # zero init
+        nn.init.zeros_(self.zero_linear.weight)
+        nn.init.zeros_(self.zero_linear.bias)
 
     def forward(
         self,
@@ -120,5 +127,8 @@ class LipsTransformer(nn.Module):
                 context_freqs_cis=freqs[:T_c],
                 cross_attention_mask=cross_attn_mask,
             )
+            
+        fused = self.norm(x)
+        out = query + self.zero_linear(fused)
 
-        return query + self.norm(x)
+        return out
