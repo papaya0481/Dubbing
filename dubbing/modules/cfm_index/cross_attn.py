@@ -69,6 +69,8 @@ class LipsTransformer(nn.Module):
         context: Tensor,
         query_lens: Optional[Tensor] = None,
         context_lens: Optional[Tensor] = None,
+        conds_cfg_mask: Optional[Tensor] = None,
+        lips_cfg_mask: Optional[Tensor] = None,
     ) -> Tensor:
         """Forward pass.
 
@@ -77,12 +79,25 @@ class LipsTransformer(nn.Module):
             context:      [B, T_c, context_dim] context sequence (e.g. lips_feat)
             query_lens:   [B] valid lengths for query (None = all valid)
             context_lens: [B] valid lengths for context (None = all valid)
+            conds_cfg_mask: [B] bool tensor, True=keep query, False=zero query (for CFG)
+            lips_cfg_mask:  [B] bool tensor, True=keep context, False=zero context (for CFG)
 
         Returns:
             [B, T_q, dim] transformed query with post-norm applied.
         """
         B, T_q, _ = query.shape
         T_c = context.shape[1]
+
+        # Apply CFG masking: zero out query or context for specific samples
+        if conds_cfg_mask is not None:
+            # conds_cfg_mask: [B], True=keep, False=drop
+            # Expand to [B, T_q, dim] and zero out where mask is False
+            query = query * conds_cfg_mask[:, None, None].float()
+
+        if lips_cfg_mask is not None:
+            # lips_cfg_mask: [B], True=keep, False=drop
+            # Expand to [B, T_c, context_dim] and zero out where mask is False
+            context = context * lips_cfg_mask[:, None, None].float()
 
         freqs = precompute_freqs_cis(
             max(T_q, T_c), self._head_dim, dtype=query.dtype
