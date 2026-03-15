@@ -39,7 +39,7 @@ data:
   tier_name: phones
   # Semantic stretch parameters
   warp_type: cond       # "semantic" or "cond" — matches SemanticTransformer.input_type
-  grid_sample_mode: bilinear  # "nearest" or "bilinear" for semantic stretch
+  grid_sample_mode: nearest  # "nearest" or "bilinear" for semantic stretch
   # Optional: limit number of samples for debugging (null = use all)
   max_samples: null
 
