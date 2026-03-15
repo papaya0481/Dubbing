@@ -622,7 +622,7 @@ class Dataset_CFM_Index_Phase1_ForLipsFeat(Dataset):
         self.data_root = self.csv_path.parent
         self.cache_dir = (
             Path(cache_dir) if cache_dir
-            else self.data_root / "cfm_index_lipsfeat_cache"
+            else self.data_root / f"cfm_index_lipsfeat_cache_{self.warp_type[:4]}_{self.grid_sample_mode[:4]}"
         )
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
