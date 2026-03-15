@@ -502,7 +502,7 @@ class CFMIndexLipsInferCacheBuilder(CFMIndexCacheBuilder):
                     tier_name=self.tier_name,
                 )
                 infer_cond = infer_cond_warped.squeeze(0).cpu()
-            else:
+            elif self.warp_type == "semantic":
                 # Warp in semantic space first, then run LR
                 s_warped, _ = self.semantic_transformer.transform(
                     x=s_infer,
@@ -516,6 +516,8 @@ class CFMIndexLipsInferCacheBuilder(CFMIndexCacheBuilder):
                     n_quantizers=3,
                     f0=None,
                 )[0].squeeze(0).cpu()
+            else:
+                raise ValueError(f"Unknown warp_type: {self.warp_type!r}")
             infer_conds.append(infer_cond)
 
         # 统一按真实 cond 长度构建 batch，避免 mel 长度与 LR 输出长度存在 ±1 误差导致写入失败。
