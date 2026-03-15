@@ -121,7 +121,7 @@ training:
 system:
   seed: 2026
   log_level: DEBUG          # DEBUG | INFO | WARNING | ERROR
-  checkpoints: ./checkpoints
+  checkpoints: /data2/ruixin/Dubbing/checkpoints
   use_gpu: true
   gpu: 0,1
   use_multi_gpu: true
