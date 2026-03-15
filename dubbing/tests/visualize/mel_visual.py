@@ -115,8 +115,8 @@ def save_mel_phoneme_visualization(mel, phoneme_ids, transformer, image_path, ti
 
 def main():
     # ---- 配置输入 ----
-    WAV_PATH    = "/data2/ruixin/ours/test_outputs/cfm_index_lipsfeat_vocoder/wav/test_dia12_utt19.wav"
-    TEXT        = "Good! A verbal contract is binding in the state of New York!"
+    WAV_PATH    = "/data2/ruixin/ours/test_outputs/cfm_index_lipsfeat_vocoder_COND_NEAR/wav/dev_dia5_utt2.wav"
+    TEXT        = "I was doing great with Julie before I found out about you."
     BEAM        = 20
     RETRY_BEAM  = 200
 
