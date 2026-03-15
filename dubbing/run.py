@@ -10,11 +10,13 @@ import torch
 from config import apply_overrides, config_to_dict, load_config
 from exp.cfm.phase1_train_expand import Exp_CFM_Phase1_TrainExpand
 from exp.cfm.cfm_index_phase1_train_expand import Exp_CFM_Index_Phase1_TrainExpand
+from exp.cfm.cfm_index_phase1_lips import Exp_CFM_Index_Phase1_Lips
 from logger import get_logger, set_log_level, show_setting
 
 EXP_MAP = {
     "LipSyncCFM": Exp_CFM_Phase1_TrainExpand,
     "CFM_Index":  Exp_CFM_Index_Phase1_TrainExpand,
+    "CFM_Index_Lips": Exp_CFM_Index_Phase1_Lips,
 }
 
 logger = get_logger("dubbing.run")
