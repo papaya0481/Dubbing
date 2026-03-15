@@ -258,8 +258,9 @@ class CrossAttnCFM(CFM):
         )
 
         # Multi-conditional CFG rates (mutually exclusive)
-        self.conds_cfg_rate = 0.1   # probability of dropping infer_cond (query)
-        self.lips_cfg_rate = 0.1    # probability of dropping lips_feat (context)
+        # Read from config if available, otherwise use defaults
+        self.conds_cfg_rate = getattr(args, 'conds_cfg_rate', 0.1)  # probability of dropping infer_cond (query)
+        self.lips_cfg_rate = getattr(args, 'lips_cfg_rate', 0.1)    # probability of dropping lips_feat (context)
         self.dit_cfg_rate = getattr(self.estimator, 'class_dropout_prob', 0.1)  # joint dropout in DiT
     
     def forward(

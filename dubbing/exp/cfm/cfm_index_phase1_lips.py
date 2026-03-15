@@ -344,6 +344,8 @@ class Exp_CFM_Index_Phase1_Lips(Exp_Basic):
                 ref_mels    = batch["ref_mels"].to(dev)
                 prompt_cond = batch["prompt_cond"].to(dev)
                 infer_cond  = batch["infer_cond"].to(dev)
+                lips_feat   = batch["lips_hidden_states"].to(dev)
+                lips_lens   = batch["lips_lens"].to(dev)
                 stems       = batch["stems"]
                 B = x1.size(0)
 
@@ -352,17 +354,19 @@ class Exp_CFM_Index_Phase1_Lips(Exp_Basic):
                     T_total_i = int(x_lens[i].item())
                     ref_mel_i = ref_mels[i:i+1, :, :T_ref_i]
 
-                    # Assemble cond for inference
-                    T_g = int(infer_lens[i].item())
-                    cond_i = torch.zeros(1, T_total_i, 512, device=dev, dtype=prompt_cond.dtype)
-                    cond_i[0, :T_ref_i] = prompt_cond[i, :T_ref_i]
-                    cond_i[0, T_ref_i:T_ref_i+T_g] = infer_cond[i, :T_g]
-
                     style_i = style[i:i+1]
+                    prompt_cond_i = prompt_cond[i:i+1]
+                    infer_cond_i = infer_cond[i:i+1]
+                    lips_feat_i = lips_feat[i:i+1]
+                    lips_lens_i = lips_lens[i:i+1]
 
                     pred_full = core.inference(
-                        cond=cond_i,
+                        prompt_cond=prompt_cond_i,
+                        infer_cond=infer_cond_i,
+                        lips_feat=lips_feat_i,
                         x_lens=x_lens[i:i+1],
+                        prompt_lens=prompt_lens[i:i+1],
+                        lips_lens=lips_lens_i,
                         prompt=ref_mel_i,
                         style=style_i,
                         f0=None,

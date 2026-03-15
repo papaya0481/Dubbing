@@ -28,17 +28,17 @@ data:
   cache_dir: null
   dataset: cfm_index_phase1_for_lipsfeat
   train_split_ratio: 0.9
-  batch_size: 8
+  batch_size: 4
   num_workers: 2
   # Audio duration limits (seconds); longer samples are truncated
   max_ref_sec: 15.0     # maximum reference (prompt) audio duration
-  max_gen_sec: 10.0     # maximum target audio duration
+  max_gen_sec: 30.0     # maximum target audio duration
   # Maximum number of S_infer token steps (memory safety cap)
   max_code_len: 500
   # TextGrid tier name for phoneme alignment
   tier_name: phones
   # Semantic stretch parameters
-  warp_type: cond       # "semantic" or "cond" — matches SemanticTransformer.input_type
+  warp_type: semantic       # "semantic" or "cond" — matches SemanticTransformer.input_type
   grid_sample_mode: nearest  # "nearest" or "bilinear" for semantic stretch
   # Optional: limit number of samples for debugging (null = use all)
   max_samples: null
@@ -73,6 +73,14 @@ preprocess:
 model:
   dit_type: "DiT"
   reg_loss_type: "l1"
+
+  # Multi-conditional Classifier-Free Guidance rates (for CrossAttnCFM)
+  # These are mutually exclusive dropout probabilities during training:
+  # - conds_cfg_rate: probability of dropping infer_cond (query in LipsTransformer)
+  # - lips_cfg_rate: probability of dropping lips_feat (context in LipsTransformer)
+  # - class_dropout_prob (DiT): probability of joint dropout (all conditions in DiT)
+  conds_cfg_rate: 0.1
+  lips_cfg_rate: 0.1
 
   DiT:
     hidden_dim: 512
