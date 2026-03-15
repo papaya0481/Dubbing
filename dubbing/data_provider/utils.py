@@ -340,7 +340,8 @@ class CFMIndexLipsInferCacheBuilder(CFMIndexCacheBuilder):
         diffusion_steps: int = 10,
         inference_cfg_rate: float = 0.7,
         batch_size: int = 8,
-        warp_type: str = "cond",  # "semantic" or "cond"
+        warp_type: str = "cond",  # "semantic" or "cond",
+        grid_sample_mode: str = "bilinear",  # for semantic stretch; "nearest" or "bilinear"
     ):
         super().__init__(
             preprocess=preprocess,
@@ -356,6 +357,7 @@ class CFMIndexLipsInferCacheBuilder(CFMIndexCacheBuilder):
         self.diffusion_steps = int(diffusion_steps)
         self.inference_cfg_rate = float(inference_cfg_rate)
         self.warp_type = warp_type
+        self.grid_sample_mode = grid_sample_mode
         self._cfm = None
         self._phoneme_vocab = None
         self.semantic_transformer = None
@@ -393,7 +395,8 @@ class CFMIndexLipsInferCacheBuilder(CFMIndexCacheBuilder):
                 sys.path.insert(0, str(_proj))
             from lips.data.phoneme_vocab import PhonemeVocab
         self._phoneme_vocab = PhonemeVocab()
-        self.semantic_transformer = SemanticTransformer(device=self.device, verbose=False, input_type=self.warp_type)
+        self.semantic_transformer = SemanticTransformer(device=self.device, 
+                                                        verbose=False, input_type=self.warp_type, grid_sample_mode=self.grid_sample_mode)
 
     def _release_runtime(self):
         self._cfm = None
