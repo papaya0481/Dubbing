@@ -313,6 +313,7 @@ class DiT(nn.Module):
         style: torch.Tensor,
         cond: torch.Tensor,
         mask_content: bool = False,
+        cfg_mask: torch.Tensor = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -322,12 +323,23 @@ class DiT(nn.Module):
             t:        Timestep [B].
             style:    CAMPPlus speaker embedding [B, 192].
             cond:     GPT semantic tokens projected to content_dim [B, T, 512].
+            cfg_mask: Boolean tensor [B] indicating which samples to keep conditioning (True=keep, False=drop).
+                      If None, falls back to original class_dropout_prob behavior.
         Returns:
             Predicted velocity field [B, 80, T].
         """
-        class_dropout = (self.training and torch.rand(1).item() < self.class_dropout_prob) or mask_content
+        B = x.size(0)
 
-        B, _, T = x.size()
+        # Use cfg_mask if provided, otherwise fall back to original class_dropout behavior
+        if cfg_mask is not None:
+            # cfg_mask: [B] bool tensor, True means keep condition, False means drop
+            class_dropout_mask = ~cfg_mask  # [B], True means drop condition
+        else:
+            # Original behavior: randomly drop entire batch
+            class_dropout = (self.training and torch.rand(1).item() < self.class_dropout_prob) or mask_content
+            class_dropout_mask = torch.full((B,), class_dropout, dtype=torch.bool, device=x.device)
+
+        _, _, T = x.size()
         t1 = self.t_embedder(t)                              # [B, D]
         cond = self.cond_projection(cond)                    # [B, T, D]
 
@@ -339,15 +351,17 @@ class DiT(nn.Module):
         if self.transformer_style_condition and not self.style_as_token:
             x_in = torch.cat([x_in, style[:, None, :].expand(-1, T, -1)], dim=-1)   #[B, T, 80+80+D+style_dim]
 
-        if class_dropout:
-            x_in[..., self.in_channels:] = 0.0
+        # Apply per-sample masking: zero out conditioning for samples where class_dropout_mask is True
+        # class_dropout_mask: [B], need to broadcast to [B, T, features]
+        dropout_mask_expanded = class_dropout_mask[:, None, None]  # [B, 1, 1]
+        x_in[..., self.in_channels:] = x_in[..., self.in_channels:] * (~dropout_mask_expanded).float()
 
         x_in = self.cond_x_merge_linear(x_in)               # [B, T, D]
 
         if self.style_as_token:
             style_tok = self.style_in(style)
-            if class_dropout:
-                style_tok = torch.zeros_like(style_tok)
+            # Zero out style token for samples where class_dropout_mask is True
+            style_tok = style_tok * (~class_dropout_mask[:, None]).float()  # [B, D]
             x_in = torch.cat([style_tok.unsqueeze(1), x_in], dim=1)
 
         if self.time_as_token:

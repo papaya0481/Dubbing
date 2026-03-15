@@ -108,6 +108,7 @@ class BASECFM(nn.Module, ABC):
         """Fixed-step Euler ODE solver with classifier-free guidance."""
         t = t_span[0]
         prompt_len = prompt.size(-1)
+        B = x.size(0)
 
         # Build prompt tensor: reference occupies the first prompt_len frames.
         prompt_x = torch.zeros_like(x)
@@ -121,6 +122,12 @@ class BASECFM(nn.Module, ABC):
             dt = t_span[step] - t_span[step - 1]
             if inference_cfg_rate > 0:
                 # Batched CFG: conditional + unconditional in one forward pass.
+                # For conditional branch: cfg_mask=True (keep condition)
+                # For unconditional branch: cfg_mask=False (drop condition)
+                cfg_mask_cond = torch.ones(B, device=x.device, dtype=torch.bool)    # [B]
+                cfg_mask_uncond = torch.zeros(B, device=x.device, dtype=torch.bool)  # [B]
+                cfg_mask_combined = torch.cat([cfg_mask_cond, cfg_mask_uncond], dim=0)  # [2B]
+
                 dphi_dt = self.estimator(
                     torch.cat([x, x], dim=0),
                     torch.cat([prompt_x, torch.zeros_like(prompt_x)], dim=0),
@@ -128,11 +135,13 @@ class BASECFM(nn.Module, ABC):
                     torch.cat([t.unsqueeze(0), t.unsqueeze(0)], dim=0),
                     torch.cat([style, torch.zeros_like(style)], dim=0),
                     torch.cat([cond, torch.zeros_like(cond)], dim=0),
+                    cfg_mask=cfg_mask_combined,
                 )
                 dphi_cond, dphi_uncond = dphi_dt.chunk(2, dim=0)
                 dphi_dt = (1.0 + inference_cfg_rate) * dphi_cond - inference_cfg_rate * dphi_uncond
             else:
-                dphi_dt = self.estimator(x, prompt_x, x_lens, t.unsqueeze(0), style, cond)
+                cfg_mask = torch.ones(B, device=x.device, dtype=torch.bool)  # keep all conditions
+                dphi_dt = self.estimator(x, prompt_x, x_lens, t.unsqueeze(0), style, cond, cfg_mask=cfg_mask)
 
             x = x + dt * dphi_dt
             t = t + dt
@@ -203,9 +212,20 @@ class CFM(BASECFM):
             cond = cond.clone()
             cond = cond.masked_fill(prompt_mask.unsqueeze(2), 0.0)  # [B, T, 512]
 
+        # Generate cfg_mask: [B] bool tensor
+        # True = keep condition, False = drop condition (for CFG training)
+        # Similar to dubbing/modules/cfm/flow_matching.py line 145
+        if self.training:
+            # Get class_dropout_prob from estimator
+            cfg_rate = getattr(self.estimator, 'class_dropout_prob', 0.1)
+            cfg_mask = torch.rand(b, device=x1.device) > cfg_rate  # [B] bool
+        else:
+            cfg_mask = torch.ones(b, device=x1.device, dtype=torch.bool)  # inference: keep all
+
         estimator_out = self.estimator(
             xt, prompt, x_lens,
             t.squeeze(1).squeeze(1), style, cond,
+            cfg_mask=cfg_mask,
         )
         valid_mask_mel = valid_mask.unsqueeze(1).expand_as(estimator_out)  # [B, 80, T]
         loss = self.criterion(estimator_out[valid_mask_mel], u[valid_mask_mel])
