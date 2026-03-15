@@ -42,7 +42,8 @@ from typing import List, Optional, Tuple
 import numpy as np
 import pytest
 import torch
-import tgt
+
+tgt = pytest.importorskip("tgt")
 
 # ---- 路径 ----
 _HERE = Path(__file__).resolve().parent
@@ -111,7 +112,7 @@ def _compute_warping(
     调用 SemanticTransformer 内部方法，返回：
     (warping_path, silence_mask, src_anchors, tgt_anchors, transformer)
     """
-    st = SemanticTransformer(device="cpu", verbose=True)
+    st = SemanticTransformer(device="cpu", verbose=True, input_type="semantic")
 
     def _real(tier): return st.get_real_words(tier)
     def _dur(tier): return tier.end_time if len(tier) > 0 else 0.0

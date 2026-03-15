@@ -90,11 +90,13 @@ class BASECFM(torch.nn.Module, ABC):
                 stacked_style = torch.cat([style, torch.zeros_like(style)], dim=0)
                 stacked_mu = torch.cat([mu, torch.zeros_like(mu)], dim=0)
                 stacked_x = torch.cat([x, x], dim=0)
-                stacked_t = torch.cat([t.unsqueeze(0), t.unsqueeze(0)], dim=0)
+                stacked_x_lens = torch.cat([x_lens, x_lens], dim=0)
+                # t is scalar at each ODE step; expand to match stacked batch size (2B).
+                stacked_t = t.reshape(1).expand(stacked_x.size(0))
 
                 # Perform a single forward pass for both original and CFG inputs
                 stacked_dphi_dt = self.estimator(
-                    stacked_x, stacked_prompt_x, x_lens, stacked_t, stacked_style, stacked_mu,
+                    stacked_x, stacked_prompt_x, stacked_x_lens, stacked_t, stacked_style, stacked_mu,
                 )
 
                 # Split the output back into the original and CFG components

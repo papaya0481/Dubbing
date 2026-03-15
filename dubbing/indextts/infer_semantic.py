@@ -249,9 +249,10 @@ class IndexTTS2Semantic(IndexTTS2):
         # 4. SemanticTransformer：将 S_infer 扭曲到目标时长
         # ----------------------------------------------------------
         if use_lr_warp:
+            self.semantic_transformer.input_type = "semantic"
             # warp_via_lr 内部已调用 length_regulator，直接输出 mel 空间 condition
             cond, tgt_duration = self.semantic_transformer.transform_via_lr(
-                s_infer=S_infer,
+                x=S_infer,
                 source_textgrid=source_tg,
                 target_textgrid=target_textgrid,
                 length_regulator=self.s2mel.models["length_regulator"],
@@ -267,8 +268,9 @@ class IndexTTS2Semantic(IndexTTS2):
                 inference_cfg_rate=inference_cfg_rate,
             )
         else:
+            self.semantic_transformer.input_type = "semantic"
             S_warped, tgt_duration = self.semantic_transformer.transform(
-                s_infer=S_infer,
+                x=S_infer,
                 source_textgrid=source_tg,
                 target_textgrid=target_textgrid,
                 tier_name=tier_name,
@@ -389,12 +391,12 @@ class IndexTTS2Semantic(IndexTTS2):
         # ----------------------------------------------------------
         # 4. 对 cond 做时序扭曲
         # ----------------------------------------------------------
+        self.semantic_transformer.input_type = "cond"
         cond_warped, tgt_duration = self.semantic_transformer.transform(
-            s_infer=cond_src,
+            x=cond_src,
             source_textgrid=source_tg,
             target_textgrid=target_textgrid,
             tier_name=tier_name,
-            input_type="cond",
         )
 
         # ----------------------------------------------------------

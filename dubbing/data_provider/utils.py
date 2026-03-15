@@ -8,6 +8,7 @@ dataset / dataloader concerns only.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -300,13 +301,15 @@ class CFMIndexCacheBuilder:
 
         # ── 7. Save per-sample cache ─────────────────────────────────
         for i, item in enumerate(items):
+            t_ref = min(T_refs[i], int(prompt_conds[i].size(0)))
+            t_gen = min(T_gens[i], int(infer_conds[i].size(0)))
             torch.save(
                 {
-                    "ref_mel":     ref_mels[i],
+                    "ref_mel":     ref_mels[i][:, :t_ref],
                     "style":       styles[i],
-                    "prompt_cond": prompt_conds[i],
-                    "infer_cond":  infer_conds[i],
-                    "x1_mel":      x1_mels[i],
+                    "prompt_cond": prompt_conds[i][:t_ref],
+                    "infer_cond":  infer_conds[i][:t_gen],
+                    "x1_mel":      x1_mels[i][:, :t_gen],
                 },
                 self.cache_path(item["stem"]),
             )
@@ -375,7 +378,10 @@ class CFMIndexLipsInferCacheBuilder(CFMIndexCacheBuilder):
         )
         self._cfm = s2mel_model.models["cfm"].to(self.device).eval()
         try:
-            self._cfm.estimator.setup_caches(max_batch_size=1, max_seq_length=8192)
+            self._cfm.estimator.setup_caches(
+                max_batch_size=max(1, int(self.batch_size)),
+                max_seq_length=8192,
+            )
         except Exception:
             pass
 
@@ -403,18 +409,11 @@ class CFMIndexLipsInferCacheBuilder(CFMIndexCacheBuilder):
 
         ref_22k = [self._load_audio(it["prompt_audio_path"], self.sr_22k, self.max_ref_sec) for it in items]
         ref_16k = [self._load_audio(it["prompt_audio_path"], self.sr_ref_16k, self.max_ref_sec) for it in items]
-        x1_wavs = [self._load_audio(it["out_wav"], self.sr_22k, self.max_gen_sec) for it in items]
-
         ref_mels = [
             get_mel_spectrogram(w.unsqueeze(0).to(dev), self.mel_h).squeeze(0).cpu()
             for w in ref_22k
         ]
-        target_mels = [
-            get_mel_spectrogram(w.unsqueeze(0).to(dev), self.mel_h).squeeze(0).cpu()
-            for w in x1_wavs
-        ]
         T_refs = [rm.size(-1) for rm in ref_mels]
-        T_gens = [tm.size(-1) for tm in target_mels]
 
         fbanks = []
         for w16 in ref_16k:
@@ -516,6 +515,10 @@ class CFMIndexLipsInferCacheBuilder(CFMIndexCacheBuilder):
                 )[0].squeeze(0).cpu()
             infer_conds.append(infer_cond)
 
+        # 统一按真实 cond 长度构建 batch，避免 mel 长度与 LR 输出长度存在 ±1 误差导致写入失败。
+        T_refs = [min(T_refs[i], int(prompt_conds[i].size(0))) for i in range(B)]
+        T_gens = [int(infer_conds[i].size(0)) for i in range(B)]
+
         total_lens = [r + g for r, g in zip(T_refs, T_gens)]
         ref_max = max(T_refs)
         gen_max = max(T_gens)
@@ -528,9 +531,9 @@ class CFMIndexLipsInferCacheBuilder(CFMIndexCacheBuilder):
         for i in range(B):
             t_ref = T_refs[i]
             t_gen = T_gens[i]
-            cond[i, :t_ref, :] = prompt_conds[i]
-            cond[i, t_ref:t_ref + t_gen, :] = infer_conds[i]
-            ref_mel[i, :, :t_ref] = ref_mels[i]
+            cond[i, :t_ref, :] = prompt_conds[i][:t_ref]
+            cond[i, t_ref:t_ref + t_gen, :] = infer_conds[i][:t_gen]
+            ref_mel[i, :, :t_ref] = ref_mels[i][:, :t_ref]
             style[i, :] = styles[i]
 
         vc_target = self._cfm.inference(
@@ -549,10 +552,10 @@ class CFMIndexLipsInferCacheBuilder(CFMIndexCacheBuilder):
             x1_mel = vc_target[i, :, t_ref:t_ref + t_gen]
             torch.save(
                 {
-                    "ref_mel": ref_mels[i],
+                    "ref_mel": ref_mels[i][:, :t_ref],
                     "style": styles[i],
-                    "prompt_cond": prompt_conds[i],
-                    "infer_cond": infer_conds[i],
+                    "prompt_cond": prompt_conds[i][:t_ref],
+                    "infer_cond": infer_conds[i][:t_gen],
                     "x1_mel": x1_mel,
                     "_lips_cache_version": 4,
                     "_x1_from_stretched_infer": True,
@@ -597,6 +600,9 @@ class CFMIndexLipsInferCacheBuilder(CFMIndexCacheBuilder):
                     self._process_batch(batch_items)
                 except Exception as e:
                     logger.warning(f"[LipsCache] Batch failed ({e!r}), fallback to per-sample")
+                    if os.environ.get("DUBBING_LIPS_CACHE_DEBUG_RERAISE", "0") == "1":
+                        logger.exception("[LipsCache] Batch traceback (debug reraised)")
+                        raise
                     for item in batch_items:
                         try:
                             self._process_batch([item])

@@ -27,10 +27,11 @@ if str(project_dubbing_root) not in sys.path:
 import os
 
 import torch
-import tgt
 import numpy as np
 import pandas as pd
 import pytest
+
+tgt = pytest.importorskip("tgt")
 
 
 # ============================================================
@@ -262,7 +263,7 @@ def test_warp_shape():
     """验证 warp() 输出 shape 正确。"""
     from dubbing.modules.semantic_stretch.semantic_transform import SemanticTransformer
 
-    transformer = SemanticTransformer(device="cpu", verbose=True)
+    transformer = SemanticTransformer(device="cpu", verbose=True, input_type="semantic")
 
     B, T_src, D = 1, 80, 512
     s_input = torch.randn(B, T_src, D)
@@ -343,7 +344,7 @@ def test_transform_shape_and_duration():
     s_infer = torch.randn(B, T_src, D)
 
     warped, tgt_duration = transformer.transform(
-        s_infer=s_infer,
+        x=s_infer,
         source_textgrid=src_tg,
         target_textgrid=tgt_tg,
         tier_name="phones",
@@ -361,7 +362,7 @@ def test_transform_word_tier():
     """使用 words tier 时，transform() 应正常工作。"""
     from dubbing.modules.semantic_stretch.semantic_transform import SemanticTransformer
 
-    transformer = SemanticTransformer(device="cpu")
+    transformer = SemanticTransformer(device="cpu", input_type="semantic")
 
     src_tg = make_synthetic_textgrid(
         word_intervals=[(0.1, 0.8, "HELLO"), (0.9, 2.0, "WORLD")],
@@ -378,7 +379,7 @@ def test_transform_word_tier():
     s_infer = torch.randn(B, T_src, D)
 
     warped, tgt_duration = transformer.transform(
-        s_infer=s_infer,
+        x=s_infer,
         source_textgrid=src_tg,
         target_textgrid=tgt_tg,
         tier_name="words",
