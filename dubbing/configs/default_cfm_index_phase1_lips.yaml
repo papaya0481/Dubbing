@@ -119,15 +119,15 @@ model:
 
 # --- Training hyperparameters ---
 training:
-  epochs: 40
-  learning_rate: 1.0e-4
+  epochs: 10
+  learning_rate: 1.0e-5
   weight_decay: 1.0e-4
   max_grad_norm: 1.0
   lr_scheduler: cosine      # linear | cosine
   lr_min: 1.0e-6
   early_stop_patience: 10
   # CFM inference parameters (used during test/evaluate)
-  inference_steps: 10
+  inference_steps: 20
   inference_cfg_rate: 0.7
   # Max batches for inference+save during train/test
   train_infer_max_batches: 4

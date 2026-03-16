@@ -38,14 +38,13 @@ from matplotlib.gridspec import GridSpec
 project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "index-tts2"))
-sys.path.insert(0, str(project_root / "modules"))
+sys.path.insert(0, str(project_root / "dubbing"))
 
 from modules.mel_strech.meldataset import get_mel_spectrogram
 from modules.semantic_stretch.semantic_transform import SemanticTransformer
 from lips.data.phoneme_vocab import PhonemeVocab
 from omegaconf import OmegaConf
-from indextts.utils.maskgct_utils import build_semantic_model, build_semantic_codec
-from indextts.s2mel.modules.commons import MyModel, load_checkpoint2
+from indextts.s2mel.modules.commons import AttrDict, MyModel, load_checkpoint2
 from logger import get_logger
 
 logger = get_logger("test_semantic_transform_offline")
@@ -65,9 +64,8 @@ SEMANTIC_CODES_DIR = SEMANTIC_ROOT / "semantic"
 AUDIO_DIR = SEMANTIC_ROOT / "audios" / "ost"
 
 # Model paths
-MODEL_DIR = project_root / "index-tts2" / "ckpts" / "maskgct-s2a-base"
-W2V_STAT = "w2v-bert-2.0.stat.pt"
-S2MEL_CHECKPOINT = "s2mel_epoch_00100.pth"
+MODEL_DIR = Path("/data2/ruixin/index-tts2/checkpoints")
+S2MEL_CHECKPOINT = "s2mel.pth"
 
 # Number of random samples to test (can be overridden via environment variable)
 NUM_SAMPLES = int(os.environ.get("NUM_SAMPLES", "10"))
@@ -86,6 +84,32 @@ TEST_CONFIGS = [
 TIER_NAME = "phones"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 MEL_FPS = 22050.0 / 256.0  # 86.1328125
+
+
+def _is_cuda_blas_init_error(exc: RuntimeError) -> bool:
+    msg = str(exc)
+    return "CUBLAS_STATUS_NOT_INITIALIZED" in msg or "cublasCreate(handle)" in msg
+
+
+def _run_cfm_with_dummy_prompt(cfm, infer_cond: torch.Tensor, run_device: str, diffusion_steps: int = 10) -> torch.Tensor:
+    """Run CFM inference with a minimal dummy prompt/style for offline transform tests."""
+    t_gen = infer_cond.size(1)
+    prompt_len = max(1, min(8, t_gen))
+    prompt = torch.zeros((1, 80, prompt_len), device=run_device, dtype=infer_cond.dtype)
+    style = torch.zeros((1, 192), device=run_device, dtype=infer_cond.dtype)
+    return cfm.inference(
+        infer_cond.to(run_device),
+        torch.LongTensor([t_gen]).to(run_device),
+        prompt,
+        style,
+        None,
+        diffusion_steps,
+        inference_cfg_rate=0.7,
+    ).cpu()
+
+
+def _setup_cfm_caches(cfm, max_batch_size: int = 1, max_seq_length: int = 8192) -> None:
+    cfm.estimator.setup_caches(max_batch_size=max_batch_size, max_seq_length=max_seq_length)
 
 
 # =============================================================================
@@ -108,8 +132,7 @@ def models():
     cfg = OmegaConf.load(str(MODEL_DIR / "config.yaml"))
 
     # Load mel config
-    from modules.mel_strech.meldataset import mel_spectrogram
-    mel_h = mel_spectrogram.AttrDict({
+    mel_h = AttrDict({
         'sampling_rate': 22050,
         'n_fft': 1024,
         'num_mels': 80,
@@ -118,22 +141,6 @@ def models():
         'fmin': 0,
         'fmax': 8000,
     })
-
-    # Load w2v-bert
-    logger.info("Loading w2v-bert...")
-    sem_model, sem_mean, sem_std = build_semantic_model(str(MODEL_DIR / W2V_STAT))
-    sem_model = sem_model.to(DEVICE).eval()
-    sem_mean = sem_mean.to(DEVICE)
-    sem_std = sem_std.to(DEVICE)
-
-    # Load semantic codec
-    logger.info("Loading semantic codec...")
-    from huggingface_hub import hf_hub_download
-    import safetensors
-    codec = build_semantic_codec(cfg.semantic_codec)
-    codec_ckpt = hf_hub_download("amphion/MaskGCT", filename="semantic_codec/model.safetensors")
-    safetensors.torch.load_model(codec, codec_ckpt)
-    sem_codec = codec.to(DEVICE).eval()
 
     # Load length regulator and CFM
     logger.info("Loading s2mel model...")
@@ -144,6 +151,15 @@ def models():
     )
     len_reg = s2mel_model.models["length_regulator"].to(DEVICE).eval()
     cfm = s2mel_model.models["cfm"].to(DEVICE).eval()
+    _setup_cfm_caches(cfm, max_batch_size=1, max_seq_length=8192)
+
+    # Load BigVGAN vocoder (same path as test_cfm_index_lipsfeat_vocoder)
+    logger.info("Loading BigVGAN vocoder...")
+    from indextts.s2mel.modules.bigvgan import bigvgan
+    vocoder = bigvgan.BigVGAN.from_pretrained(cfg.vocoder.name, use_cuda_kernel=False)
+    vocoder = vocoder.to(DEVICE)
+    vocoder.remove_weight_norm()
+    vocoder.eval()
 
     # Load phoneme vocab
     vocab = PhonemeVocab()
@@ -154,6 +170,8 @@ def models():
         'mel_h': mel_h,
         'len_reg': len_reg,
         'cfm': cfm,
+        'vocoder': vocoder,
+        'vocoder_device': DEVICE,
         'vocab': vocab,
     }
 
@@ -423,15 +441,18 @@ def save_multi_mel_visualization(
     logger.info(f"Saved visualization: {image_path}")
 
 
-def mel_to_wav_placeholder(mel: torch.Tensor, output_path: Path):
-    """Placeholder for mel-to-wav conversion. Saves a silent wav file."""
-    # In a real implementation, you would use a vocoder here
-    # For now, just create a silent wav file as placeholder
-    duration_sec = mel.shape[-1] * 256 / 22050
-    samples = int(duration_sec * 22050)
-    wav = torch.zeros(1, samples)
+def mel_to_wav_bigvgan(mel: torch.Tensor, output_path: Path, vocoder, vocoder_device: str):
+    """Convert mel to waveform with BigVGAN vocoder."""
+    mel_in = mel
+    if mel_in.dim() == 2:
+        mel_in = mel_in.unsqueeze(0)
+
+    with torch.no_grad():
+        wav = vocoder(mel_in.to(vocoder_device).float()).squeeze(1)
+
+    wav = torch.clamp(32767 * wav, -32767.0, 32767.0).cpu().to(torch.int16)
     torchaudio.save(str(output_path), wav, 22050)
-    logger.info(f"Saved placeholder wav: {output_path}")
+    logger.info(f"Saved wav with BigVGAN: {output_path}")
 
 
 # =============================================================================
@@ -481,13 +502,14 @@ def test_semantic_transform_sample(sample_stem, models, setup_output_dir):
     labels = []
 
     # Test each configuration
+    run_device = DEVICE
     for warp_type, grid_sample_mode in TEST_CONFIGS:
         config_name = f"{warp_type}_{grid_sample_mode}"
         logger.info(f"Testing: {config_name}")
 
         # Create transformer
         transformer = SemanticTransformer(
-            device=DEVICE,
+            device=run_device,
             verbose=False,
             input_type=warp_type,
             grid_sample_mode=grid_sample_mode,
@@ -496,12 +518,34 @@ def test_semantic_transform_sample(sample_stem, models, setup_output_dir):
         # Transform
         if warp_type == "cond":
             # Run LR first, then warp in cond space
-            infer_cond_pre = models['len_reg'](
-                s_infer.to(DEVICE),
-                ylens=torch.LongTensor([max(1, int(s_infer.size(1) * 1.72265625))]).to(DEVICE),
-                n_quantizers=3,
-                f0=None,
-            )[0]
+            try:
+                infer_cond_pre = models['len_reg'](
+                    s_infer.to(run_device),
+                    ylens=torch.LongTensor([max(1, int(s_infer.size(1) * 1.72265625))]).to(run_device),
+                    n_quantizers=3,
+                    f0=None,
+                )[0]
+            except RuntimeError as e:
+                if run_device == "cuda" and _is_cuda_blas_init_error(e):
+                    logger.warning("CUDA CUBLAS init failed in len_reg, fallback to CPU for this sample")
+                    run_device = "cpu"
+                    models['len_reg'] = models['len_reg'].to(run_device)
+                    models['cfm'] = models['cfm'].to(run_device)
+                    _setup_cfm_caches(models['cfm'], max_batch_size=1, max_seq_length=8192)
+                    transformer = SemanticTransformer(
+                        device=run_device,
+                        verbose=False,
+                        input_type=warp_type,
+                        grid_sample_mode=grid_sample_mode,
+                    )
+                    infer_cond_pre = models['len_reg'](
+                        s_infer.to(run_device),
+                        ylens=torch.LongTensor([max(1, int(s_infer.size(1) * 1.72265625))]).to(run_device),
+                        n_quantizers=3,
+                        f0=None,
+                    )[0]
+                else:
+                    raise
             infer_cond_warped, tgt_duration = transformer.transform(
                 x=infer_cond_pre,
                 source_textgrid=src_tg,
@@ -517,24 +561,43 @@ def test_semantic_transform_sample(sample_stem, models, setup_output_dir):
                 target_textgrid=tgt_tg,
                 tier_name=TIER_NAME,
             )
-            infer_cond = models['len_reg'](
-                s_warped.to(DEVICE),
-                ylens=torch.LongTensor([max(1, int(s_warped.size(1) * 1.72265625))]).to(DEVICE),
-                n_quantizers=3,
-                f0=None,
-            )[0]
+            try:
+                infer_cond = models['len_reg'](
+                    s_warped.to(run_device),
+                    ylens=torch.LongTensor([max(1, int(s_warped.size(1) * 1.72265625))]).to(run_device),
+                    n_quantizers=3,
+                    f0=None,
+                )[0]
+            except RuntimeError as e:
+                if run_device == "cuda" and _is_cuda_blas_init_error(e):
+                    logger.warning("CUDA CUBLAS init failed in len_reg, fallback to CPU for this sample")
+                    run_device = "cpu"
+                    models['len_reg'] = models['len_reg'].to(run_device)
+                    models['cfm'] = models['cfm'].to(run_device)
+                    _setup_cfm_caches(models['cfm'], max_batch_size=1, max_seq_length=8192)
+                    transformer = SemanticTransformer(
+                        device=run_device,
+                        verbose=False,
+                        input_type=warp_type,
+                        grid_sample_mode=grid_sample_mode,
+                    )
+                    s_warped, tgt_duration = transformer.transform(
+                        x=s_infer,
+                        source_textgrid=src_tg,
+                        target_textgrid=tgt_tg,
+                        tier_name=TIER_NAME,
+                    )
+                    infer_cond = models['len_reg'](
+                        s_warped.to(run_device),
+                        ylens=torch.LongTensor([max(1, int(s_warped.size(1) * 1.72265625))]).to(run_device),
+                        n_quantizers=3,
+                        f0=None,
+                    )[0]
+                else:
+                    raise
 
-        # Generate mel with CFM (simplified - no prompt for this test)
-        t_gen = infer_cond.size(1)
-        x1_mel = models['cfm'].inference(
-            infer_cond.to(DEVICE),
-            torch.LongTensor([t_gen]).to(DEVICE),
-            None,  # No ref_mel for this test
-            None,  # No style for this test
-            None,  # No f0
-            10,    # diffusion_steps
-            inference_cfg_rate=0.7,
-        ).cpu()
+        # Generate mel with CFM using minimal dummy prompt/style tensors
+        x1_mel = _run_cfm_with_dummy_prompt(models['cfm'], infer_cond, run_device, diffusion_steps=10)
 
         # Extract frame-level phoneme IDs from target TextGrid
         phoneme_ids, phoneme_texts = textgrid_to_frame_phonemes(
@@ -546,26 +609,21 @@ def test_semantic_transform_sample(sample_stem, models, setup_output_dir):
         phoneme_texts_list.append(phoneme_texts)
         labels.append(config_name)
 
-        # Save wav (placeholder)
+        # Save wav with BigVGAN
         wav_path = setup_output_dir / f"{sample_stem}_{config_name}.wav"
-        mel_to_wav_placeholder(x1_mel, wav_path)
+        mel_to_wav_bigvgan(x1_mel, wav_path, models['vocoder'], models['vocoder_device'])
 
         logger.info(f"  Generated mel shape: {x1_mel.shape}")
 
     # Add original
     logger.info("Processing original (no transform)")
     infer_cond_orig = models['len_reg'](
-        s_infer.to(DEVICE),
-        ylens=torch.LongTensor([max(1, int(s_infer.size(1) * 1.72265625))]).to(DEVICE),
+        s_infer.to(run_device),
+        ylens=torch.LongTensor([max(1, int(s_infer.size(1) * 1.72265625))]).to(run_device),
         n_quantizers=3,
         f0=None,
     )[0]
-    t_gen_orig = infer_cond_orig.size(1)
-    x1_mel_orig = models['cfm'].inference(
-        infer_cond_orig.to(DEVICE),
-        torch.LongTensor([t_gen_orig]).to(DEVICE),
-        None, None, None, 10, inference_cfg_rate=0.7,
-    ).cpu()
+    x1_mel_orig = _run_cfm_with_dummy_prompt(models['cfm'], infer_cond_orig, run_device, diffusion_steps=10)
 
     # Extract frame-level phoneme IDs from source TextGrid
     phoneme_ids_orig, phoneme_texts_orig = textgrid_to_frame_phonemes(
@@ -579,7 +637,7 @@ def test_semantic_transform_sample(sample_stem, models, setup_output_dir):
 
     # Save original wav
     wav_path_orig = setup_output_dir / f"{sample_stem}_original.wav"
-    mel_to_wav_placeholder(x1_mel_orig, wav_path_orig)
+    mel_to_wav_bigvgan(x1_mel_orig, wav_path_orig, models['vocoder'], models['vocoder_device'])
 
     # Save visualization
     vis_path = setup_output_dir / f"{sample_stem}_comparison.png"
