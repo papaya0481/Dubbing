@@ -289,6 +289,15 @@ class Dataset_CFM_Phase1(Dataset):
 
         text_r1 = self._extract_text(sample.r1_tg, "words")
 
+        # 每个样本字段含义：
+        # pair_key: 配对样本唯一标识（同一语句的 r1/r2）
+        # cond_mel: 条件 mel（由 r1 拉伸到 r2 时序后并按 r1 统计量归一化）[n_mels, T]
+        # x1: 训练目标 mel（r2 mel，使用 cond_mel 的均值/方差归一化）[n_mels, T]
+        # phoneme_ids: 与时间帧对齐的音素 id 序列 [T]
+        # x_len: 有效帧长 T（long）
+        # x_mean/x_std: 归一化统计量（推理反归一化会用到）
+        # mse: cond_mel 与 x1 的逐帧均方误差（样本质量参考）
+        # text_r1: r1 的 words 层文本（可用于日志/可视化）
         return {
             "pair_key": sample.pair_key,
             "cond_mel": cond_mel,
@@ -350,6 +359,8 @@ class Dataset_CFM_Phase1_StretchEntireMel(Dataset_CFM_Phase1):
 
         text_r1 = self._extract_text(sample.r1_tg, "words")
 
+        # 每个样本字段含义与 Dataset_CFM_Phase1 保持一致；
+        # 区别仅在 cond_mel 的构造方式：这里是对 r1_mel 做整段双三次插值到目标长度。
         return {
             "pair_key": sample.pair_key,
             "cond_mel": cond_mel,
@@ -543,6 +554,13 @@ class Dataset_CFM_Index_Phase1(Dataset):
             map_location="cpu",
             weights_only=True,
         )
+        # 缓存样本字段含义：
+        # ref_mel: 参考音频 mel [num_mels, T_ref]
+        # style: 说话人/风格向量 [192]
+        # prompt_cond: 参考端语义条件 [T_ref, 512]
+        # infer_cond: 目标端语义条件 [T_gen, 512]
+        # x1_mel: 目标音频 mel（训练目标）[num_mels, T_gen]
+        # stem: 样本唯一 stem（由当前 metadata 行补充）
         data["stem"] = item["stem"]
         return data
 
@@ -820,6 +838,11 @@ class Dataset_CFM_Index_Phase1_ForLipsFeat(Dataset):
             lips_hs = lips_hs.squeeze(0)
         lips_hs = lips_hs.float().cpu()
 
+        # 每个样本字段含义：
+        # stem/out_wav: 样本标识与目标 wav 路径（调试/导出用）
+        # ref_mel/style/prompt_cond/infer_cond/x1_mel: 与 Index Phase1 一致的缓存条件与目标
+        # lips_hidden_states: 嘴型模型特征（通常为 [T_lips, C]）
+        # lips_textgrid/source_textgrid: lips 与 source 对齐文件路径（便于复核时序映射）
         return {
             "stem": item["stem"],
             "out_wav": item["out_wav"],
