@@ -350,26 +350,36 @@ class SemanticTransformer:
     def warp(
         self,
         x: torch.Tensor,              # (B, T_src, D)
-        warping_path: torch.Tensor,   # (T_tgt,) — 目标帧 → 源帧索引（float）
-        silence_mask: Optional[torch.Tensor] = None,  # (T_tgt,) bool
+        warping_path: torch.Tensor,   # (T_tgt,) or (B, T_tgt) — 目标帧 → 源帧索引（float）
+        silence_mask: Optional[torch.Tensor] = None,  # (T_tgt,) or (B, T_tgt) bool
     ) -> torch.Tensor:                # (B, T_tgt, D)
         """用 F.grid_sample 沿时序轴向量化扭曲输入。
 
         将 x 从 ``(B, T_src, D)`` 插值到 ``(B, T_tgt, D)``。
         全程无 Python-level for 循环，由 CUDA kernel 完成采样。
+
+        支持批量推理：warping_path 和 silence_mask 可以是 (B, T_tgt) 形状，
+        为每个样本使用不同的 warping path。
         """
         B, T_src, D = x.shape
-        T_tgt = warping_path.shape[0]
+
+        # 处理 warping_path 的形状
+        if warping_path.dim() == 1:
+            # 单个 path，广播到所有 batch
+            T_tgt = warping_path.shape[0]
+            warping_path = warping_path.unsqueeze(0).expand(B, T_tgt)  # (B, T_tgt)
+        else:
+            # 批量 paths
+            T_tgt = warping_path.shape[1]
 
         # 变形为 (B, D, 1, T_src)：把 D 当"通道"，T 当"宽度"，高度=1
-        # grid_sample 的 (x, y) 对应 (W, H)，x 控制 T 维度
         s_4d = x.permute(0, 2, 1).unsqueeze(2)  # (B, D, 1, T_src)
 
-        # 归一化坐标到 [-1, 1]
-        norm_x = 2.0 * warping_path.clamp(0, T_src - 1) / max(T_src - 1, 1) - 1.0  # (T_tgt,)
+        # 归一化坐标到 [-1, 1]，支持批量
+        norm_x = 2.0 * warping_path.clamp(0, T_src - 1) / max(T_src - 1, 1) - 1.0  # (B, T_tgt)
 
         # 构建采样 grid: (B, 1, T_tgt, 2)  [x, y] — y 固定为 0
-        grid_x = norm_x.view(1, 1, T_tgt, 1).expand(B, 1, T_tgt, 1)
+        grid_x = norm_x.unsqueeze(1).unsqueeze(-1)  # (B, 1, T_tgt, 1)
         grid_y = torch.zeros_like(grid_x)
         grid = torch.cat([grid_x, grid_y], dim=-1)  # (B, 1, T_tgt, 2)
 
@@ -383,9 +393,16 @@ class SemanticTransformer:
 
         warped = warped_4d.squeeze(2).permute(0, 2, 1)  # (B, T_tgt, D)
 
-        # 插入静音段：将无源内容的帧置零
+        # 插入静音段：将无源内容的帧置零（完全向量化）
         if silence_mask is not None and silence_mask.any():
-            warped[:, silence_mask.to(warped.device), :] = 0.0
+            silence_mask = silence_mask.to(warped.device)
+            if silence_mask.dim() == 1:
+                # 单个 mask，广播到所有 batch
+                warped[:, silence_mask, :] = 0.0
+            else:
+                # 批量 masks，向量化应用：(B, T_tgt, 1) * (B, T_tgt, D)
+                mask_expanded = silence_mask.unsqueeze(-1)  # (B, T_tgt, 1)
+                warped = warped.masked_fill(mask_expanded, 0.0)
 
         return warped
 
@@ -396,35 +413,68 @@ class SemanticTransformer:
 
     def transform(
         self,
-        x: torch.Tensor,                                   # (B, T_src, D)
-        source_textgrid: Union[str, Path, tgt.TextGrid],   # MFA on TTS output wav
-        target_textgrid: Union[str, Path, tgt.TextGrid],   # user-provided
+        x: torch.Tensor,                                                    # (B, T_src, D)
+        source_textgrid: Union[str, Path, tgt.TextGrid, List[Union[str, Path, tgt.TextGrid]]],
+        target_textgrid: Union[str, Path, tgt.TextGrid, List[Union[str, Path, tgt.TextGrid]]],
         tier_name: str = "phones",
-    ) -> Tuple[torch.Tensor, float]:
+    ) -> Tuple[torch.Tensor, Union[float, List[float]]]:
         """根据 TextGrid 对齐将 S_infer 从源时序扭曲到目标时序。
+
+        支持批量推理：source_textgrid 和 target_textgrid 可以是列表，
+        长度必须等于 batch size B。
 
         Args:
             x: 形状 ``(B, T_src, D)`` 的输入 latent（语义码或 cond）。
             source_textgrid: 源 TextGrid（TTS 输出 wav 的 MFA 对齐结果）。
+                可以是单个 TextGrid（兼容旧版）或 TextGrid 列表（批量推理）。
             target_textgrid: 目标 TextGrid（用户提供）。
+                可以是单个 TextGrid（兼容旧版）或 TextGrid 列表（批量推理）。
             tier_name: 对齐使用的 tier（``"phones"`` 或 ``"words"``）。
 
         Returns:
             ``(warped, tgt_duration)``
 
             - ``warped``: shape ``(B, T_tgt, D)``，时序对齐到目标时长。
-            - ``tgt_duration``: 目标时长（秒），用于后续计算目标 mel 帧数。
+            - ``tgt_duration``: 目标时长（秒）。单个值（兼容旧版）或列表（批量推理）。
         """
         if self.input_type == "cond":
             assert x.size(-1) == 512, f"Expected cond dimension 512, got {x.size(-1)}"
+
+        B = x.shape[0]
+
+        # 检测是否为批量推理模式
+        is_batch_mode = isinstance(source_textgrid, list) or isinstance(target_textgrid, list)
+
+        if is_batch_mode:
+            # 批量推理模式
+            if not isinstance(source_textgrid, list):
+                source_textgrid = [source_textgrid] * B
+            if not isinstance(target_textgrid, list):
+                target_textgrid = [target_textgrid] * B
+
+            assert len(source_textgrid) == B, f"source_textgrid list length {len(source_textgrid)} != batch size {B}"
+            assert len(target_textgrid) == B, f"target_textgrid list length {len(target_textgrid)} != batch size {B}"
+
+            return self._transform_batch(x, source_textgrid, target_textgrid, tier_name)
+        else:
+            # 兼容旧版：单个 TextGrid
+            return self._transform_single(x, source_textgrid, target_textgrid, tier_name)
+
+    def _process_single_textgrid_pair(
+        self,
+        source_tg: Union[str, Path, tgt.TextGrid],
+        target_tg: Union[str, Path, tgt.TextGrid],
+        tier_name: str,
+    ) -> Tuple[List[float], List[float], int, float]:
+        """处理单个 TextGrid 对，返回 anchors 和目标帧数。"""
         def _as_tg(x: Union[str, Path, tgt.TextGrid]) -> tgt.TextGrid:
             return x if isinstance(x, tgt.TextGrid) else tgt.io.read_textgrid(str(x))
 
         def _duration(tier: tgt.IntervalTier) -> float:
             return tier.end_time if len(tier) > 0 else 0.0
 
-        tg_src = _as_tg(source_textgrid)
-        tg_tgt = _as_tg(target_textgrid)
+        tg_src = _as_tg(source_tg)
+        tg_tgt = _as_tg(target_tg)
 
         tier_src = tg_src.get_tier_by_name(tier_name)
         tier_tgt = tg_tgt.get_tier_by_name(tier_name)
@@ -451,9 +501,23 @@ class SemanticTransformer:
 
         total_tgt_frames = max(1, int(round(self._sec_to_frame(tgt_duration))))
 
+        return src_anchors, tgt_anchors, total_tgt_frames, tgt_duration
+
+    def _transform_single(
+        self,
+        x: torch.Tensor,
+        source_textgrid: Union[str, Path, tgt.TextGrid],
+        target_textgrid: Union[str, Path, tgt.TextGrid],
+        tier_name: str,
+    ) -> Tuple[torch.Tensor, float]:
+        """单样本转换（兼容旧版 API）。"""
+        src_anchors, tgt_anchors, total_tgt_frames, tgt_duration = self._process_single_textgrid_pair(
+            source_textgrid, target_textgrid, tier_name
+        )
+
         if self.verbose:
             print(
-                f"[SemanticTransformer] src_dur={src_duration:.3f}s → tgt_dur={tgt_duration:.3f}s, "
+                f"[SemanticTransformer] src_dur → tgt_dur={tgt_duration:.3f}s, "
                 f"src_frames={x.shape[1]}, tgt_frames={total_tgt_frames}"
             )
 
@@ -462,4 +526,69 @@ class SemanticTransformer:
         warped = self.warp(x.to(self.device), warping_path, silence_mask)
 
         return warped, tgt_duration
+
+    def _transform_batch(
+        self,
+        x: torch.Tensor,
+        source_textgrids: List[Union[str, Path, tgt.TextGrid]],
+        target_textgrids: List[Union[str, Path, tgt.TextGrid]],
+        tier_name: str,
+    ) -> Tuple[torch.Tensor, List[float]]:
+        """批量样本转换（新 API），无 Python for 循环处理 tensor。"""
+        B = x.shape[0]
+
+        # 并行处理所有 TextGrid 对（这部分无法避免，因为涉及文件 I/O 和复杂逻辑）
+        batch_data = [
+            self._process_single_textgrid_pair(source_textgrids[b], target_textgrids[b], tier_name)
+            for b in range(B)
+        ]
+
+        # 解包结果
+        src_anchors_list = [d[0] for d in batch_data]
+        tgt_anchors_list = [d[1] for d in batch_data]
+        tgt_frames_list = [d[2] for d in batch_data]
+        tgt_durations = [d[3] for d in batch_data]
+
+        max_tgt_frames = max(tgt_frames_list)
+
+        # 批量计算 warping paths（向量化）
+        warping_paths = [
+            self.calculate_warping_path(src_anchors_list[b], tgt_anchors_list[b], tgt_frames_list[b])
+            for b in range(B)
+        ]
+
+        # 批量计算 silence masks（向量化）
+        silence_masks = [
+            self._detect_silence_mask(src_anchors_list[b], tgt_anchors_list[b], tgt_frames_list[b])
+            for b in range(B)
+        ]
+
+        # Pad 到相同长度并 stack（向量化操作）
+        warping_paths_padded = [
+            F.pad(wp, (0, max_tgt_frames - wp.shape[0]), mode='constant', value=wp[-1].item())
+            if wp.shape[0] < max_tgt_frames else wp
+            for wp in warping_paths
+        ]
+
+        silence_masks_padded = [
+            F.pad(sm.float(), (0, max_tgt_frames - sm.shape[0]), mode='constant', value=1.0).bool()
+            if sm.shape[0] < max_tgt_frames else sm
+            for sm in silence_masks
+        ]
+
+        # Stack into batch tensors（向量化）
+        warping_path_batch = torch.stack(warping_paths_padded, dim=0)  # (B, max_tgt_frames)
+        silence_mask_batch = torch.stack(silence_masks_padded, dim=0)  # (B, max_tgt_frames)
+
+        if self.verbose:
+            for b in range(B):
+                print(
+                    f"[SemanticTransformer] batch {b}: tgt_dur={tgt_durations[b]:.3f}s, "
+                    f"src_frames={x.shape[1]}, tgt_frames={tgt_frames_list[b]}"
+                )
+
+        # 批量 warp（完全向量化，无 for 循环）
+        warped = self.warp(x.to(self.device), warping_path_batch, silence_mask_batch)
+
+        return warped, tgt_durations
 

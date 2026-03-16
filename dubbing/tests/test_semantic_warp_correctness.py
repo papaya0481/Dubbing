@@ -55,7 +55,7 @@ if str(_LIPS_ROOT) not in sys.path:
     sys.path.insert(0, str(_LIPS_ROOT))
 
 from modules.semantic_stretch.semantic_transform import SemanticTransformer
-from data.phoneme_vocab import PhonemeVocab as _PhonemeVocab
+from modules.lips.data.phoneme_vocab import PhonemeVocab as _PhonemeVocab
 _phoneme_vocab = _PhonemeVocab()
 
 # ---- 全局常量 ----
@@ -1077,6 +1077,156 @@ def test_real_data_vfa_lips_alignment():
 
 
 # =============================================================================
+# Case 8：批量推理测试
+# =============================================================================
+
+def test_batch_inference():
+    """
+    测试 SemanticTransformer 的批量推理功能。
+
+    验证：
+    1. 批量推理与单样本推理结果一致
+    2. 支持不同长度的目标 TextGrid（自动 padding）
+    3. 向量化操作无 Python for 循环处理 tensor
+    """
+    # 构造两个不同的样本
+    # Sample 1: Case 1 数据（words 不等）
+    src1_words = [
+        (0.0, 0.05, ""),
+        (0.05, 0.35, "what"),
+        (0.35, 0.38, ""),
+        (0.38, 0.68, "are"),
+        (0.68, 0.70, ""),
+        (0.70, 1.00, "you"),
+        (1.00, 1.05, ""),
+        (1.05, 1.50, "doing"),
+        (1.50, 1.60, ""),
+    ]
+    src1_phones = [
+        (0.00, 0.05, ""),
+        (0.05, 0.15, "W"),  (0.15, 0.25, "AH1"), (0.25, 0.35, "T"),
+        (0.35, 0.38, ""),
+        (0.38, 0.50, "EH1"), (0.50, 0.68, "R"),
+        (0.68, 0.70, ""),
+        (0.70, 0.82, "Y"),  (0.82, 1.00, "UW1"),
+        (1.00, 1.05, ""),
+        (1.05, 1.20, "D"),  (1.20, 1.35, "UW1"), (1.35, 1.48, "IH0"), (1.48, 1.50, "NG"),
+        (1.50, 1.60, ""),
+    ]
+    tgt1_words = [
+        (0.0, 0.08, ""),
+        (0.08, 0.48, "are"),
+        (0.48, 0.52, ""),
+        (0.52, 0.88, "you"),
+        (0.88, 0.92, ""),
+        (0.92, 1.40, "doing"),
+        (1.40, 1.50, ""),
+    ]
+    tgt1_phones = [
+        (0.00, 0.08, ""),
+        (0.08, 0.24, "EH1"), (0.24, 0.48, "R"),
+        (0.48, 0.52, ""),
+        (0.52, 0.68, "Y"), (0.68, 0.88, "UW1"),
+        (0.88, 0.92, ""),
+        (0.92, 1.10, "D"), (1.10, 1.25, "UW1"),
+        (1.25, 1.36, "IH0"), (1.36, 1.40, "NG"),
+        (1.40, 1.50, ""),
+    ]
+
+    # Sample 2: Case 3B 数据（静音不对称）
+    src2_words = [
+        (0.00, 0.08, ""),
+        (0.08, 0.38, "ok"),
+        (0.38, 0.82, "done"),
+        (0.82, 0.90, ""),
+    ]
+    src2_phones = [
+        (0.00, 0.08, ""),
+        (0.08, 0.20, "AH0"), (0.20, 0.38, "K"),
+        (0.38, 0.50, "D"), (0.50, 0.66, "AH1"), (0.66, 0.82, "N"),
+        (0.82, 0.90, ""),
+    ]
+    tgt2_words = [
+        (0.00, 0.06, ""),
+        (0.06, 0.36, "ok"),
+        (0.36, 0.76, ""),
+        (0.76, 1.20, "done"),
+        (1.20, 1.28, ""),
+    ]
+    tgt2_phones = [
+        (0.00, 0.06, ""),
+        (0.06, 0.18, "AH0"), (0.18, 0.36, "K"),
+        (0.36, 0.76, ""),
+        (0.76, 0.92, "D"), (0.92, 1.06, "AH1"), (1.06, 1.20, "N"),
+        (1.20, 1.28, ""),
+    ]
+
+    tg_src1 = build_mock_textgrid(1.60, src1_words, src1_phones)
+    tg_tgt1 = build_mock_textgrid(1.50, tgt1_words, tgt1_phones)
+    tg_src2 = build_mock_textgrid(0.90, src2_words, src2_phones)
+    tg_tgt2 = build_mock_textgrid(1.28, tgt2_words, tgt2_phones)
+
+    # 创建 transformer
+    st = SemanticTransformer(device="cpu", verbose=True, input_type="semantic")
+
+    # 创建批量输入（B=2, T=80, D=1024）
+    B, T_src, D = 2, 80, 1024
+    x_batch = torch.randn(B, T_src, D)
+
+    # 单样本推理（作为参考）
+    x1 = x_batch[0:1]  # (1, T_src, D)
+    x2 = x_batch[1:2]  # (1, T_src, D)
+
+    warped1_single, dur1 = st.transform(x1, tg_src1, tg_tgt1, tier_name="phones")
+    warped2_single, dur2 = st.transform(x2, tg_src2, tg_tgt2, tier_name="phones")
+
+    # 批量推理
+    warped_batch, durs_batch = st.transform(
+        x_batch,
+        [tg_src1, tg_src2],
+        [tg_tgt1, tg_tgt2],
+        tier_name="phones"
+    )
+
+    # 验证批量推理结果
+    assert isinstance(durs_batch, list), "批量推理应返回 duration 列表"
+    assert len(durs_batch) == B, f"duration 列表长度应为 {B}，得到 {len(durs_batch)}"
+    assert abs(durs_batch[0] - dur1) < 1e-6, "批量推理 sample 0 duration 不匹配"
+    assert abs(durs_batch[1] - dur2) < 1e-6, "批量推理 sample 1 duration 不匹配"
+
+    # 验证 warped 形状
+    assert warped_batch.shape[0] == B, f"批量输出 batch size 应为 {B}"
+    assert warped_batch.shape[2] == D, f"批量输出 feature dim 应为 {D}"
+
+    # 验证批量推理与单样本推理结果一致（在有效帧范围内）
+    T_tgt1 = warped1_single.shape[1]
+    T_tgt2 = warped2_single.shape[1]
+
+    # Sample 1 对比（前 T_tgt1 帧）
+    diff1 = torch.abs(warped_batch[0, :T_tgt1, :] - warped1_single[0, :, :]).max().item()
+    assert diff1 < 1e-5, f"批量推理 sample 0 与单样本推理差异过大: {diff1}"
+
+    # Sample 2 对比（前 T_tgt2 帧）
+    diff2 = torch.abs(warped_batch[1, :T_tgt2, :] - warped2_single[0, :, :]).max().item()
+    assert diff2 < 1e-5, f"批量推理 sample 1 与单样本推理差异过大: {diff2}"
+
+    # 验证 padding 部分（超出有效长度的帧应为静音，即全零）
+    max_T_tgt = warped_batch.shape[1]
+    if T_tgt1 < max_T_tgt:
+        padding1 = warped_batch[0, T_tgt1:, :]
+        assert torch.allclose(padding1, torch.zeros_like(padding1)), \
+            "Sample 0 padding 区域应全为零（静音）"
+
+    if T_tgt2 < max_T_tgt:
+        padding2 = warped_batch[1, T_tgt2:, :]
+        assert torch.allclose(padding2, torch.zeros_like(padding2)), \
+            "Sample 1 padding 区域应全为零（静音）"
+
+    print(f"  批量推理测试通过：B={B}, T_tgt1={T_tgt1}, T_tgt2={T_tgt2}, max_T_tgt={max_T_tgt}")
+    print(f"  Sample 0 最大差异: {diff1:.2e}, Sample 1 最大差异: {diff2:.2e}")
+
+
+# =============================================================================
 # 入口
 # =============================================================================
 
@@ -1113,6 +1263,10 @@ if __name__ == "__main__":
 
     print("Case 7: VFA 音素域 — silence_mask 触发")
     test_case7_vfa_silence_mask()
+    print("  PASSED")
+
+    print("Case 8: 批量推理测试")
+    test_batch_inference()
     print("  PASSED")
 
     if REAL_DATA_AVAILABLE:
