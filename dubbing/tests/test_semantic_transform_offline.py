@@ -92,12 +92,16 @@ def _is_cuda_blas_init_error(exc: RuntimeError) -> bool:
 
 
 def _run_cfm_with_dummy_prompt(cfm, infer_cond: torch.Tensor, run_device: str, diffusion_steps: int = 10) -> torch.Tensor:
-    """Run CFM inference with a minimal dummy prompt/style for offline transform tests."""
+    """Run CFM inference with a minimal dummy prompt/style for offline transform tests.
+
+    Note: The prompt region is zeroed out during CFM generation, which can cause artifacts
+    at the boundary. We trim the first prompt_len frames from the output to avoid this.
+    """
     t_gen = infer_cond.size(1)
     prompt_len = max(1, min(8, t_gen))
     prompt = torch.zeros((1, 80, prompt_len), device=run_device, dtype=infer_cond.dtype)
     style = torch.zeros((1, 192), device=run_device, dtype=infer_cond.dtype)
-    return cfm.inference(
+    mel_output = cfm.inference(
         infer_cond.to(run_device),
         torch.LongTensor([t_gen]).to(run_device),
         prompt,
@@ -106,6 +110,12 @@ def _run_cfm_with_dummy_prompt(cfm, infer_cond: torch.Tensor, run_device: str, d
         diffusion_steps,
         inference_cfg_rate=0.7,
     ).cpu()
+
+    # Trim the first prompt_len frames to remove artifacts from zero-prompt boundary
+    if mel_output.size(-1) > prompt_len:
+        mel_output = mel_output[..., prompt_len:]
+
+    return mel_output
 
 
 def _setup_cfm_caches(cfm, max_batch_size: int = 1, max_seq_length: int = 8192) -> None:

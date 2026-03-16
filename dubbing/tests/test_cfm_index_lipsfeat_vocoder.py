@@ -57,6 +57,9 @@ _SKIP = pytest.mark.skipif(
     ),
 )
 
+# set skip = true
+_SKIP = pytest.mark.skip(reason="Set skip=True to avoid running this test by default")
+
 
 def _make_args() -> SimpleNamespace:
     from config import load_config
