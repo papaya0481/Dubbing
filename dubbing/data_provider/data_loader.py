@@ -10,6 +10,8 @@ from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 
 from tqdm.auto import tqdm
+import warnings
+import functools
 
 import pandas as pd
 import tgt
@@ -56,7 +58,30 @@ def _pair_key_and_role(stem: str) -> Tuple[Optional[str], Optional[str]]:
         return None, None
     return m.group(1), f"r{m.group(2)}"
 
+def deprecated(reason=None):
+    def decorator(cls):
+        original_init = cls.__init__
 
+        @functools.wraps(original_init)
+        def new_init(self, *args, **kwargs):
+            message = f"Class {cls.__name__} is deprecated."
+            if reason:
+                message += f" Reason: {reason}"
+
+            warnings.warn(
+                message,
+                category=DeprecationWarning,
+                stacklevel=2
+            )
+            original_init(self, *args, **kwargs)
+
+        cls.__init__ = new_init
+        return cls
+
+    return decorator
+
+
+@deprecated(reason="This dataset is for early experiments.")
 class Dataset_CFM_Phase1(Dataset):
     def __init__(
         self,
@@ -309,7 +334,8 @@ class Dataset_CFM_Phase1(Dataset):
             "mse": mse,
             "text_r1": text_r1,
         }
-        
+
+@deprecated(reason="This dataset is for early experiments.")
 class Dataset_CFM_Phase1_StretchEntireMel(Dataset_CFM_Phase1):
     """Variant that stretches source mel to target length via bicubic interpolation
     instead of TextGrid-guided warping. Phoneme IDs are read directly from the
@@ -418,7 +444,7 @@ class Dataset_CFM_Index_Phase1(Dataset):
         split_ratio: float = 0.9,
         seed: int = 2026,
         max_ref_sec: float = 15.0,
-        max_gen_sec: float = 10.0,
+        max_gen_sec: float = 20.0,
         max_code_len: int = 500,
         cache_dir: Optional[str] = None,
         cache_batch_size: int = 16,
@@ -605,7 +631,7 @@ class Dataset_CFM_Index_Phase1_ForLipsFeat(Dataset):
         split_ratio: float = 0.9,
         seed: int = 2026,
         max_ref_sec: float = 15.0,
-        max_gen_sec: float = 10.0,
+        max_gen_sec: float = 20.0,
         max_code_len: int = 500,
         cache_dir: Optional[str] = None,
         cache_batch_size: int = 16,
@@ -929,6 +955,7 @@ class Dataset_LipsCFM_Phase2(Dataset):
         ```
         A csv file in `lips/` should contain columns:
         - `sample_id`
+        TODO: NEED TO SPECIFY WHAT OTHER COLUMNS ARE NEEDED IN THE CSV FOR LIPS DATA
     
     
     """
@@ -942,7 +969,7 @@ class Dataset_LipsCFM_Phase2(Dataset):
         split_ratio: float = 0.9,
         seed: int = 2026,
         max_ref_sec: float = 15.0,
-        max_gen_sec: float = 10.0,
+        max_gen_sec: float = 20.0,
         max_code_len: int = 500,
         cache_dir: Optional[str] = None,
         cache_batch_size: int = 16,
