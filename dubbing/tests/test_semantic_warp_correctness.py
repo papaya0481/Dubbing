@@ -43,7 +43,7 @@ import numpy as np
 import pytest
 import torch
 
-tgt = pytest.importorskip("tgt")
+import tgt
 
 # ---- 路径 ----
 _HERE = Path(__file__).resolve().parent
