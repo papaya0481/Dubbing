@@ -855,3 +855,99 @@ class Dataset_CFM_Index_Phase1_ForLipsFeat(Dataset):
             "lips_textgrid": item["lips_textgrid"],
             "source_textgrid": item["source_textgrid"],
         }
+        
+
+# =============================================================================
+# Dataset_LipsCFM_Phase2
+# =============================================================================
+"""Dataset_LipsCFM_Phase2 docstring
+
+每一项：
+- `stem`: 样本唯一标识（通常来自 wav/pt 文件名）
+- `bf_stretched_mel`: 由 原始semantic token直接输出得来的wav，作为调试使用
+
+Flow Part:
+- `ref_mel`: 参考音频的 mel（通常是 22kHz）[num_mels, T_ref]
+- `style`: 说话人/风格向量 [192]
+- `prompt_cond`: 参考端语义条件 [T_ref, 512]
+- `infer_cond`: 目标端语义条件 [T_gen, 512]. 
+    这里的 infer_cond 应该是没有拉伸的，即直接从原始semantic token生成的条件
+    ，后续会在模型里做动态拉伸。
+- `x1_mel`: 目标音频的 mel（训练目标）[num_mels, T_gen]. 
+    这里需要直接使用 raw dataset 中的原始音频
+- `source_textgrid`: 原始对齐文件路径（便于复核时序映射）
+
+Lips Net Part: 
+    需要的信息有:
+    - lips_roi
+    - extracted_sampels
+- `img_sequences`: 嘴型图像序列(通常为 [T_img, C, H, W])
+- `frame_phoneme_label`: 每帧的phoneme id 标签 (字符串 )
+- `frame_phoneme_label_id`: 每帧的phoneme id 标签（数值 id)
+- `phoneme_label_id`: 音素序列标签(数值 id)
+- `phoneme_label_id_with_sil`: 音素序列标签（包含 sil/sp 等停顿符）
+"""
+class Dataset_LipsCFM_Phase2(Dataset):
+    """Dataset for training LipsCFM Phase 2 with condition caching.
+    
+    Reads from these following sources:
+    - `raw_dataset_path` (str): 
+        The root directory of the raw dataset, 
+        which contains the original audio files and their corresponding TextGrid alignments.
+        
+        This should contain the following structure:
+        ```
+        raw_dataset_path/
+            audios/
+                aligned/
+                ost/
+                vocals/
+                ins/
+            videos/
+            metadata.csv
+        ```
+        
+    - `flow_dataset_path` (str):
+        The root directory of the flow dataset,
+        which contains the semantic tokens, and the metadata.csv that links them.
+        
+        Includes a ``metadata.csv`` file with columns:
+        - ``prompt_audio_path`` : reference speaker audio
+        - ``out_pt``            : pre-computed S_infer .pt file  [1?, T_codes, 1024]
+        - ``out_wav``           : ground-truth target audio
+        - ``gen_error``         : non-empty rows are skipped
+        
+    - `lips_dataset_path` (str):
+        The root directory of the lips dataset,
+        which contains the data that lips training has used.
+
+        With following structrue:
+        ```
+        lips/
+            lips_roi/
+            *.csv
+        ```
+        A csv file in `lips/` should contain columns:
+        - `sample_id`
+    
+    
+    """
+    def __init__(
+        self,
+        flow_dataset_path: str,
+        mel_h,
+        preprocess,
+        sr_ref_16k: int = 16000,
+        split: str = "train",
+        split_ratio: float = 0.9,
+        seed: int = 2026,
+        max_ref_sec: float = 15.0,
+        max_gen_sec: float = 10.0,
+        max_code_len: int = 500,
+        cache_dir: Optional[str] = None,
+        cache_batch_size: int = 16,
+        tier_name: str = "phones",
+    ):
+        super().__init__()
+        self.flow_dataset_path = Path(flow_dataset_path)
+        self.tier_name = tier_name
