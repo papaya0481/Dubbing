@@ -50,12 +50,14 @@ class SemanticTransformer:
         verbose: bool = False,
         input_type: str = "cond",  # "semantic" (50 fps) or "cond" (mel fps)
         grid_sample_mode: str = "bilinear",
+        use_phone_lcs_within_word: bool = False,  # 单词内音素不一致时是否使用 LCS
     ) -> None:
         assert input_type in ("semantic", "cond"), f"Unknown input_type: {input_type!r}"
         self.device = device
         self.verbose = verbose
         self.input_type = input_type
         self.grid_sample_mode = grid_sample_mode
+        self.use_phone_lcs_within_word = use_phone_lcs_within_word
 
     # ------------------------------------------------------------------
     # 工具：提取有效 interval（排除静音标记）
@@ -245,19 +247,43 @@ class SemanticTransformer:
             if use_phones:
                 pg_src = phone_groups_src[idx]
                 pg_tgt = phone_groups_tgt[idx]
-                if len(pg_src) > 0 and len(pg_src) == len(pg_tgt):
-                    for p_src, p_tgt in zip(pg_src, pg_tgt):
-                        self._append_monotonic_anchor(
-                            src_anchors, tgt_anchors,
-                            p_src.start_time, p_tgt.start_time, eps=eps,
-                        )
-                        self._append_monotonic_anchor(
-                            src_anchors, tgt_anchors,
-                            p_src.end_time, p_tgt.end_time, eps=eps,
-                        )
-                    phones_aligned = True
+                if len(pg_src) > 0 and len(pg_tgt) > 0:
+                    if len(pg_src) == len(pg_tgt):
+                        # 音素数量一致，直接对齐
+                        for p_src, p_tgt in zip(pg_src, pg_tgt):
+                            self._append_monotonic_anchor(
+                                src_anchors, tgt_anchors,
+                                p_src.start_time, p_tgt.start_time, eps=eps,
+                            )
+                            self._append_monotonic_anchor(
+                                src_anchors, tgt_anchors,
+                                p_src.end_time, p_tgt.end_time, eps=eps,
+                            )
+                        phones_aligned = True
+                    elif self.use_phone_lcs_within_word:
+                        # 音素数量不一致，且开关开启：使用 LCS 对齐（原逻辑）
+                        matched_p_src, matched_p_tgt = self._align_intervals_lcs(pg_src, pg_tgt)
+                        if len(matched_p_src) > 0:
+                            if self.verbose:
+                                print(
+                                    f"[SemanticTransformer] word {idx} phone LCS: "
+                                    f"src={len(pg_src)} tgt={len(pg_tgt)} "
+                                    f"matched={len(matched_p_src)}"
+                                )
+                            for p_src, p_tgt in zip(matched_p_src, matched_p_tgt):
+                                self._append_monotonic_anchor(
+                                    src_anchors, tgt_anchors,
+                                    p_src.start_time, p_tgt.start_time, eps=eps,
+                                )
+                                self._append_monotonic_anchor(
+                                    src_anchors, tgt_anchors,
+                                    p_src.end_time, p_tgt.end_time, eps=eps,
+                                )
+                            phones_aligned = True
+                    # else: 音素数量不一致，且开关关闭：回退到单词级别（phones_aligned 保持 False）
 
             if not phones_aligned:
+                # 回退到单词级别对齐
                 self._append_monotonic_anchor(
                     src_anchors, tgt_anchors,
                     w_src.start_time, w_tgt.start_time, eps=eps,
