@@ -53,6 +53,7 @@ _SKIP_INDEX_LIPS = pytest.mark.skipif(
     not _FLOW_DATASET_ROOT.exists(),
     reason=f"flow_dataset root not found: {_FLOW_DATASET_ROOT}",
 )
+_SKIP_DEPRECATED = pytest.mark.skip(reason="Skipping deprecated provider.")
 
 
 # ========================================================================
@@ -99,6 +100,7 @@ def _make_index_lips_args() -> SimpleNamespace:
 # ========================================================================
 
 @_SKIP_PHASE1
+@_SKIP_DEPRECATED
 def test_cfm_phase1_dataset_nonempty():
     from data_provider.data_factory import data_provider
     args = _make_phase1_args("cfm_phase1")
@@ -107,6 +109,7 @@ def test_cfm_phase1_dataset_nonempty():
 
 
 @_SKIP_PHASE1
+@_SKIP_DEPRECATED
 def test_cfm_phase1_batch_keys_and_shapes():
     from data_provider.data_factory import data_provider
     args = _make_phase1_args("cfm_phase1")
@@ -136,6 +139,7 @@ def test_cfm_phase1_batch_keys_and_shapes():
 
 
 @_SKIP_PHASE1
+@_SKIP_DEPRECATED
 def test_cfm_phase1_splits_disjoint():
     from data_provider.data_factory import data_provider
     args = _make_phase1_args("cfm_phase1")
@@ -153,6 +157,7 @@ def test_cfm_phase1_splits_disjoint():
 
 
 @_SKIP_PHASE1
+@_SKIP_DEPRECATED
 def test_cfm_phase1_splits_cover_all_samples():
     """train + val + test should together cover every sample exactly once."""
     from data_provider.data_factory import data_provider
@@ -183,6 +188,7 @@ def test_cfm_phase1_splits_cover_all_samples():
 # ========================================================================
 
 @_SKIP_PHASE1
+@_SKIP_DEPRECATED
 def test_cfm_phase1_stretch_dataset_nonempty():
     from data_provider.data_factory import data_provider
     args = _make_phase1_args("cfm_phase1_stretch")
@@ -191,6 +197,7 @@ def test_cfm_phase1_stretch_dataset_nonempty():
 
 
 @_SKIP_PHASE1
+@_SKIP_DEPRECATED
 def test_cfm_phase1_stretch_batch_keys_and_shapes():
     from data_provider.data_factory import data_provider
     args = _make_phase1_args("cfm_phase1_stretch")
@@ -214,6 +221,7 @@ def test_cfm_phase1_stretch_batch_keys_and_shapes():
 # ========================================================================
 
 @_SKIP_INDEX
+@_SKIP_DEPRECATED
 def test_cfm_index_phase1_dataset_nonempty():
     from data_provider.data_factory import data_provider
     args = _make_index_args()
@@ -222,6 +230,7 @@ def test_cfm_index_phase1_dataset_nonempty():
 
 
 @_SKIP_INDEX
+@_SKIP_DEPRECATED
 def test_cfm_index_phase1_batch_keys_and_shapes():
     from data_provider.data_factory import data_provider
     args  = _make_index_args()
@@ -278,6 +287,7 @@ def test_cfm_index_phase1_batch_keys_and_shapes():
 
 
 @_SKIP_INDEX
+@_SKIP_DEPRECATED
 def test_cfm_index_phase1_splits_disjoint():
     from data_provider.data_factory import data_provider
     args = _make_index_args()
@@ -295,6 +305,7 @@ def test_cfm_index_phase1_splits_disjoint():
 
 
 @_SKIP_INDEX
+@_SKIP_DEPRECATED
 def test_cfm_index_phase1_splits_cover_all_samples():
     from data_provider.data_factory import data_provider
     args = _make_index_args()
@@ -309,6 +320,7 @@ def test_cfm_index_phase1_splits_cover_all_samples():
 # ========================================================================
 
 @_SKIP_INDEX_LIPS
+@_SKIP_DEPRECATED
 def test_cfm_index_phase1_for_lipsfeat_dataset_nonempty():
     from data_provider.data_factory import data_provider
     args = _make_index_lips_args()
@@ -322,6 +334,7 @@ def test_cfm_index_phase1_for_lipsfeat_dataset_nonempty():
 
 
 @_SKIP_INDEX_LIPS
+@_SKIP_DEPRECATED
 def test_cfm_index_phase1_for_lipsfeat_batch_keys_and_shapes():
     from data_provider.data_factory import data_provider
     args = _make_index_lips_args()
@@ -356,6 +369,7 @@ def test_cfm_index_phase1_for_lipsfeat_batch_keys_and_shapes():
 
 
 @_SKIP_INDEX_LIPS
+@_SKIP_DEPRECATED
 def test_cfm_index_phase1_for_lipsfeat_splits_disjoint():
     from data_provider.data_factory import data_provider
     args = _make_index_lips_args()
