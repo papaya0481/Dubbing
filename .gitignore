@@ -48,3 +48,13 @@ mel_convert/test/
 
 test_output/
 .pytest*
+
+# Version the checked-in dataset assets even though similar generated artifacts
+# are ignored elsewhere in the repo.
+!dataset/
+!dataset/**
+dataset/**/.git/
+dataset/**/.git.parent-disabled/
+dataset/**/__pycache__/
+dataset/**/*.pyc
+dataset/**/.DS_Store

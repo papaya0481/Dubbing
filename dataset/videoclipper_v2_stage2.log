@@ -1,0 +1,97 @@
+run3.sh Stage 1/2: Generate srt and timestamp
+============================================================
+Video Clipper V2
+Stage: 1, Language: en, Device: cuda
+Text Normalization: Disabled
+Using 4 GPU(s)
+============================================================
+
+Found 312 videos to process
+Limited to 5 samples for testing
+
+Started worker process 2806013 on GPU 0
+Started worker process 2806014 on GPU 1
+Started worker process 2806015 on GPU 2
+Started worker process 2806016 on GPU 3
+
+Processing:   0%|          | 0/5 [00:00<?, ?video/s][Worker-2806013] Warming up CUDA context...
+[Worker-2806013] CUDA initialized: Physical GPU 0 -> Logical cuda:0
+[Worker-2806013] GPU Name: NVIDIA RTX A5000
+[Worker-2806013] GPU Memory: 23.83 GB
+[Worker-2806013] cuDNN version: 90100
+[Worker-2806013] cuDNN enabled: True
+[Worker-2806013] Loading model on cuda:0 (physical GPU 0)
+[Worker-2806013] Pre-model check: CUDA available=True, device_count=1
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s][Worker-2806016] Warming up CUDA context...
+[Worker-2806016] CUDA initialized: Physical GPU 3 -> Logical cuda:0
+[Worker-2806016] GPU Name: NVIDIA RTX A5000
+[Worker-2806016] GPU Memory: 23.83 GB
+[Worker-2806016] cuDNN version: 90100
+[Worker-2806016] cuDNN enabled: True
+[Worker-2806016] Loading model on cuda:0 (physical GPU 3)
+[Worker-2806016] Pre-model check: CUDA available=True, device_count=1
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s][Worker-2806015] Warming up CUDA context...
+[Worker-2806015] CUDA initialized: Physical GPU 2 -> Logical cuda:0
+[Worker-2806015] GPU Name: NVIDIA RTX A5000
+[Worker-2806015] GPU Memory: 23.83 GB
+[Worker-2806015] cuDNN version: 90100
+[Worker-2806015] cuDNN enabled: True
+[Worker-2806015] Loading model on cuda:0 (physical GPU 2)
+[Worker-2806015] Pre-model check: CUDA available=True, device_count=1
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s][Worker-2806014] Warming up CUDA context...
+[Worker-2806014] CUDA initialized: Physical GPU 1 -> Logical cuda:0
+[Worker-2806014] GPU Name: NVIDIA RTX A5000
+[Worker-2806014] GPU Memory: 23.83 GB
+[Worker-2806014] cuDNN version: 90100
+[Worker-2806014] cuDNN enabled: True
+[Worker-2806014] Loading model on cuda:0 (physical GPU 1)
+[Worker-2806014] Pre-model check: CUDA available=True, device_count=1
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s]Loading checkpoint shards:  50%|█████     | 1/2 [00:00<00:00,  1.87it/s]Loading checkpoint shards:  50%|█████     | 1/2 [00:00<00:00,  1.77it/s]Loading checkpoint shards:  50%|█████     | 1/2 [00:00<00:00,  1.70it/s]
+Processing:   0%|          | 0/5 [00:09<?, ?video/s]
+
+
+⚠️  Interrupted by user. Terminating workers...
+Traceback (most recent call last):
+  File "/home/ruixin/workspace/dataset/seperate/video_clip/videoclipper_v2.py", line 856, in main
+    result = result_queue.get(timeout=1)
+  File "/data2/ruixin/miniconda3/envs/asr/lib/python3.10/multiprocessing/queues.py", line 113, in get
+    if not self._poll(timeout):
+  File "/data2/ruixin/miniconda3/envs/asr/lib/python3.10/multiprocessing/connection.py", line 257, in poll
+    return self._poll(timeout)
+  File "/data2/ruixin/miniconda3/envs/asr/lib/python3.10/multiprocessing/connection.py", line 424, in _poll
+    r = wait([self], timeout)
+  File "/data2/ruixin/miniconda3/envs/asr/lib/python3.10/multiprocessing/connection.py", line 931, in wait
+    ready = selector.select(timeout)
+  File "/data2/ruixin/miniconda3/envs/asr/lib/python3.10/selectors.py", line 416, in select
+    fd_event_list = self._selector.poll(timeout)
+KeyboardInterrupt
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/ruixin/workspace/dataset/seperate/video_clip/videoclipper_v2.py", line 931, in <module>
+    main()
+  File "/home/ruixin/workspace/dataset/seperate/video_clip/videoclipper_v2.py", line 878, in main
+    p.join(timeout=5)
+  File "/data2/ruixin/miniconda3/envs/asr/lib/python3.10/multiprocessing/process.py", line 149, in join
+    res = self._popen.wait(timeout)
+  File "/data2/ruixin/miniconda3/envs/asr/lib/python3.10/multiprocessing/popen_fork.py", line 40, in wait
+    if not wait([self.sentinel], timeout):
+  File "/data2/ruixin/miniconda3/envs/asr/lib/python3.10/multiprocessing/connection.py", line 931, in wait
+    ready = selector.select(timeout)
+  File "/data2/ruixin/miniconda3/envs/asr/lib/python3.10/selectors.py", line 416, in select
+    fd_event_list = self._selector.poll(timeout)
+KeyboardInterrupt
+Exception ignored in atexit callback: <function _exit_function at 0x7f49683813f0>
+Traceback (most recent call last):
+  File "/data2/ruixin/miniconda3/envs/asr/lib/python3.10/multiprocessing/util.py", line 357, in _exit_function
+    p.join()
+  File "/data2/ruixin/miniconda3/envs/asr/lib/python3.10/multiprocessing/process.py", line 149, in join
+    res = self._popen.wait(timeout)
+  File "/data2/ruixin/miniconda3/envs/asr/lib/python3.10/multiprocessing/popen_fork.py", line 43, in wait
+    return self.poll(os.WNOHANG if timeout == 0.0 else 0)
+  File "/data2/ruixin/miniconda3/envs/asr/lib/python3.10/multiprocessing/popen_fork.py", line 27, in poll
+    pid, sts = os.waitpid(self.pid, flag)
+KeyboardInterrupt: 
+/data2/ruixin/miniconda3/envs/asr/lib/python3.10/multiprocessing/resource_tracker.py:224: UserWarning: resource_tracker: There appear to be 4 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
