@@ -52,7 +52,19 @@ dataset/
 
 ## MELD Raw
 
-Use this when you already have `MELD.Raw` with the official split folders and the MELD `*_sent_emo.csv` files.
+Use this when starting from the official MELD download. The expected scratch format is the unpacked `MELD.Raw` directory plus MELD split CSVs. This repo already keeps the split CSVs under `dataset/V2C/MELD/`.
+
+```text
+MELD.Raw/
+|-- dev/dev_splits_complete/dia*_utt*.mp4
+|-- train/train_splits/dia*_utt*.mp4
+`-- test/output_repeated_splits_test/dia*_utt*.mp4
+
+dataset/V2C/MELD/
+|-- dev_sent_emo.csv
+|-- train_sent_emo.csv
+`-- test_sent_emo.csv
+```
 
 ```bash
 python dataset/V2C/MELD/process_meld_raw.py \
@@ -61,15 +73,6 @@ python dataset/V2C/MELD/process_meld_raw.py \
     --output-dir /path/to/MELD_raw \
     --model large-v3 \
     --language en
-```
-
-The script reads:
-
-```text
-MELD.Raw/
-|-- dev/dev_splits_complete/*.mp4
-|-- train/train_splits/*.mp4
-`-- test/output_repeated_splits_test/*.mp4
 ```
 
 It writes `videos/`, `audios/ost/`, and `metadata.csv`. Each row includes split, dialogue id, utterance id, transcript, speaker, emotion, Whisper ASR text, and WER.
@@ -85,6 +88,22 @@ Edit the output path inside the wrapper before using it.
 ## MELD Clips
 
 MELD clips are multi-utterance samples built from consecutive utterances by the same speaker. The builder keeps length-2 or length-3 windows that contain at least one emotion change.
+
+Starting from scratch, you need:
+
+- MELD `*_sent_emo.csv` files with `Season`, `Episode`, `Dialogue_ID`, `Utterance_ID`, `Speaker`, `Emotion`, `Utterance`, `StartTime`, and `EndTime`.
+- Full Friends episode videos.
+- An episode map CSV that tells the script where each episode video lives.
+
+Expected episode map format:
+
+```csv
+Season,Episode,Filepath
+3,12,season_03/episode_12.mp4
+8,21,/absolute/path/to/S08E21.mp4
+```
+
+Relative `Filepath` values are resolved against `--map-root`.
 
 First generate sample CSVs:
 
@@ -106,8 +125,6 @@ python extract_clips.py \
     --asr-check
 ```
 
-`friends_episode_map.csv` must contain `Season`, `Episode`, and `Filepath`. Relative `Filepath` values are resolved against `--map-root`.
-
 The output layout is the same raw contract:
 
 ```text
@@ -121,24 +138,59 @@ MELD_clips/
 
 V2C raw clips are cut one subtitle row at a time from movie files.
 
-Required inputs:
+Starting from scratch, download or prepare:
 
-- `movie_video_map.csv`: columns `movie`, `filename`, `checked`, and optional `time_offset`
-- `movie_speaker_emotion.csv`: columns such as `movie`, `speaker`, `utterance`, `emotion`, `emotion_id`, `start_time`, `end_time`, `srt_index`
-- a video root containing the movie files named by `filename`
+- The V2C animation movie videos.
+- SRT subtitle files named by movie, for example `Brave.srt`.
+- V2C annotation JSON files: `movie_speaker_id.json` and `emotions.json`.
+
+The helper `V2C/DataConstruction/build_speaker_emotion_csv.py` converts the JSON + SRT files into `movie_speaker_emotion.csv`:
+
+```bash
+cd dataset/V2C
+python V2C/DataConstruction/build_speaker_emotion_csv.py \
+    --movie-speaker-json V2C/DataConstruction/movie_speaker_id.json \
+    --emotions-json V2C/DataConstruction/emotions.json \
+    --srt-dir /path/to/v2c_srt_files \
+    --output V2C/DataConstruction/movie_speaker_emotion.csv
+```
+
+Expected `movie_speaker_emotion.csv` format:
+
+```csv
+movie,speaker,utterance,srt_index,emotion,emotion_id,start_time,end_time
+Brave,LordDingwall,Men: Dingwall!,0280,neutral,4,"00:19:46,602","00:19:48,593"
+```
+
+You also need a `movie_video_map.csv` that points each movie name to the downloaded movie file and records the checked timing offset:
+
+```csv
+movie,filename,time_offset,srt_file,checked
+Brave,Brave.mp4,0.0,Brave.srt,True
+```
+
+`filename` is resolved relative to `--video-root` unless it is absolute. Set `checked=True` only after confirming the subtitle/video offset. Use `--movie <name>` for that one-movie timing check before running the full batch.
 
 Example:
 
 ```bash
 cd dataset/V2C
+
+# First check one movie and tune its time_offset in movie_video_map.csv.
+python build_movie_origin.py \
+    --movie-map V2C/DataConstruction/movie_video_map.csv \
+    --utterances V2C/DataConstruction/movie_speaker_emotion.csv \
+    --video-root /path/to/v2c_movies \
+    --output-root /path/to/v2c_origin_debug \
+    --movie Brave
+
+# Then run the checked movies.
 python build_movie_origin.py \
     --movie-map V2C/DataConstruction/movie_video_map.csv \
     --utterances V2C/DataConstruction/movie_speaker_emotion.csv \
     --video-root /path/to/v2c_movies \
     --output-root /path/to/v2c_origin
 ```
-
-Use `--movie <name>` for offset debugging on one movie. After checking timing, set that movie's `checked` column to `True` and run the full batch.
 
 The wrapper is:
 
@@ -148,7 +200,13 @@ bash dataset/V2C/make_origin.sh
 
 ## V2C Clips
 
-V2C clips combine consecutive utterances from the same speaker. Samples must contain an emotion change. This is the direct V2C clips dataset.
+V2C clips combine consecutive utterances from the same speaker. Samples must contain an emotion change. This uses the same scratch inputs as V2C raw:
+
+- `movie_video_map.csv`
+- `movie_speaker_emotion.csv`
+- downloaded movie videos under `--video-root`
+
+If you do not already have `movie_speaker_emotion.csv`, create it with `V2C/DataConstruction/build_speaker_emotion_csv.py` as shown in the V2C raw section.
 
 ```bash
 cd dataset/V2C
@@ -188,7 +246,84 @@ Use `--skip-asr` to only merge files and metadata. The script writes a merged `m
 
 CHEM processing currently targets a raw-style dataset. A clips dataset is not implemented.
 
-For already clipped CHEM videos, use:
+There are two supported scratch routes.
+
+### Route A: long raw videos -> clipped CHEM videos -> CHEM raw
+
+Use this when the downloaded CHEM data is long videos. The expected scratch layout is any directory tree containing `.mp4` files. Optional clean vocal or instrumental tracks can be placed beside each video:
+
+```text
+chem_download/
+`-- show_or_movie_name/
+    |-- episode01.mp4
+    |-- episode01.wav                  # optional raw audio
+    |-- vocals/episode01.wav           # optional clean vocal track
+    `-- instrumental/episode01.wav     # optional instrumental track
+```
+
+First run the VideoClipper stage to produce the intermediate directory that later appears as `/path/to/chem_processed/videos`. From the project root:
+
+```bash
+cd dataset/seperate/video_clip
+
+# Stage 1: ASR/VAD/sentence state.
+python videoclipper_v2.py \
+    --stage 1 \
+    --file /path/to/chem_download \
+    --output_dir /path/to/chem_processed/videos \
+    --lang en \
+    --device cuda \
+    --skip_processed
+
+# Stage 2: cut sentence-level clips and write metadata.csv + clip_wer.csv.
+python videoclipper_v2.py \
+    --stage 2 \
+    --file /path/to/chem_download \
+    --output_dir /path/to/chem_processed/videos \
+    --lang en \
+    --device cpu \
+    --skip_processed
+```
+
+For paired adjacent-sentence clips, keep the stage-1 state and final paired output in separate directories:
+
+```bash
+cd dataset/seperate/video_clip
+
+python videoclipper_v2.py \
+    --stage 1 \
+    --file /path/to/chem_download \
+    --output_dir /path/to/chem_stage1 \
+    --lang en \
+    --device cuda \
+    --skip_processed
+
+python videoclipper_v2_pair.py \
+    --file /path/to/chem_download \
+    --state_dir /path/to/chem_stage1 \
+    --output_dir /path/to/chem_processed/videos \
+    --lang en \
+    --device cuda \
+    --pause_threshold 1.0 \
+    --yes
+```
+
+The intermediate directory consumed by `merge_to_raw.py` should look like this:
+
+```text
+chem_processed/videos/
+`-- <source_folder_or_video>/<video_id>/
+    |-- metadata.csv
+    |-- clipped/
+    |   |-- *.mp4
+    |   |-- *.wav
+    |   `-- *.srt
+    |-- vocals/             # optional, when vocal tracks were available
+    |-- instrumental/       # optional
+    `-- clip_wer.csv        # written by VideoClipper
+```
+
+Then return to the project root and merge the clipped CHEM folders into the project raw layout:
 
 ```bash
 cd dataset/V2C/chem
@@ -200,19 +335,7 @@ python merge_to_raw.py \
     --workers 4
 ```
 
-Expected input:
-
-```text
-chem_processed/videos/
-`-- <video_id>/
-    |-- metadata.csv
-    |-- clipped/
-    |   |-- *.mp4
-    |   `-- *.wav
-    `-- clip_wer.csv or wer.csv   # optional
-```
-
-The script copies clips into the raw layout, normalizes utterances when WeTextProcessing is available, filters rows containing `+` or `-`, filters videos where face detection fails, and writes:
+`merge_to_raw.py` copies clips into the raw layout, normalizes utterances when WeTextProcessing is available, filters rows containing `+` or `-`, filters videos where face detection fails, and writes:
 
 ```text
 chem_raw/
@@ -223,19 +346,52 @@ chem_raw/
 `-- audios/ost/
 ```
 
-There is also a simpler pipeline for flat or nested input videos:
+### Route B: already clipped videos -> CHEM raw
+
+Use this when the downloaded CHEM data is already segmented into clips and does not need VideoClipper. `pipeline.py` accepts any of these scratch layouts:
+
+```text
+chem_clips_download/
+|-- videos/*.mp4
+
+chem_clips_download/
+|-- <video_id>/cut-*.mp4
+
+chem_clips_download/
+`-- *.mp4
+```
+
+Run:
 
 ```bash
+cd dataset/V2C/chem
 python pipeline.py \
-    --intervals-dir /path/to/input_videos \
+    --intervals-dir /path/to/chem_clips_download \
     --output-dir /path/to/chem_raw \
     --whisper-model large \
     --language en
 ```
 
+This route treats each input clip as one sample, extracts 16 kHz mono audio, transcribes it with Whisper, copies videos into `videos/`, and writes `metadata.csv`. The transcript column is named `Transcription`; if you feed this output into a step that specifically requires `Utterance`, copy or rename `Transcription` to `Utterance` first.
+
 ## Long-Video Pipeline
 
 `dataset/seperate/` is a vendored FunCineForge-style pipeline for building datasets from long videos. It can normalize and trim raw videos, separate vocals, segment videos, run speaker diarization, apply multimodal correction, and build final metadata. Start from [`seperate/README.md`](seperate/README.md) when using this path.
+
+Starting from scratch, place downloaded videos in language-specific roots. The pipeline expects one directory per film/show, with episode videos inside. Optional `.wav`, `vocals/`, and `instrumental/` files can be present if you already have them; otherwise the pipeline can extract audio and run separation.
+
+```text
+datasets/raw_zh/
+`-- film_name/
+    |-- 01.mp4
+    |-- 02.mp4
+    |-- vocals/01.wav          # optional
+    `-- instrumental/01.wav    # optional
+
+datasets/raw_en/
+`-- show_name/
+    `-- episode01.mp4
+```
 
 The high-level flow is:
 
