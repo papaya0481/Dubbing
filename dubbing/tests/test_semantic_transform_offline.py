@@ -42,7 +42,7 @@ sys.path.insert(0, str(project_root / "dubbing"))
 
 from modules.mel_strech.meldataset import get_mel_spectrogram
 from modules.semantic_stretch.semantic_transform import SemanticTransformer
-from lips.data.phoneme_vocab import PhonemeVocab
+from modules.lips.data.phoneme_vocab import PhonemeVocab
 from omegaconf import OmegaConf
 from indextts.s2mel.modules.commons import AttrDict, MyModel, load_checkpoint2
 from logger import get_logger
