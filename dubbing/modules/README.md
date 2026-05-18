@@ -6,7 +6,7 @@ Model implementations and processing utilities used by the training package. The
 
 ### cfm/
 
-Original LipSyncCFM model — a DiT-based continuous flow matching model for mel spectrogram generation conditioned on phonemes and stretched mel input.
+Original LipSyncCFM model — a DiT-based Conditioned Flow Matching model for mel spectrogram generation conditioned on phonemes and stretched mel input.
 
 | File | Purpose |
 |---|---|

@@ -6,7 +6,7 @@ At a high level, the repository combines three ideas:
 
 1. **Alignment**: Montreal Forced Aligner (MFA) produces phoneme-level TextGrid files for speech.
 2. **Timing conversion**: mel spectrograms or semantic features are stretched from one timing pattern to another.
-3. **Generation**: continuous flow matching (CFM) models learn to turn those conditions into clean target mel spectrograms, which are then vocoded back to waveform audio.
+3. **Generation**: Conditioned Flow Matching (CFM) models learn to turn those conditions into clean target mel spectrograms, which are then vocoded back to waveform audio.
 
 ## Overview
 
@@ -95,3 +95,64 @@ TEST_GPU=0 conda run -n dubbing python -m pytest dubbing/tests/ -xvs
 - **[index-tts2/](index-tts2/README.md)** — reference TTS engine, quickstart, Python API
 - **[mel_convert/](mel_convert/README.md)** — data generation pipeline
 - **[CLAUDE.md](CLAUDE.md)** — assistant-oriented development notes
+
+## Datasets
+
+The released datasets are hosted on Hugging Face:
+
+- [MELD raw dataset](https://huggingface.co/datasets/BigfufuOuO/chem_raw). `raw` keeps the original sample content but rewrites the directory layout to fit this project's pipeline.
+- [MELD clips dataset](https://huggingface.co/datasets/BigfufuOuO/meld_clips_v3). `clips` contains concatenated and cleaned samples that can be used directly as training sources.
+- [Chem raw dataset](https://huggingface.co/datasets/BigfufuOuO/chem_raw).
+- **Chem clips dataset**. Not implemented; it may not be necessary because the original dataset has limited emotion diversity.
+- [V2C raw dataset](https://huggingface.co/datasets/BigfufuOuO/V2C_raw).
+- [V2C clips dataset](https://huggingface.co/datasets/BigfufuOuO/V2C_clips_v3).
+
+> **Warning**
+> The datasets **V2C raw**, **V2C clips**, and **MELD clips** are not publicly available yet. The Hugging Face datasets are private and require access approval.
+
+### Make datasets
+
+Dataset-making scripts live under [`dataset/`](dataset/README.md). They first convert each source corpus into the project raw layout:
+
+```text
+<dataset_root>/
+|-- metadata.csv
+|-- videos/
+`-- audios/
+    `-- ost/
+```
+
+`metadata.csv` should contain the transcript (`Utterance` or `Text`) and audio/video paths. This layout is the input for later steps such as vocal separation, MFA alignment, semantic generation, and CFM training.
+
+Common entry points:
+
+```bash
+# MELD raw: copy MELD utterance clips, extract 16 kHz wav, write metadata.csv
+bash dataset/V2C/MELD/make_raw.sh
+
+# MELD clips: build 2-3 utterance emotion-change samples, then cut Friends episodes
+cd dataset/V2C/MELD
+python extract_samples.py --input train_sent_emo.csv --output train.csv --prefer-longer
+bash make_clips.sh
+
+# V2C raw and V2C clips
+cd dataset/V2C
+bash make_origin.sh
+bash make.sh
+
+# CHEM raw: merge pre-clipped CHEM videos into the same raw layout
+cd dataset/V2C/chem
+python merge_to_raw.py --input-dir /path/to/chem_processed/videos --output-dir /path/to/chem_raw
+```
+
+After a raw dataset exists, run optional alignment and flow-data generation:
+
+```bash
+# Generate TextGrid alignments under audios/aligned/
+python dataset/mfa_align_enhanced.py /path/to/raw_dataset --clean --single-speaker
+
+# Generate semantic CFM metadata and features consumed by cfm_index_phase1
+bash mel_convert/generate/gen_semantic.sh
+```
+
+See [`dataset/README.md`](dataset/README.md) for required input files, output structures, and script-specific notes.
